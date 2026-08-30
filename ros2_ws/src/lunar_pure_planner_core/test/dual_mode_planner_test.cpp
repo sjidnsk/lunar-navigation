@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -17,6 +18,7 @@
 #include "hierarchical/reference_composer.hpp"
 #include "legged/anytime_legged_planner.hpp"
 #include "lunar_pure_planner_core/planner.hpp"
+#include "shared/active_planner_cache.hpp"
 #include "shared/local_terrain_projection.hpp"
 #include "shared/map_snapshot.hpp"
 
@@ -129,12 +131,14 @@ class ManualClock final {
 
 [[nodiscard]] std::shared_ptr<const TraversabilitySnapshot> V1Snapshot(
     const GridMap& global, const GridMap& local,
-    const RigidTransform& map_from_odom) {
+    const RigidTransform& map_from_odom,
+    const double maximum_slope_rad = 1.0,
+    const double inflation_radius_m = 0.0) {
   PersistentTraversabilityMap map(TraversabilityProfile{
       .global_occupancy_threshold = 50,
       .local_occupancy_threshold = 0.5,
-      .maximum_slope_rad = 1.0,
-      .inflation_radius_m = 0.0,
+      .maximum_slope_rad = maximum_slope_rad,
+      .inflation_radius_m = inflation_radius_m,
   });
   EXPECT_TRUE(map.UpdateGlobal(global).accepted);
   EXPECT_TRUE(map.UpdateLocal(local, map_from_odom, 1U).accepted);
@@ -363,6 +367,54 @@ TEST(DualModePlanner,
   EXPECT_EQ(result.reason_code, "INVALID_INPUT");
   EXPECT_EQ(backends.global_calls, 0U);
   EXPECT_EQ(backends.local_calls, 0U);
+}
+
+TEST(DualModePlanner,
+     DefaultLeggedGridV1MissingSnapshotFailsWithoutCallingLegacyBackends) {
+  CountingBackends backends;
+  PlanningRequest input =
+      Request(EnvironmentMode::kLunarSurface, backends.clock);
+  input.current_state = LeggedState{};
+  input.capability = LeggedCapability{};
+
+  const PlanningResult result = backends.planner.Plan(input);
+
+  EXPECT_EQ(result.status, PlanningStatus::kInvalidInput);
+  EXPECT_EQ(result.reason_code, "INVALID_INPUT");
+  EXPECT_EQ(backends.global_calls, 0U);
+  EXPECT_EQ(backends.local_calls, 0U);
+}
+
+TEST(DualModePlanner, ExplicitLeggedLegacyOccupancyUsesInjectedBackends) {
+  ManualClock clock;
+  PlanningRequest input = Request(EnvironmentMode::kLunarSurface, clock);
+  input.current_state = LeggedState{};
+  input.capability = LeggedCapability{};
+  input.config.legged_global_mode = LeggedGlobalMode::kLegacyOccupancy;
+  std::size_t global_calls{};
+  std::size_t local_calls{};
+  Planner planner(PlannerBackends{
+      .global = [&](const PlanningRequest&, SearchControl) {
+        ++global_calls;
+        return Route();
+      },
+      .local = [&](const PlanningRequest&, const LocalGoalSet&, SearchControl) {
+        ++local_calls;
+        return LocalStageResult{
+            .status = LocalPlanStatus::kSolved,
+            .data = TrajectoryReference{
+                .semantics = TrajectorySemantics::kLeggedBodyReference,
+                .points = {{.pose = {}}},
+            },
+        };
+      },
+  });
+
+  const PlanningResult result = planner.Plan(input);
+
+  EXPECT_EQ(result.status, PlanningStatus::kSuccess) << result.reason_code;
+  EXPECT_EQ(global_calls, 1U);
+  EXPECT_EQ(local_calls, 1U);
 }
 
 TEST(DualModePlanner,
@@ -964,6 +1016,12 @@ TEST(DualModePlanner, IgnoresPointGoalZIncludingNan) {
       input.capability = RealHopperCapability();
       break;
   }
+  if (platform == PlatformType::kLegged &&
+      mode == EnvironmentMode::kLunarSurface) {
+    input.world.traversability_snapshot = V1Snapshot(
+        *input.world.global_map, input.world.local_map,
+        input.world.map_from_odom, 0.6, 0.0);
+  }
   return input;
 }
 
@@ -1163,6 +1221,93 @@ void SetCacheableSequences(PlanningRequest& input) {
   input.world.local_map_sequence = 12U;
   input.world.odometry_sequence = 13U;
   input.world.tf_sequence = 14U;
+}
+
+TEST(DualModePlanner,
+     DefaultLeggedGridV1UsesExistingLocalPlannerAndWarmsGlobalCaches) {
+  Planner planner;
+  PlanningRequest input =
+      RealRequest(PlatformType::kLegged, EnvironmentMode::kLunarSurface);
+  SetCacheableSequences(input);
+
+  const PlanningResult cold = planner.Plan(input);
+  const PlanningResult warm = planner.Plan(input);
+
+  ASSERT_EQ(cold.status, PlanningStatus::kSuccess) << cold.reason_code;
+  ASSERT_EQ(warm.status, PlanningStatus::kSuccess) << warm.reason_code;
+  ASSERT_TRUE(warm.reference.has_value());
+  const auto* trajectory =
+      std::get_if<TrajectoryReference>(&warm.reference->data);
+  ASSERT_NE(trajectory, nullptr);
+  EXPECT_EQ(trajectory->semantics,
+            TrajectorySemantics::kLeggedBodyReference);
+  EXPECT_FALSE(cold.global_projection_cache_hit);
+  EXPECT_FALSE(cold.global_route_cache_hit);
+  EXPECT_TRUE(warm.global_projection_cache_hit);
+  EXPECT_TRUE(warm.global_route_cache_hit);
+}
+
+TEST(DualModePlanner, LeggedGridV1GlobalRouteAvoidsLocalSlopeBarrier) {
+  PlanningRequest input =
+      RealRequest(PlatformType::kLegged, EnvironmentMode::kLunarSurface);
+  input.world.global_map->height = 8U;
+  std::get<std::vector<std::int8_t>>(
+      input.world.global_map->layers.at("occupancy").values)
+      .resize(input.world.global_map->width * input.world.global_map->height,
+              std::int8_t{0});
+  input.world.local_map.height = 8U;
+  std::get<std::vector<float>>(
+      input.world.local_map.layers.at("occupancy").values)
+      .resize(input.world.local_map.width * input.world.local_map.height,
+              0.0F);
+  auto& elevation = std::get<std::vector<float>>(
+      input.world.local_map.layers.at("elevation").values);
+  elevation.assign(input.world.local_map.width * input.world.local_map.height,
+                   4.25F);
+  auto& state = std::get<LeggedState>(input.current_state);
+  state.body_pose.position_m = {.x = 1.5, .y = 3.5, .z = 4.25};
+  input.goal_map = PointTarget(8.5, 3.5);
+  elevation[3U * input.world.local_map.width + 3U] = 10.0F;
+  input.world.traversability_snapshot = V1Snapshot(
+      *input.world.global_map, input.world.local_map,
+      input.world.map_from_odom, 0.6, 0.0);
+  shared::ActivePlannerCache cache;
+
+  const GlobalStageResult result = hierarchical::PlanSurfaceGlobal(
+      input, SearchControl{}, cache);
+
+  ASSERT_TRUE(result.route.has_value()) << result.reason_code;
+  EXPECT_TRUE(std::any_of(
+      result.route->poses_map.begin(), result.route->poses_map.end(),
+      [](const Pose3& pose) {
+        return std::abs(pose.position_m.y - 3.5) > 0.25;
+      }));
+}
+
+TEST(DualModePlanner, LeggedSurfaceLocalGoalsUseThreeMeterHorizon) {
+  PlanningRequest input =
+      RealRequest(PlatformType::kLegged, EnvironmentMode::kLunarSurface);
+  input.goal_map = PointTarget(8.0, 1.0);
+  const GlobalRoute route{
+      .poses_map = {
+          {.position_m = {.x = 1.0, .y = 1.0}},
+          {.position_m = {.x = 5.0, .y = 1.0}},
+          {.position_m = {.x = 8.0, .y = 1.0}},
+      },
+  };
+
+  const auto selected =
+      hierarchical::SelectSurfaceLocalGoals(input, route, SearchControl{});
+
+  ASSERT_TRUE(selected.ok()) << selected.reason_code;
+  double maximum_forward_x = -std::numeric_limits<double>::infinity();
+  for (const GoalRegion& goal : selected.goals->goals_odom) {
+    const auto* point = std::get_if<PointGoal>(&goal.target);
+    ASSERT_NE(point, nullptr);
+    maximum_forward_x = std::max(maximum_forward_x, point->position_m.x);
+    EXPECT_LE(point->position_m.x, 4.5 + 1.0e-9);
+  }
+  EXPECT_GE(maximum_forward_x, 3.5 - 1.0e-9);
 }
 
 void ExpectEveryCacheMiss(const PlanningResult& result) {
@@ -1389,6 +1534,10 @@ TEST(DualModePlanner,
       ManualClock clock;
       PlanningRequest input = Request(mode, clock);
       SetPlatform(input, platform);
+      if (platform == PlatformType::kLegged) {
+        input.config.legged_global_mode =
+            LeggedGlobalMode::kLegacyOccupancy;
+      }
       input.world.map_from_odom = NonUnitMapFromOdom();
       input.goal_map = PointTarget(9.0, -1.0);
       input.goal_map.yaw_rad = std::nullopt;

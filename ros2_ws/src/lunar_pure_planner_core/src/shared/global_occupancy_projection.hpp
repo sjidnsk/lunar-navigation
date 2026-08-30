@@ -10,6 +10,10 @@
 #include "lunar_pure_planner_core/search_control.hpp"
 #include "shared/map_snapshot.hpp"
 
+namespace lunar::pure_planning {
+class TraversabilitySnapshot;
+}
+
 namespace lunar::pure_planning::shared {
 
 struct GlobalOccupancyProjectionBuildResult;
@@ -59,6 +63,11 @@ BuildGlobalOccupancyProjection(std::shared_ptr<const MapSnapshot> map,
 BuildInflatedGlobalOccupancyProjection(
     std::shared_ptr<const MapSnapshot> map,
     std::int32_t obstacle_threshold_percent, double inflation_m,
+    SearchControl control = {});
+
+[[nodiscard]] GlobalOccupancyProjectionBuildResult
+BuildLeggedTraversabilityProjection(
+    const lunar::pure_planning::TraversabilitySnapshot& snapshot,
     SearchControl control = {});
 
 }  // namespace lunar::pure_planning::shared

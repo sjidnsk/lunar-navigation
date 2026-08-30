@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 
 #include "lunar_pure_planner_core/search_control.hpp"
+#include "lunar_pure_planner_core/traversability_map.hpp"
 #include "shared/global_occupancy_projection.hpp"
 #include "shared/map_snapshot.hpp"
 
@@ -130,6 +131,51 @@ TEST(GlobalOccupancyProjection, InflatesByStrictOccupiedCellAreaDistance) {
   EXPECT_TRUE(equality.projection->View().HardFeasible({.x = 3, .y = 2}));
   EXPECT_FLOAT_EQ(inflated.projection->View().ClearanceMeters({.x = 3, .y = 2}),
                   0.5F);
+}
+
+TEST(GlobalOccupancyProjection,
+     BuildsLeggedProjectionFromRawSnapshotAndInflatesExactlyOnce) {
+  constexpr std::size_t kWidth = 5U;
+  GridMap global{
+      .frame_id = "map",
+      .width = kWidth,
+      .height = kWidth,
+      .resolution_m = 1.0,
+      .layers = {{"occupancy", GridLayer{.values =
+                              std::vector<std::int8_t>(kWidth * kWidth, 0)}}},
+  };
+  std::vector<float> local_occupancy(kWidth * kWidth, 0.0F);
+  local_occupancy[2U * kWidth + 2U] = 0.9F;
+  GridMap local{
+      .frame_id = "odom",
+      .width = kWidth,
+      .height = kWidth,
+      .resolution_m = 1.0,
+      .layers = {
+          {"occupancy", GridLayer{.values = std::move(local_occupancy)}},
+          {"elevation", GridLayer{.values =
+                              std::vector<float>(kWidth * kWidth, 0.0F)}},
+      },
+  };
+  PersistentTraversabilityMap map(TraversabilityProfile{
+      .global_occupancy_threshold = 50,
+      .local_occupancy_threshold = 0.5,
+      .maximum_slope_rad = 0.6,
+      .inflation_radius_m = 0.6,
+  });
+  ASSERT_TRUE(map.UpdateGlobal(global).accepted);
+  ASSERT_TRUE(map.UpdateLocal(
+      local,
+      RigidTransform{.parent_frame = "map", .child_frame = "odom"}, 1U)
+                  .accepted);
+
+  const auto result = BuildLeggedTraversabilityProjection(*map.Capture());
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  const auto view = result.projection->View();
+  EXPECT_FALSE(view.HardFeasible({.x = 2, .y = 2}));
+  EXPECT_FALSE(view.HardFeasible({.x = 3, .y = 2}));
+  EXPECT_TRUE(view.HardFeasible({.x = 4, .y = 2}));
 }
 
 TEST(GlobalOccupancyProjection, RejectsInvalidInflationDistance) {

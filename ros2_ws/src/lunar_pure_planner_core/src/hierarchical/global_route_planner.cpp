@@ -147,34 +147,53 @@ GlobalStageResult PlanSurfaceGlobal(const PlanningRequest& input,
   if (!input.world.global_map.has_value()) {
     return Failure("INVALID_INPUT");
   }
-  const auto map = cache.global_snapshot().GetOrBuild(
-      shared::MakeGlobalSnapshotCacheKey(input.world.global_map_sequence),
-      control, [&](const SearchControl& build_control) {
-        auto built = shared::MapSnapshot::Create(
-            *input.world.global_map, shared::MapContract::kGlobalOccupancy,
-            build_control);
-        return shared::ImmutableCacheBuildResult<shared::MapSnapshot>{
-            .value = std::move(built.snapshot),
-            .reason_code = std::move(built.reason_code),
-        };
-      });
-  if (!map.ok()) {
-    return Failure(map.reason_code == "TIMEOUT" ||
-                           map.reason_code == "REQUEST_CANCELED"
-                       ? map.reason_code
-                       : "INVALID_INPUT");
+  const bool use_legged_grid_v1 =
+      std::holds_alternative<LeggedCapability>(input.capability) &&
+      input.config.legged_global_mode ==
+          LeggedGlobalMode::kGridTraversabilityV1;
+  shared::ImmutableCacheResult<shared::MapSnapshot> map;
+  if (!use_legged_grid_v1) {
+    map = cache.global_snapshot().GetOrBuild(
+        shared::MakeGlobalSnapshotCacheKey(input.world.global_map_sequence),
+        control, [&](const SearchControl& build_control) {
+          auto built = shared::MapSnapshot::Create(
+              *input.world.global_map, shared::MapContract::kGlobalOccupancy,
+              build_control);
+          return shared::ImmutableCacheBuildResult<shared::MapSnapshot>{
+              .value = std::move(built.snapshot),
+              .reason_code = std::move(built.reason_code),
+          };
+        });
+    if (!map.ok()) {
+      return Failure(map.reason_code == "TIMEOUT" ||
+                             map.reason_code == "REQUEST_CANCELED"
+                         ? map.reason_code
+                         : "INVALID_INPUT");
+    }
+  } else if (!input.world.traversability_snapshot ||
+             !input.world.traversability_snapshot->valid()) {
+    return Failure("INVALID_INPUT");
   }
   const std::uint64_t capability_fingerprint =
       shared::StableCapabilityFingerprint(input.capability);
+  const auto projection_key = use_legged_grid_v1
+      ? shared::MakeLeggedTraversabilityProjectionCacheKey(
+            input.world.traversability_snapshot->revision(),
+            input.world.traversability_snapshot->profile_hash(),
+            capability_fingerprint)
+      : shared::MakeGlobalProjectionCacheKey(
+            input.world.global_map_sequence,
+            input.config.global_occupancy_threshold, inflation_m,
+            capability_fingerprint);
   const auto projection = cache.global_projection().GetOrBuild(
-      shared::MakeGlobalProjectionCacheKey(
-          input.world.global_map_sequence,
-          input.config.global_occupancy_threshold, inflation_m,
-          capability_fingerprint),
+      projection_key,
       control, [&](const SearchControl& build_control) {
-        auto built = shared::BuildInflatedGlobalOccupancyProjection(
-            map.value, input.config.global_occupancy_threshold, inflation_m,
-            build_control);
+        auto built = use_legged_grid_v1
+            ? shared::BuildLeggedTraversabilityProjection(
+                  *input.world.traversability_snapshot, build_control)
+            : shared::BuildInflatedGlobalOccupancyProjection(
+                  map.value, input.config.global_occupancy_threshold,
+                  inflation_m, build_control);
         return shared::ImmutableCacheBuildResult<
             shared::GlobalOccupancyProjection>{
             .value = !built.projection.has_value()
@@ -191,12 +210,16 @@ GlobalStageResult PlanSurfaceGlobal(const PlanningRequest& input,
                         projection.reason_code == "REQUEST_CANCELED"
                     ? projection.reason_code
                     : "INVALID_INPUT");
-    failure.snapshot_cache_hit = map.cache_hit;
+    failure.snapshot_cache_hit = !use_legged_grid_v1 && map.cache_hit;
     return failure;
+  }
+  const shared::MapSnapshot* projection_map = projection.value->View().map;
+  if (projection_map == nullptr) {
+    return Failure("INVALID_INPUT");
   }
   const auto failure_after_projection = [&](std::string reason_code) {
     GlobalStageResult failure = Failure(std::move(reason_code));
-    failure.snapshot_cache_hit = map.cache_hit;
+    failure.snapshot_cache_hit = !use_legged_grid_v1 && map.cache_hit;
     failure.projection_cache_hit = projection.cache_hit;
     return failure;
   };
@@ -213,21 +236,27 @@ GlobalStageResult PlanSurfaceGlobal(const PlanningRequest& input,
   Pose3 goal_pose{
       .position_m = {.x = point->position_m.x,
                      .y = point->position_m.y,
-                     .z = map.value->origin_m().z},
+                     .z = projection_map->origin_m().z},
       .orientation = input.goal_map.yaw_rad.has_value()
                          ? QuaternionFromYaw(*input.goal_map.yaw_rad)
                          : start_map->orientation,
   };
-  const auto start_cell = map.value->PositionToCell(
+  const auto start_cell = projection_map->PositionToCell(
       {.x = start_map->position_m.x, .y = start_map->position_m.y});
-  const auto goal_cell = map.value->PositionToCell(
+  const auto goal_cell = projection_map->PositionToCell(
       {.x = goal_pose.position_m.x, .y = goal_pose.position_m.y});
   if (!start_cell.has_value() || !goal_cell.has_value()) {
     return failure_after_projection("NO_PATH");
   }
+  const auto route_key = use_legged_grid_v1
+      ? shared::MakeLeggedTraversabilityRouteCacheKey(
+            input, input.world.traversability_snapshot->revision(),
+            input.world.traversability_snapshot->profile_hash(),
+            capability_fingerprint)
+      : shared::MakeGlobalRouteCacheKey(input, inflation_m,
+                                        capability_fingerprint);
   const auto route = cache.global_route().GetOrBuild(
-      shared::MakeGlobalRouteCacheKey(input, inflation_m,
-                                      capability_fingerprint),
+      route_key,
       control, [&](const SearchControl& build_control) {
         SurfaceGlobalSearchResult result = SearchSurfaceGlobal({
             .projection = projection.value->View(),
@@ -254,7 +283,7 @@ GlobalStageResult PlanSurfaceGlobal(const PlanningRequest& input,
   return GlobalStageResult{
       .route = *route.value,
       .reason_code = {},
-      .snapshot_cache_hit = map.cache_hit,
+      .snapshot_cache_hit = !use_legged_grid_v1 && map.cache_hit,
       .projection_cache_hit = projection.cache_hit,
       .route_cache_hit = route.cache_hit,
   };
@@ -416,9 +445,11 @@ LocalGoalSetResult SelectSurfaceLocalGoals(
   if (!start_map.has_value()) {
     return {.reason_code = "INVALID_INPUT"};
   }
+  const double horizon_m =
+      std::holds_alternative<LeggedCapability>(input.capability) ? 3.0 : 8.0;
   const SurfaceRollingSession session(
       route, input.goal_map,
-      SurfaceRollingConfig{.horizon_m = 8.0, .max_deviation_m = 2.0});
+      SurfaceRollingConfig{.horizon_m = horizon_m, .max_deviation_m = 2.0});
   SurfaceRollingDecision decision = session.Decide(*start_map);
   if (decision.kind != SurfaceRollingDecision::Kind::kNextPortalSet) {
     return {.reason_code = decision.kind ==

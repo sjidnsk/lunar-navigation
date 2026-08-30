@@ -551,25 +551,34 @@ PlanningResult Planner::Plan(const PlanningRequest& input) noexcept {
     if (input.control.stop_token.stop_requested()) {
       return finish(Failure(PlanningStatus::kCanceled, "REQUEST_CANCELED"));
     }
-    const bool use_grid_v1 = input.config.wheel_planner_mode ==
-                             WheelPlannerMode::kGridTraversabilityV1;
+    const bool wheel_grid_v1_requested =
+        input.config.wheel_planner_mode ==
+        WheelPlannerMode::kGridTraversabilityV1;
+    const bool use_wheel_grid_v1 =
+        wheel_grid_v1_requested &&
+        std::holds_alternative<WheeledState>(input.current_state) &&
+        std::holds_alternative<WheeledCapability>(input.capability);
+    const bool use_legged_grid_v1 =
+        input.environment_mode == EnvironmentMode::kLunarSurface &&
+        std::holds_alternative<LeggedState>(input.current_state) &&
+        std::holds_alternative<LeggedCapability>(input.capability) &&
+        input.config.legged_global_mode ==
+            LeggedGlobalMode::kGridTraversabilityV1;
     const bool known_mode =
         input.environment_mode == EnvironmentMode::kLunarSurface ||
         input.environment_mode == EnvironmentMode::kLavaTube;
     if (!known_mode || input.request_id.empty() || !FinitePointGoal(input.goal_map) ||
         !MatchingPlatform(input) || !MinimalLocalMapValid(input.world.local_map) ||
-        (use_grid_v1 &&
-         (input.environment_mode != EnvironmentMode::kLunarSurface ||
-          !std::holds_alternative<WheeledState>(input.current_state) ||
-          !std::holds_alternative<WheeledCapability>(input.capability) ||
-          !input.world.traversability_snapshot ||
+        (wheel_grid_v1_requested && !use_wheel_grid_v1) ||
+        ((use_wheel_grid_v1 || use_legged_grid_v1) &&
+         (!input.world.traversability_snapshot ||
           !input.world.traversability_snapshot->valid()))) {
       return finish(Failure(PlanningStatus::kInvalidInput, "INVALID_INPUT"));
     }
     finish_phase(timing.snapshot_projection_elapsed,
                  PlannerPhase::kSnapshotProjection);
 
-    if (use_grid_v1) {
+    if (use_wheel_grid_v1) {
       PlanningRequest grid_request = input;
       grid_request.control.deadline = policy.hard_deadline;
       PlanningResult result = grid_v1::Plan(grid_request);

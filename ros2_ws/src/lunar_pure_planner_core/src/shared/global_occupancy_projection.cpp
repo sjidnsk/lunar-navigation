@@ -8,6 +8,7 @@
 
 #include "shared/cell_area_distance_transform.hpp"
 #include "shared/controlled_work.hpp"
+#include "lunar_pure_planner_core/traversability_map.hpp"
 
 namespace lunar::pure_planning::shared {
 namespace {
@@ -156,6 +157,23 @@ GlobalOccupancyProjectionBuildResult BuildInflatedGlobalOccupancyProjection(
       .projection = std::move(projection),
       .reason_code = {},
   };
+}
+
+GlobalOccupancyProjectionBuildResult BuildLeggedTraversabilityProjection(
+    const lunar::pure_planning::TraversabilitySnapshot& snapshot,
+    SearchControl control) {
+  auto grid = snapshot.BuildProjectionGrid(control);
+  if (!grid.ok()) {
+    return {.reason_code = std::move(grid.reason_code)};
+  }
+  auto map = MapSnapshot::Create(std::move(grid.value->map),
+                                 MapContract::kGlobalOccupancy, control);
+  if (!map.ok()) {
+    return {.reason_code = std::move(map.reason_code)};
+  }
+  return BuildInflatedGlobalOccupancyProjection(
+      std::move(map.snapshot), 50, grid.value->inflation_radius_m,
+      std::move(control));
 }
 
 }  // namespace lunar::pure_planning::shared
