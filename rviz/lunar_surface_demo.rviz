@@ -63,6 +63,26 @@ Visualization Manager:
       Pose Style: None
       Topic: /lunar_demo/wheeled_path
       Value: true
+    - Class: rviz_default_plugins/Path
+      Alpha: 0.85
+      Color: 230; 159; 0
+      Enabled: true
+      Line Style: Billboards
+      Line Width: 1.2
+      Name: Legged global path
+      Pose Style: None
+      Topic: /lunar_demo/legged_global_path
+      Value: true
+    - Class: rviz_default_plugins/Path
+      Alpha: 1
+      Color: 0; 158; 115
+      Enabled: true
+      Line Style: Billboards
+      Line Width: 0.7
+      Name: Legged body trajectory
+      Pose Style: None
+      Topic: /lunar_demo/legged_path
+      Value: true
   Global Options:
     Background Color: 32; 34; 37
     Fixed Frame: map

@@ -11,6 +11,7 @@
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <gtest/gtest.h>
 #include <lunar_planning_msgs/action/plan_motion.hpp>
+#include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
 
@@ -56,9 +57,11 @@ bool WaitFor(Predicate&& predicate, const std::chrono::milliseconds timeout = 3s
 
 class CapturingActionServer final {
  public:
-  explicit CapturingActionServer(const bool hold_goal = false)
+  explicit CapturingActionServer(
+      const bool hold_goal = false,
+      std::shared_ptr<Action::Result> result = std::make_shared<Action::Result>())
       : node_(std::make_shared<rclcpp::Node>("rviz_goal_bridge_action_test")),
-        hold_goal_(hold_goal) {
+        hold_goal_(hold_goal), result_(std::move(result)) {
     server_ = rclcpp_action::create_server<Action>(
         node_, "/test/plan_motion",
         [](const rclcpp_action::GoalUUID&,
@@ -77,7 +80,7 @@ class CapturingActionServer final {
           if (hold_goal_) {
             held_goal_ = handle;
           } else {
-            handle->succeed(std::make_shared<Action::Result>());
+            handle->succeed(result_);
           }
         });
   }
@@ -101,6 +104,7 @@ class CapturingActionServer final {
   bool hold_goal_{};
   std::atomic<std::uint64_t> cancel_requests_{};
   std::shared_ptr<GoalHandle> held_goal_;
+  std::shared_ptr<Action::Result> result_;
 };
 
 rclcpp::NodeOptions BridgeOptions() {
@@ -114,8 +118,41 @@ rclcpp::NodeOptions BridgeOptions() {
       rclcpp::Parameter{"position_tolerance_m", 0.25},
       rclcpp::Parameter{"yaw_tolerance_rad", 0.15},
       rclcpp::Parameter{"start_topic", "/test/start_pose"},
+      rclcpp::Parameter{"legged_global_path_topic",
+                        "/test/legged_global_path"},
+      rclcpp::Parameter{"legged_local_path_topic", "/test/legged_local_path"},
   });
   return options;
+}
+
+std::shared_ptr<Action::Result> LeggedResult() {
+  auto result = std::make_shared<Action::Result>();
+  result->planning_outcome = result->NEW_REFERENCE_AVAILABLE;
+  result->reason_code = "PLAN_FOUND";
+  result->has_reference = true;
+  result->reference.platform_type = result->reference.LEGGED;
+  result->reference.header.frame_id = "map";
+  result->reference.header.stamp.sec = 12;
+  result->reference.path_preview.header = result->reference.header;
+  for (const double x : {1.0, 4.0}) {
+    geometry_msgs::msg::PoseStamped pose;
+    pose.header = result->reference.header;
+    pose.pose.position.x = x;
+    pose.pose.position.y = 2.0;
+    pose.pose.orientation.w = 1.0;
+    result->reference.path_preview.poses.push_back(std::move(pose));
+  }
+  result->reference.trajectory.header = result->reference.header;
+  for (const double x : {1.0, 1.8}) {
+    trajectory_msgs::msg::MultiDOFJointTrajectoryPoint point;
+    geometry_msgs::msg::Transform transform;
+    transform.translation.x = x;
+    transform.translation.y = 2.0;
+    transform.rotation.w = 1.0;
+    point.transforms.push_back(std::move(transform));
+    result->reference.trajectory.points.push_back(std::move(point));
+  }
+  return result;
 }
 
 TEST(RvizGoalBridge, ConvertsRvizPoseIntoPlanMotionGoal) {
@@ -218,6 +255,136 @@ TEST(RvizGoalBridge, CancelsTheActiveRequestWhenRvizStartChanges) {
   EXPECT_TRUE(WaitFor([&action_server] {
     return action_server.cancel_requests() == 1U;
   }));
+  executor.cancel();
+  spinner.join();
+}
+
+TEST(RvizGoalBridge, PublishesLeggedGlobalPreviewAndBodyTrajectoryForRviz) {
+  CapturingActionServer action_server{false, LeggedResult()};
+  auto bridge = std::make_shared<RvizGoalBridge>(BridgeOptions());
+  auto observer = std::make_shared<rclcpp::Node>("rviz_legged_path_test");
+  auto readiness_client = rclcpp_action::create_client<Action>(
+      observer, "/test/plan_motion");
+  auto goal_publisher =
+      observer->create_publisher<geometry_msgs::msg::PoseStamped>(
+          "/Car/T4/rviz_goal", rclcpp::QoS{10}.reliable());
+  std::mutex paths_mutex;
+  std::optional<nav_msgs::msg::Path> global_path;
+  std::optional<nav_msgs::msg::Path> local_path;
+  auto global_subscription = observer->create_subscription<nav_msgs::msg::Path>(
+      "/test/legged_global_path", rclcpp::QoS{10}.reliable(),
+      [&](nav_msgs::msg::Path::ConstSharedPtr path) {
+        std::scoped_lock lock{paths_mutex};
+        global_path = *path;
+      });
+  auto local_subscription = observer->create_subscription<nav_msgs::msg::Path>(
+      "/test/legged_local_path", rclcpp::QoS{10}.reliable(),
+      [&](nav_msgs::msg::Path::ConstSharedPtr path) {
+        std::scoped_lock lock{paths_mutex};
+        local_path = *path;
+      });
+
+  rclcpp::executors::MultiThreadedExecutor executor;
+  executor.add_node(action_server.node());
+  executor.add_node(bridge);
+  executor.add_node(observer);
+  std::jthread spinner([&executor] { executor.spin(); });
+
+  const bool graph_ready = WaitFor([&] {
+    return goal_publisher->get_subscription_count() == 1U &&
+           readiness_client->action_server_is_ready() &&
+           observer->count_publishers("/test/legged_global_path") == 1U &&
+           observer->count_publishers("/test/legged_local_path") == 1U;
+  });
+  if (!graph_ready) {
+    executor.cancel();
+    spinner.join();
+  }
+  ASSERT_TRUE(graph_ready);
+  geometry_msgs::msg::PoseStamped goal;
+  goal.header.frame_id = "map";
+  goal.pose.orientation.w = 1.0;
+  goal_publisher->publish(goal);
+
+  const bool received_paths = WaitFor([&] {
+    std::scoped_lock lock{paths_mutex};
+    return global_path.has_value() && local_path.has_value();
+  });
+  if (!received_paths) {
+    executor.cancel();
+    spinner.join();
+  }
+  ASSERT_TRUE(received_paths);
+  {
+    std::scoped_lock lock{paths_mutex};
+    ASSERT_EQ(global_path->poses.size(), 2U);
+    EXPECT_DOUBLE_EQ(global_path->poses.back().pose.position.x, 4.0);
+    ASSERT_EQ(local_path->poses.size(), 2U);
+    EXPECT_EQ(local_path->header.frame_id, "map");
+    EXPECT_EQ(local_path->header.stamp.sec, 12);
+    EXPECT_DOUBLE_EQ(local_path->poses.back().pose.position.x, 1.8);
+    EXPECT_DOUBLE_EQ(local_path->poses.back().pose.position.y, 2.0);
+  }
+
+  executor.cancel();
+  spinner.join();
+}
+
+TEST(RvizGoalBridge, ClearsLeggedPathsWhenFormalSuccessContractIsNotMet) {
+  auto result = LeggedResult();
+  result->reason_code = "NO_PATH";
+  CapturingActionServer action_server{false, std::move(result)};
+  auto bridge = std::make_shared<RvizGoalBridge>(BridgeOptions());
+  auto observer = std::make_shared<rclcpp::Node>("rviz_invalid_legged_path_test");
+  auto readiness_client = rclcpp_action::create_client<Action>(
+      observer, "/test/plan_motion");
+  auto goal_publisher =
+      observer->create_publisher<geometry_msgs::msg::PoseStamped>(
+          "/Car/T4/rviz_goal", rclcpp::QoS{10}.reliable());
+  std::mutex path_mutex;
+  std::optional<nav_msgs::msg::Path> local_path;
+  auto local_subscription = observer->create_subscription<nav_msgs::msg::Path>(
+      "/test/legged_local_path", rclcpp::QoS{10}.reliable(),
+      [&](nav_msgs::msg::Path::ConstSharedPtr path) {
+        std::scoped_lock lock{path_mutex};
+        local_path = *path;
+      });
+
+  rclcpp::executors::MultiThreadedExecutor executor;
+  executor.add_node(action_server.node());
+  executor.add_node(bridge);
+  executor.add_node(observer);
+  std::jthread spinner([&executor] { executor.spin(); });
+
+  const bool graph_ready = WaitFor([&] {
+    return goal_publisher->get_subscription_count() == 1U &&
+           readiness_client->action_server_is_ready() &&
+           observer->count_publishers("/test/legged_local_path") == 1U;
+  });
+  if (!graph_ready) {
+    executor.cancel();
+    spinner.join();
+  }
+  ASSERT_TRUE(graph_ready);
+  geometry_msgs::msg::PoseStamped goal;
+  goal.header.frame_id = "map";
+  goal.pose.orientation.w = 1.0;
+  goal_publisher->publish(goal);
+
+  const bool received_path = WaitFor([&] {
+    std::scoped_lock lock{path_mutex};
+    return local_path.has_value();
+  });
+  if (!received_path) {
+    executor.cancel();
+    spinner.join();
+  }
+  ASSERT_TRUE(received_path);
+  {
+    std::scoped_lock lock{path_mutex};
+    EXPECT_TRUE(local_path->poses.empty());
+  }
+
   executor.cancel();
   spinner.join();
 }

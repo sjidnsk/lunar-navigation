@@ -10,6 +10,7 @@ LAUNCH = ROOT / "launch" / "lunar_surface_rviz_demo.launch.py"
 RVIZ = ROOT / "rviz" / "lunar_surface_demo.rviz"
 DEMO_NODE = ROOT / "ros2_ws/src/lunar_pure_planner_ros/src/lunar_surface_demo_node.cpp"
 VISUALIZER_NODE = ROOT / "ros2_ws/src/lunar_pure_planner_ros/src/lunar_surface_visualizer_node.cpp"
+REPORTER_NODE = ROOT / "ros2_ws/src/lunar_pure_planner_ros/src/lunar_surface_reporter.cpp"
 
 
 def test_demo_launch_isolated_from_production_action() -> None:
@@ -57,6 +58,40 @@ def test_demo_computes_and_displays_wheel_traversability() -> None:
     )
     assert traversability["Class"] == "rviz_default_plugins/MarkerArray"
     assert traversability["Topic"] == "/lunar_demo/classic_local_map"
+
+
+def test_demo_can_select_legged_grid_v1_and_publish_rviz_paths() -> None:
+    launch_text = LAUNCH.read_text(encoding="utf-8")
+
+    assert 'DeclareLaunchArgument("platform_type", default_value="wheel")' in launch_text
+    assert 'platform_type = LaunchConfiguration("platform_type")' in launch_text
+    assert '"platform_type": platform_type' in launch_text
+    assert launch_text.count('"platform_type": platform_type') == 4
+    assert '"legged_global_mode": "grid_traversability_v1"' in launch_text
+    assert '"legged_global_path_topic": "/lunar_demo/legged_global_path"' in launch_text
+    assert '"legged_local_path_topic": "/lunar_demo/legged_path"' in launch_text
+
+
+def test_legged_rviz_paths_are_displayed_and_consumed_by_demo_helpers() -> None:
+    rviz_text = RVIZ.read_text(encoding="utf-8")
+    demo_text = DEMO_NODE.read_text(encoding="utf-8")
+    reporter_text = REPORTER_NODE.read_text(encoding="utf-8")
+
+    assert "/lunar_demo/legged_global_path" in rviz_text
+    assert "/lunar_demo/legged_path" in rviz_text
+    assert '"/lunar_demo/legged_path"' in demo_text
+    assert '"/lunar_demo/legged_global_path"' in reporter_text
+    assert '"/lunar_demo/legged_path"' in reporter_text
+
+
+def test_demo_publishes_legged_body_height_in_odometry() -> None:
+    launch_text = LAUNCH.read_text(encoding="utf-8")
+    demo_text = DEMO_NODE.read_text(encoding="utf-8")
+
+    assert '"platform_type": platform_type' in launch_text
+    assert 'declare_parameter<std::string>("platform_type", "wheel")' in demo_text
+    assert "constexpr double kLeggedNominalBodyHeightM = 0.33" in demo_text
+    assert 'platform_type_ == "legged" ? kLeggedNominalBodyHeightM : 0.0' in demo_text
 
 
 def test_demo_uses_a_sixty_four_metre_local_map_and_manual_goal_by_default() -> None:

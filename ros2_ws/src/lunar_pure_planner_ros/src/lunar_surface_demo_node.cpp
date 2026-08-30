@@ -26,6 +26,7 @@ namespace {
 constexpr std::size_t kLocalWidth = 320U;
 constexpr std::size_t kLocalHeight = 320U;
 constexpr double kLocalResolutionM = 0.2;
+constexpr double kLeggedNominalBodyHeightM = 0.33;
 
 std_msgs::msg::Float32MultiArray MakeLayer(const std::vector<float>& values,
                                            const std::size_t width,
@@ -55,6 +56,7 @@ class LunarSurfaceDemoNode final : public rclcpp::Node {
       : Node("lunar_surface_demo"),
         scenario_(BuildLunarSurfaceScenario(
             static_cast<std::uint32_t>(declare_parameter<std::int64_t>("seed", 20260823)))),
+        platform_type_(declare_parameter<std::string>("platform_type", "wheel")),
         auto_goal_(declare_parameter<bool>("auto_goal", false)) {
     // RViz and tf2 listeners request reliable delivery by default.  A reliable
     // writer also remains compatible with the planner's best-effort readers.
@@ -83,14 +85,17 @@ class LunarSurfaceDemoNode final : public rclcpp::Node {
     rover_y_m_ = scenario_.origin_y_m +
                  (static_cast<double>(scenario_.start_cell.y) + 0.5) *
                      scenario_.resolution_m;
-    path_sub_ = create_subscription<nav_msgs::msg::Path>(
+    const auto accept_path = [this](nav_msgs::msg::Path::ConstSharedPtr path) {
+      if (!path->poses.empty()) {
+        active_path_ = *path;
+        next_path_pose_ = active_path_.poses.size() > 1U ? 1U : 0U;
+      }
+    };
+    wheeled_path_sub_ = create_subscription<nav_msgs::msg::Path>(
         "/lunar_demo/wheeled_path", rclcpp::QoS{10}.reliable(),
-        [this](nav_msgs::msg::Path::ConstSharedPtr path) {
-          if (!path->poses.empty()) {
-            active_path_ = *path;
-            next_path_pose_ = active_path_.poses.size() > 1U ? 1U : 0U;
-          }
-        });
+        accept_path);
+    legged_path_sub_ = create_subscription<nav_msgs::msg::Path>(
+        "/lunar_demo/legged_path", rclcpp::QoS{10}.reliable(), accept_path);
     start_sub_ = create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
         "/lunar_demo/start_pose", rclcpp::QoS{10}.reliable(),
         [this](geometry_msgs::msg::PoseWithCovarianceStamped::ConstSharedPtr start) {
@@ -214,7 +219,8 @@ class LunarSurfaceDemoNode final : public rclcpp::Node {
     odometry.pose.pose.position.y = start_y;
     const auto rover_sample = scenario_.Sample(start_x, start_y);
     odometry.pose.pose.position.z =
-        rover_sample.has_value() ? rover_sample->elevation_m : 0.0;
+        (rover_sample.has_value() ? rover_sample->elevation_m : 0.0) +
+        (platform_type_ == "legged" ? kLeggedNominalBodyHeightM : 0.0);
     odometry.pose.pose.orientation.z = std::sin(0.5 * rover_yaw_rad_);
     odometry.pose.pose.orientation.w = std::cos(0.5 * rover_yaw_rad_);
     odom_pub_->publish(odometry);
@@ -267,6 +273,7 @@ class LunarSurfaceDemoNode final : public rclcpp::Node {
   double rover_x_m_{};
   double rover_y_m_{};
   double rover_yaw_rad_{};
+  std::string platform_type_;
   bool auto_goal_{};
   nav_msgs::msg::Path active_path_;
   std::size_t next_path_pose_{};
@@ -282,7 +289,8 @@ class LunarSurfaceDemoNode final : public rclcpp::Node {
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr default_goal_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr
       accepted_start_pub_;
-  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_sub_;
+  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr wheeled_path_sub_;
+  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr legged_path_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr
       start_sub_;
   rclcpp::TimerBase::SharedPtr timer_;

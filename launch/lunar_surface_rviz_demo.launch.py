@@ -15,8 +15,10 @@ def generate_launch_description() -> LaunchDescription:
     seed = LaunchConfiguration("seed")
     start_rviz = LaunchConfiguration("start_rviz")
     auto_goal = LaunchConfiguration("auto_goal")
+    platform_type = LaunchConfiguration("platform_type")
     demo_parameters = {
-        "platform_type": "wheel",
+        "platform_type": platform_type,
+        "legged_global_mode": "grid_traversability_v1",
         "global_map_topic": "/lunar_demo/global_overview",
         "local_map_topic": "/lunar_demo/grid_map",
         "odometry_topic": "/lunar_demo/odometry",
@@ -35,6 +37,7 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("seed", default_value="20260823"),
             DeclareLaunchArgument("start_rviz", default_value="true"),
             DeclareLaunchArgument("auto_goal", default_value="false"),
+            DeclareLaunchArgument("platform_type", default_value="wheel"),
             Node(
                 package="lunar_pure_planner_ros",
                 executable="lunar_surface_demo_node",
@@ -42,6 +45,7 @@ def generate_launch_description() -> LaunchDescription:
                 parameters=[{
                     "seed": seed,
                     "auto_goal": ParameterValue(auto_goal, value_type=bool),
+                    "platform_type": platform_type,
                 }],
                 output="screen",
             ),
@@ -58,7 +62,7 @@ def generate_launch_description() -> LaunchDescription:
                 name="lunar_demo_traversability",
                 parameters=[
                     {
-                        "platform_type": "wheel",
+                        "platform_type": platform_type,
                         "local_map_topic": "/lunar_demo/grid_map",
                         "traversability_topic": "/lunar_demo/traversability",
                         "input_qos_reliability": "reliable",
@@ -73,7 +77,7 @@ def generate_launch_description() -> LaunchDescription:
                 name="lunar_demo_global_traversability",
                 parameters=[
                     {
-                        "platform_type": "wheel",
+                        "platform_type": platform_type,
                         "local_map_topic": "/lunar_demo/global_grid_map",
                         "traversability_topic": "/lunar_demo/global_traversability",
                         "input_qos_reliability": "reliable",
@@ -101,6 +105,8 @@ def generate_launch_description() -> LaunchDescription:
                         "goal_topic": "/lunar_demo/rviz_goal",
                         "start_topic": "/lunar_demo/accepted_start",
                         "action_name": "/lunar_demo/plan_motion",
+                        "legged_global_path_topic": "/lunar_demo/legged_global_path",
+                        "legged_local_path_topic": "/lunar_demo/legged_path",
                     }
                 ],
                 output="screen",

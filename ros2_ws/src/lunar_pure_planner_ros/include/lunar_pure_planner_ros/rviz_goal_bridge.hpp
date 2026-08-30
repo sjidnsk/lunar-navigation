@@ -8,6 +8,7 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <lunar_planning_msgs/action/plan_motion.hpp>
+#include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
 
@@ -20,6 +21,9 @@ class RvizGoalBridge final : public rclcpp::Node {
 
  private:
   void ForwardGoal(geometry_msgs::msg::PoseStamped::ConstSharedPtr goal_pose);
+  void PublishLeggedResultPaths(
+      const rclcpp_action::ClientGoalHandle<
+          lunar_planning_msgs::action::PlanMotion>::WrappedResult& result);
 
   using Action = lunar_planning_msgs::action::PlanMotion;
 
@@ -34,6 +38,8 @@ class RvizGoalBridge final : public rclcpp::Node {
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr subscription_;
   rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr
       start_subscription_;
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr legged_global_path_publisher_;
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr legged_local_path_publisher_;
 };
 
 }  // namespace lunar::pure_planner_ros

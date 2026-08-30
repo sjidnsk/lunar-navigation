@@ -83,8 +83,26 @@ class LunarSurfaceReporterNode final : public rclcpp::Node {
             EmitReadySummary();
           }
         });
+    legged_global_path_sub_ = create_subscription<nav_msgs::msg::Path>(
+        "/lunar_demo/legged_global_path", rclcpp::QoS{10}.reliable(),
+        [this](nav_msgs::msg::Path::ConstSharedPtr message) {
+          std::scoped_lock lock{mutex_};
+          if (active_goal_ && !message->poses.empty()) {
+            report_state_.SetGlobalPath(*message);
+            EmitReadySummary();
+          }
+        });
     local_path_sub_ = create_subscription<nav_msgs::msg::Path>(
         "/lunar_demo/wheeled_path", rclcpp::QoS{10}.reliable(),
+        [this](nav_msgs::msg::Path::ConstSharedPtr message) {
+          std::scoped_lock lock{mutex_};
+          if (active_goal_ && !message->poses.empty()) {
+            report_state_.SetLocalPath(*message);
+            EmitReadySummary();
+          }
+        });
+    legged_local_path_sub_ = create_subscription<nav_msgs::msg::Path>(
+        "/lunar_demo/legged_path", rclcpp::QoS{10}.reliable(),
         [this](nav_msgs::msg::Path::ConstSharedPtr message) {
           std::scoped_lock lock{mutex_};
           if (active_goal_ && !message->poses.empty()) {
@@ -160,7 +178,9 @@ class LunarSurfaceReporterNode final : public rclcpp::Node {
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odometry_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_;
   rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr global_path_sub_;
+  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr legged_global_path_sub_;
   rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr local_path_sub_;
+  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr legged_local_path_sub_;
   rclcpp::Subscription<lunar_planning_msgs::msg::TimedPath>::SharedPtr
       timed_path_sub_;
   rclcpp::Subscription<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr

@@ -35,7 +35,19 @@ RvizGoalBridge::RvizGoalBridge(const rclcpp::NodeOptions& options)
       declare_parameter<std::string>("goal_topic", "/Car/T4/rviz_goal");
   const std::string start_topic =
       declare_parameter<std::string>("start_topic", "/Car/T4/rviz_start");
+  const std::string legged_global_path_topic =
+      declare_parameter<std::string>("legged_global_path_topic", "");
+  const std::string legged_local_path_topic =
+      declare_parameter<std::string>("legged_local_path_topic", "");
   action_client_ = rclcpp_action::create_client<Action>(this, action_name);
+  if (!legged_global_path_topic.empty()) {
+    legged_global_path_publisher_ = create_publisher<nav_msgs::msg::Path>(
+        legged_global_path_topic, rclcpp::QoS{10}.reliable());
+  }
+  if (!legged_local_path_topic.empty()) {
+    legged_local_path_publisher_ = create_publisher<nav_msgs::msg::Path>(
+        legged_local_path_topic, rclcpp::QoS{10}.reliable());
+  }
   subscription_ = create_subscription<geometry_msgs::msg::PoseStamped>(
       goal_topic, rclcpp::QoS{10}.reliable(),
       [this](geometry_msgs::msg::PoseStamped::ConstSharedPtr goal_pose) {
@@ -75,7 +87,50 @@ void RvizGoalBridge::ForwardGoal(
           RCLCPP_WARN(get_logger(), "RViz goal %s was rejected", request_id.c_str());
         }
       };
+  send_options.result_callback =
+      [this](const rclcpp_action::ClientGoalHandle<Action>::WrappedResult& result) {
+        PublishLeggedResultPaths(result);
+      };
   action_client_->async_send_goal(action_goal, send_options);
+}
+
+void RvizGoalBridge::PublishLeggedResultPaths(
+    const rclcpp_action::ClientGoalHandle<Action>::WrappedResult& result) {
+  nav_msgs::msg::Path global_path;
+  nav_msgs::msg::Path local_path;
+  if (result.code == rclcpp_action::ResultCode::SUCCEEDED && result.result &&
+      result.result->planning_outcome ==
+          result.result->NEW_REFERENCE_AVAILABLE &&
+      result.result->reason_code == "PLAN_FOUND" &&
+      result.result->has_reference &&
+      result.result->reference.platform_type ==
+          result.result->reference.LEGGED) {
+    global_path = result.result->reference.path_preview;
+    const auto& trajectory = result.result->reference.trajectory;
+    local_path.header = trajectory.header;
+    if (local_path.header.frame_id.empty()) {
+      local_path.header = result.result->reference.header;
+    }
+    local_path.poses.reserve(trajectory.points.size());
+    for (const auto& point : trajectory.points) {
+      if (point.transforms.empty()) {
+        continue;
+      }
+      geometry_msgs::msg::PoseStamped pose;
+      pose.header = local_path.header;
+      pose.pose.position.x = point.transforms.front().translation.x;
+      pose.pose.position.y = point.transforms.front().translation.y;
+      pose.pose.position.z = point.transforms.front().translation.z;
+      pose.pose.orientation = point.transforms.front().rotation;
+      local_path.poses.push_back(std::move(pose));
+    }
+  }
+  if (legged_global_path_publisher_) {
+    legged_global_path_publisher_->publish(global_path);
+  }
+  if (legged_local_path_publisher_) {
+    legged_local_path_publisher_->publish(local_path);
+  }
 }
 
 }  // namespace lunar::pure_planner_ros
