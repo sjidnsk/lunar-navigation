@@ -2,12 +2,12 @@
 
 ## 状态与基线
 
-- 状态：设计决策已确认，本文用于约束后续实现。
-- 实现基线：`feat/wheel-legged-rolling-demo-closed-loop`，合并提交 `37cf866`。
+- 状态：已在 `feat/wheel-legged-demo-delivery-closed-loop` 实现，待人工评审与合并。
+- 实现基线：`integration/pure-planner-orin` 的 `3e01d1b`；实现提交从 `750ff8e` 开始。
 - 已合并能力：轮式滚动恢复、足式 Grid V1 局部搜索优化、32 航向格、机身中心可行图、
   多目标距离场、边认证缓存及轮式/足式独立 RViz 路径输出。
-- 尚未实现：本文定义的显式地图交付确认、请求与地图绑定、统一 12 m 局部目标以及完整的
-  Demo 状态机。不得把本设计文档当作这些能力已经落地的证据。
+- 已实现：显式地图 ACK、请求/token/分段绑定、12 m 统一门户、4 m 停车刷新、轮式/足式
+  恢复闭环和 Demo 专用诊断。实际完成范围与未运行验收项以第 12 节为准。
 
 本文统一以下两份既有设计，但不改变其中已经验证的平台内部搜索语义：
 
@@ -110,8 +110,9 @@ IDLE
    `request_id` 和 session generation。
 2. `PREPARING_LOCAL_MAP`：在当前停止位置生成局部占据图、高程图和 odometry；这些消息使用
    同一个 header stamp，形成 `map_token`。
-3. `WAITING_MAP_ACK`：车辆保持停止，并重复发布停止位置对应的同一 token 地图与 odometry
-   快照；重复输入必须幂等，不得重复重建同一足式投影。
+3. `WAITING_MAP_ACK`：车辆保持停止，并重复发布停止位置对应的同一 token 局部图与
+   odometry。首个目标或恢复 STOP 还会交付全局图与 `map->odom` TF，直到首个完整快照被
+   ACK；重复输入必须幂等，不得重复重建输入序列或同一足式投影。
 4. `PLANNING`：只冻结并使用 ACK 对应的输入序列。此时收到新目标或新 generation，旧结果作废。
 5. `EXECUTING`：Demo 只接受与当前 `request_id + map_token + segment_index` 完全匹配的路径。
 6. `COMPLETED`：最终精确目标到达后清空可执行路径并结束 Action。
@@ -126,6 +127,7 @@ Demo 在停止位置同周期发布局部地图与 odometry，并复用同一 he
 
 规划器只有在以下条件成立时发布 ACK：
 
+- 已经获得全局图和直接 `map->odom` TF；
 - odometry 与局部地图 token 相同；
 - 起点位于该局部图覆盖范围内；
 - 轮式已完成该 token 的局部地图适配；
@@ -205,6 +207,8 @@ generation、停止并生成第一版地图。只有字段完全匹配的 `EXECU
 2. 每个局部周期从当前全局进度选择门户，并生成一条实际认证的局部可执行段。
 3. Demo 沿该段累计移动 4 m 后停止；不能一边继续沿旧路径移动，一边等待新地图被消费。
 4. 停止后生成新 token，等待 ACK，再规划下一段。
+   在 Demo 协议中，被接受的新 token 本身就是两类平台的显式重规划请求；足式不再额外
+   等待到达旧门户或路线步长。协议关闭时的生产足式判据保持不变。
 5. 局部规划失败时清空旧可执行段。RViz 可保留全局路线用于观察，但 Demo 不能继续执行旧段。
 6. 最终局部周期以原始任务目标为唯一终点；不能以“到达全局路径中点/门户”代替任务完成。
 
@@ -312,13 +316,26 @@ Action `SUCCEEDED` 或 RViz 中出现路径不能单独作为规划成功证据�
 
 ## 12. 当前整合验证记录
 
-基于 `37cf866` 的本机 ROS 2 Jazzy、`RelWithDebInfo` 构建结果：
+`feat/wheel-legged-demo-delivery-closed-loop` 基于 `3e01d1b` 实现。2026-08-31 至
+2026-09-01 本机 ROS 2 Jazzy、`RelWithDebInfo` 的当前结果如下：
 
-- 轮式 GoogleTest：75/75 通过，唯一 750 m 用例按用户决定排除；
-- 其余 core CTest：21/21 通过；
-- ROS CTest：19/19 通过；
-- isolation/launch contracts：36/36 通过；
-- `git diff --check`、缓存区检查和冲突标记检查通过。
+- `lunar_planning_msgs`、`lunar_pure_planner_core`、`lunar_pure_planner_ros` 构建通过；仅保留既有
+  `TraversabilityInputSnapshot{}` explicit-constructor 编译警告；
+- 轮式 GoogleTest 排除唯一 750 m 性能用例后 75/75 通过；该用例保留在源码中并明确记为
+  `SKIPPED_BY_USER`；
+- 其余 core CTest 21/21 通过，门户测试 15/15 通过；
+- 当前 ROS 包级串行 CTest 19/19 通过；其中 server 63/63、InputStore 7/7、
+  TraversabilityInput 6/6、Reporter 5/5、确定性场景 6/6 均通过；
+- 完整 Python 回归 353 passed、1 skipped；launch contract 34/34 通过；`git diff --check` 和
+  冲突标记检查通过；
+- 本机未安装 `clang-format`，因此格式器检查为 `NOT_RUN`，不把缺少工具写成通过。
 
-上述结果证明两条现有实现可以在同一源码树中共同构建和回归，不证明第 4–8 节的新闭环协议已经
-实现，也不替代后续非简单 RViz 运行实验。
+确定性场景测试证明默认起点 `(-349.5, 0.5)` 至默认目标 `(350.5, 0.5)` 的 700 m 直线
+supercover 穿过障碍。实际 RViz 短程观察中，轮式连续产生至少 10 个正式成功执行段，并在局部
+`TIMEOUT` 后通过 STOP、新 token 和重建路线恢复；足式连续产生 11 个正式成功执行段，在障碍邻域
+`NO_PATH` 后恢复，并从 `y=0.5` 绕行到 `y=-3.5`。正式成功段均以
+`planning_outcome=0 + reason_code=PLAN_FOUND + has_reference=true` 判定。
+
+上述 RViz 证据只证明滚动闭环、障碍邻域恢复和真实绕行已被短程观察，不证明整条 700 m Action
+完成，也不满足“不重启进程连续完成 3 个困难目标”的完整人工验收。Humble/Orin、DDS、真实
+rosbag 和实车均为 `NOT_RUN`。

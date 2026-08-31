@@ -189,18 +189,25 @@ SE(2) 搜索坐标系；地图原点仍只用于地形采样，不会被重写�
 不会插入吸附或几何直连段；末端仍只允许通过经过完整安全校验的缩放运动原语到达目标。
 
 ```bash
-cd /home/kai/CodexDownloads/lunar_navigation/lunar_pure_planner_orin
+cd /home/kai/WS/lunar-navigation/lunar-runtime/.worktrees/wheel-legged-demo-delivery-closed-loop
 source /opt/ros/jazzy/setup.bash
-colcon build --packages-up-to lunar_pure_planner_ros \
-  --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=OFF
-source install/setup.bash
+colcon build --base-paths ros2_ws/src \
+  --build-base build-jazzy-demo-delivery \
+  --install-base install-jazzy-demo-delivery \
+  --packages-up-to lunar_pure_planner_ros \
+  --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo
+source install-jazzy-demo-delivery/setup.bash
 ros2 launch lunar_pure_planner_ros lunar_surface_rviz_demo.launch.py
 ```
 
-Demo 的 timer、里程计和车辆显示保持 `2 Hz`。启动时先等待规划器、局部可通行性显示和 Reporter
-消费者被发现，再以 `2 Hz` 短暂发送 12 组局部 GridMap/OccupancyGrid 启动样本；启动交付完成后，
-两张局部图仅在车辆相对上一局部图中心移动至少 `4 m` 时成对更新。规划失败或恢复重试会发布带合法
-frame 的空路径，Demo 收到空轮式/足式路径后立即停止沿旧路径移动。
+这个 launch 仅在 `/lunar_demo/*` 中显式启用交付协议；生产配置
+`demo_delivery_protocol_enabled` 默认仍为 `false`。新目标先使 Demo 停车并清除旧执行段；首个目标或
+恢复 STOP 会用同一 token 交付全局图、局部图、odometry 和 `map->odom` TF，普通 4 m 滚动周期只需
+重交付局部图和停止位姿 odometry。规划器收到完整输入（足式还须完成可通行性投影）后返回可靠
+ACK；同 token 重发保持幂等。Demo 收到与当前 `request_id + map_token + segment_index` 匹配的
+EXECUTE 才移动。普通轮式/足式 `Path` 只用于 RViz 显示，不能解除停车状态。两类平台均以 `12 m`
+为名义局部前视，每执行 `4 m` 或当前段耗尽就停车并交付下一版地图；隔离 Demo 的 ACK 窗口为
+`10 s`，以容纳首张 1 km 全局图适配。
 
 RViz 固定坐标系为 `map`，初始顶视范围约为整张 1 km 地图。为规避部分 Mesa/RViz 组合中
 `Map` 与 GridMap 插件同时启用的 GLSL sampler 冲突，默认关闭原始占据图；**Wheel traversability**
@@ -296,7 +303,7 @@ ros2 launch lunar_pure_planner_ros pure_planner.launch.py \
   platform_type:=legged rolling_surface_enabled:=true
 ```
 
-启用后，一条月表 Action 先计算一次全局路线，再重复产生局部分段，直到 odometry 进入最终目标容差；轮式前瞻为 8 m，足式 Grid V1 前瞻为 4 m。足式在实际路线进度前进 1.5 m 或到达当前门户时规划下一段，新目标从当时的实际路线进度重新计算，正常保留约 2.5 m 已规划尾段；周期内冻结本次可通行性快照，局部图刷新和全局路线偏离量本身不抢占已发布分段。每个真正触发的规划周期共用一个时钟：`<1 s` 达到目标，`[1 s,2 s)` 记录变慢，`[2 s,3 s)` 记录 SLA 失败但继续搜索，只有 `>=3 s` 才硬停止且不发布新路径；行驶和轮询时间不计入规划周期。轮式控制器继续订阅 `MotionReference`；足式滚动段发布到 `legged_path_topic`，全局预览发布到 `legged_global_path_topic`，二者均为 `map` 帧 `Path`。该模式不替代外部地图生产者或平台控制器。
+启用后，一条月表 Action 先计算一次全局路线，再重复产生局部分段，直到 odometry 进入最终目标容差。轮式与足式 Grid V1 都以 `12 m` 为名义前视，并在 `1..12 m` 内生成最多 32 个动态门户；平台专用运动学、可行性过滤和边认证保持不变。`rolling_replan_distance_m` 默认是 `4 m`。Demo 交付协议默认关闭，因此生产调用仍沿用原有外部地图/执行器契约；只有测试 launch 显式启用 STOP、同 token ACK 和 EXECUTE 信封。每个真正触发的规划周期共用一个时钟：`<1 s` 达到目标，`[1 s,2 s)` 记录变慢，`[2 s,3 s)` 记录 SLA 失败但继续搜索，只有 `>=3 s` 才硬停止且不发布新路径；行驶和轮询时间不计入规划周期。轮式控制器继续订阅 `MotionReference`；足式滚动段发布到 `legged_path_topic`，全局预览发布到 `legged_global_path_topic`，二者均为 `map` 帧 `Path`。该模式不替代外部地图生产者或平台控制器。
 
 `rolling_transient_retry_limit` 默认是 `2`，合法范围为 `0..10`。它只适用于已经发布过至少一个
 有效滚动段之后的局部 `NO_PATH` 或单周期 `TIMEOUT`：每次恢复先发布空输出，并在诊断中增加
