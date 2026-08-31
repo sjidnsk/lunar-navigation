@@ -8,6 +8,7 @@
 
 #include <gtest/gtest.h>
 
+#include "hierarchical/global_route_planner.hpp"
 #include "hierarchical/surface_portal_set.hpp"
 
 namespace lunar::pure_planning::hierarchical {
@@ -118,7 +119,8 @@ void SetLocalHazard(GridMap& map, const std::size_t x, const std::size_t y) {
       candidate.route_progress_m, candidate.global_cell.x,
       candidate.global_cell.y, candidate.local_cell.x, candidate.local_cell.y,
       candidate.global_clearance_m, candidate.local_clearance_m,
-      candidate.stable_rank, point == nullptr ? 0.0 : point->position_m.x,
+      candidate.lateral_offset_cells, candidate.stable_rank,
+      point == nullptr ? 0.0 : point->position_m.x,
       point == nullptr ? 0.0 : point->position_m.y,
   };
 }
@@ -143,6 +145,27 @@ TEST(SurfacePortalSet, UsesSafeLateralCellsWhenNominalHorizonIsBlocked) {
     ASSERT_NE(point, nullptr);
     EXPECT_DOUBLE_EQ(point->tolerance_m, 0.0);
   }
+}
+
+TEST(SurfacePortalSet,
+     LeggedPrefersTheRouteCenterlineOverHigherClearanceLateralPortals) {
+  PlanningRequest input = Request();
+  input.current_state = LeggedState{
+      .body_pose = {.position_m = {.x = 1.5, .y = 10.5, .z = 0.0}},
+  };
+  input.capability = LeggedCapability{};
+  SetGlobalHazard(*input.world.global_map, 9U, 11U);
+  const GlobalRoute route = StraightRoute();
+  const auto decision = RollingDecision(route, input.goal_map);
+
+  const auto result = BuildSurfacePortalSet(input, route, decision, 32U, {});
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  ASSERT_FALSE(result.candidates.empty());
+  EXPECT_DOUBLE_EQ(result.candidates.front().route_progress_m,
+                   decision.desired_horizon_progress_m);
+  EXPECT_EQ(result.candidates.front().global_cell,
+            (shared::GridCell{.x = 9, .y = 10}));
 }
 
 TEST(SurfacePortalSet, BacksOffLongitudinallyWhenHorizonColumnIsBlocked) {
@@ -292,6 +315,99 @@ TEST(SurfacePortalSet, ReturnsNoPathWhenEveryLocalCandidateIsHazardous) {
   EXPECT_FALSE(result.ok());
   EXPECT_TRUE(result.candidates.empty());
   EXPECT_EQ(result.reason_code, "NO_PATH");
+}
+
+TEST(SurfacePortalSet, SnapsIntermediatePortalToItsLocalSafeCellCenter) {
+  GridMap global_map = GlobalMap(4U, 4U);
+  GridMap local_map = LocalMap(4U, 4U);
+  local_map.origin_m = {.x = 0.5, .y = 0.5, .z = 0.0};
+  const GoalRegion portal_goal{
+      .goal_id = "portal",
+      .target = PointGoal{
+          .position_m = {.x = 1.5, .y = 1.5, .z = 0.25},
+          .tolerance_m = 0.0,
+      },
+      .yaw_rad = 0.75,
+      .yaw_tolerance_rad = 0.1,
+  };
+  const SurfacePortalSetResult portals{
+      .candidates = {SurfacePortalCandidate{
+          .goal_odom = portal_goal,
+          .route_progress_m = 2.0,
+          .global_cell = {.x = 1, .y = 1},
+          .local_cell = {.x = 1, .y = 1},
+      }},
+  };
+  const SurfaceRollingDecision decision{
+      .kind = SurfaceRollingDecision::Kind::kNextPortalSet,
+      .projected_route_progress_m = 0.0,
+      .desired_horizon_progress_m = 2.0,
+      .targets_final_goal = false,
+  };
+
+  const auto converted = ConvertSurfacePortalsToLocalGoals(
+      portals, decision,
+      Pose3{.position_m = {.x = 0.5, .y = 0.5, .z = 0.0}}, global_map,
+      local_map);
+
+  ASSERT_TRUE(converted.ok()) << converted.reason_code;
+  ASSERT_EQ(converted.goals->goals_odom.size(), 1U);
+  const auto* point = std::get_if<PointGoal>(
+      &converted.goals->goals_odom.front().target);
+  ASSERT_NE(point, nullptr);
+  EXPECT_DOUBLE_EQ(point->position_m.x, 2.0);
+  EXPECT_DOUBLE_EQ(point->position_m.y, 2.0);
+  EXPECT_DOUBLE_EQ(point->position_m.z, 0.25);
+  EXPECT_NEAR(point->tolerance_m, 0.5 - 1.0e-9, 1.0e-12);
+  EXPECT_FALSE(converted.goals->goals_odom.front().yaw_rad.has_value());
+  EXPECT_DOUBLE_EQ(converted.goals->goals_odom.front().yaw_tolerance_rad, 0.0);
+}
+
+TEST(SurfacePortalSet, PreservesTheExactFinalLocalGoal) {
+  const GridMap global_map = GlobalMap(4U, 4U);
+  GridMap local_map = LocalMap(4U, 4U);
+  local_map.resolution_m = 0.5;
+  const GoalRegion exact_goal{
+      .goal_id = "final",
+      .target = PointGoal{
+          .position_m = {.x = 1.37, .y = 1.63, .z = 0.4},
+          .tolerance_m = 0.07,
+      },
+      .yaw_rad = 0.75,
+      .yaw_tolerance_rad = 0.1,
+  };
+  const SurfacePortalSetResult portals{
+      .candidates = {SurfacePortalCandidate{
+          .goal_odom = exact_goal,
+          .route_progress_m = 2.0,
+          .global_cell = {.x = 1, .y = 1},
+          .local_cell = {.x = 2, .y = 3},
+      }},
+  };
+  const SurfaceRollingDecision decision{
+      .kind = SurfaceRollingDecision::Kind::kNextPortalSet,
+      .projected_route_progress_m = 0.0,
+      .desired_horizon_progress_m = 2.0,
+      .targets_final_goal = true,
+  };
+
+  const auto converted = ConvertSurfacePortalsToLocalGoals(
+      portals, decision, Pose3{}, global_map, local_map);
+
+  ASSERT_TRUE(converted.ok()) << converted.reason_code;
+  ASSERT_TRUE(converted.goals->exact_final_goal);
+  ASSERT_EQ(converted.goals->goals_odom.size(), 1U);
+  const GoalRegion& retained = converted.goals->goals_odom.front();
+  const auto* retained_point = std::get_if<PointGoal>(&retained.target);
+  ASSERT_NE(retained_point, nullptr);
+  EXPECT_EQ(retained.goal_id, exact_goal.goal_id);
+  EXPECT_EQ(retained_point->position_m,
+            std::get<PointGoal>(exact_goal.target).position_m);
+  EXPECT_DOUBLE_EQ(retained_point->tolerance_m,
+                   std::get<PointGoal>(exact_goal.target).tolerance_m);
+  EXPECT_EQ(retained.yaw_rad, exact_goal.yaw_rad);
+  EXPECT_DOUBLE_EQ(retained.yaw_tolerance_rad,
+                   exact_goal.yaw_tolerance_rad);
 }
 
 }  // namespace

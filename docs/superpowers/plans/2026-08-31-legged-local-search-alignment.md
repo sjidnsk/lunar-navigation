@@ -28,13 +28,12 @@
 - 修改：`ros2_ws/src/lunar_pure_planner_core/src/hierarchical/surface_portal_set.cpp`
 - 修改：`ros2_ws/src/lunar_pure_planner_core/src/hierarchical/global_route_planner.cpp`
 - 修改：`ros2_ws/src/lunar_pure_planner_core/test/surface_portal_set_test.cpp`
-- 修改：`ros2_ws/src/lunar_pure_planner_core/test/global_route_planner_test.cpp`
 
-- [ ] **1.1 先补转换失败测试**
+- [x] **1.1 先补转换失败测试**
 
-  在 `global_route_planner_test.cpp` 构造全局格中心落在局部格边界的足式中间门户，断言转换后的 `PointGoal.position_m` 等于 `local_map.CellCenter(candidate.local_cell)`，容差为 `0.5 * local_resolution - epsilon` 且大于零；再断言精确最终目标的位置、容差和朝向原样保留。
+  在已注册的 `surface_portal_set_test.cpp` 构造全局格中心落在局部格边界的足式中间门户，断言转换后的 `PointGoal.position_m` 等于局部格中心，容差为 `0.5 * local_resolution - epsilon` 且大于零；再断言精确最终目标的位置、容差和朝向原样保留。
 
-- [ ] **1.2 运行门户相关测试并确认 RED**
+- [x] **1.2 运行门户相关测试并确认 RED**
 
   ```bash
   source /opt/ros/jazzy/setup.bash
@@ -47,11 +46,11 @@
 
   预期：新的局部格中心/非零容差断言失败；现有足式同进度中心线排序测试保留。
 
-- [ ] **1.3 实现最小转换修正**
+- [x] **1.3 实现最小转换修正**
 
   仅对 `exact_final_goal == false` 的门户使用其 `local_cell` 中心生成目标，容差设为半格宽减小量；精确最终目标分支不变。保留当前足式“同路线进度时横向偏移绝对值优先”的排序，轮式排序仍按原净空/稳定序号。
 
-- [ ] **1.4 验证并提交 Task 1**
+- [x] **1.4 验证并提交 Task 1**
 
   运行上述两个测试目标和 `git diff --check`，显式暂存五个文件，提交：
 

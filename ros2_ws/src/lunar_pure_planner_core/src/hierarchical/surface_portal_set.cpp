@@ -99,9 +99,16 @@ struct RouteSample final {
 }
 
 [[nodiscard]] bool CandidateLess(const SurfacePortalCandidate& left,
-                                 const SurfacePortalCandidate& right) noexcept {
+                                 const SurfacePortalCandidate& right,
+                                 const bool prefer_route_centerline) noexcept {
   if (left.route_progress_m != right.route_progress_m) {
     return left.route_progress_m > right.route_progress_m;
+  }
+  if (prefer_route_centerline &&
+      std::abs(left.lateral_offset_cells) !=
+          std::abs(right.lateral_offset_cells)) {
+    return std::abs(left.lateral_offset_cells) <
+           std::abs(right.lateral_offset_cells);
   }
   if (left.global_clearance_m != right.global_clearance_m) {
     return left.global_clearance_m > right.global_clearance_m;
@@ -229,6 +236,7 @@ SurfacePortalSetResult BuildSurfacePortalSet(
             .local_cell = *local_cell,
             .global_clearance_m = global_view.ClearanceMeters(*global_cell),
             .local_clearance_m = local.value->clearance_m[local_index],
+            .lateral_offset_cells = 0,
             .stable_rank = 0U,
         }},
     };
@@ -304,6 +312,7 @@ SurfacePortalSetResult BuildSurfacePortalSet(
           .local_cell = *local_cell,
           .global_clearance_m = global_view.ClearanceMeters(*global_cell),
           .local_clearance_m = local.value->clearance_m[local_index],
+          .lateral_offset_cells = lateral_cells,
           .stable_rank = creation_rank,
       });
       ++creation_rank;
@@ -313,7 +322,13 @@ SurfacePortalSetResult BuildSurfacePortalSet(
   if (candidates.empty()) {
     return Failure("NO_PATH");
   }
-  std::sort(candidates.begin(), candidates.end(), CandidateLess);
+  const bool prefer_route_centerline =
+      std::holds_alternative<LeggedCapability>(input.capability);
+  std::sort(candidates.begin(), candidates.end(),
+            [prefer_route_centerline](const SurfacePortalCandidate& left,
+                                      const SurfacePortalCandidate& right) {
+              return CandidateLess(left, right, prefer_route_centerline);
+            });
   if (candidates.size() > bounded_max) {
     candidates.resize(bounded_max);
   }
