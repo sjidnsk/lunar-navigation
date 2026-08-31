@@ -694,6 +694,38 @@ TEST(PurePlanMotionServer, RejectsInvalidRollingParameter) {
   }
 }
 
+TEST(PurePlanMotionServer, BoundsRollingTransientRetryLimit) {
+  auto planner = [](const auto&) {
+    return Failure(lunar::pure_planning::PlanningStatus::kNoPath, "NO_PATH");
+  };
+  auto defaults = std::make_shared<PurePlanMotionServer>(
+      ServerOptions("wheel", ConfigPath("wheel.yaml").string()), planner);
+  std::int64_t retry_limit{-1};
+  ASSERT_TRUE(defaults->get_parameter("rolling_transient_retry_limit",
+                                      retry_limit));
+  EXPECT_EQ(retry_limit, 2);
+
+  for (const std::int64_t valid : {0, 10}) {
+    EXPECT_NO_THROW({
+      auto server = std::make_shared<PurePlanMotionServer>(
+          ServerOptions(
+              "wheel", ConfigPath("wheel.yaml").string(),
+              {rclcpp::Parameter{"rolling_transient_retry_limit", valid}}),
+          planner);
+    }) << valid;
+  }
+  for (const std::int64_t invalid : {-1, 11}) {
+    EXPECT_THROW(
+        PurePlanMotionServer(
+            ServerOptions(
+                "wheel", ConfigPath("wheel.yaml").string(),
+                {rclcpp::Parameter{"rolling_transient_retry_limit", invalid}}),
+            planner),
+        std::runtime_error)
+        << invalid;
+  }
+}
+
 TEST(PurePlanMotionServer, RejectsUnknownWheelPlannerMode) {
   EXPECT_THROW(
       PurePlanMotionServer(
@@ -1025,13 +1057,15 @@ TEST(PurePlanMotionServer,
   EXPECT_TRUE(cleared_reference.trajectory.points.empty());
   ASSERT_TRUE(WaitFor([&] { return failed.WheeledPaths().size() == 1U; }));
   const auto cleared = failed.WheeledPaths().front();
-  EXPECT_TRUE(cleared.header.frame_id.empty());
+  EXPECT_EQ(cleared.header.frame_id, "odom");
   EXPECT_TRUE(cleared.poses.empty());
   ASSERT_TRUE(
       WaitFor([&] { return failed.WheeledGlobalPaths().size() == 1U; }));
   EXPECT_TRUE(failed.WheeledGlobalPaths().front().poses.empty());
+  EXPECT_EQ(failed.WheeledGlobalPaths().front().header.frame_id, "map");
   ASSERT_TRUE(WaitFor([&] { return failed.TimedPaths().size() == 1U; }));
   EXPECT_TRUE(failed.TimedPaths().front().path.poses.empty());
+  EXPECT_EQ(failed.TimedPaths().front().path.header.frame_id, "odom");
 }
 
 TEST(PurePlanMotionServer,
@@ -2049,6 +2083,230 @@ TEST(PurePlanMotionServer,
   EXPECT_EQ(system.Result(handle).code, rclcpp_action::ResultCode::CANCELED);
 }
 
+TEST(PurePlanMotionServer, RollingPortalFailureIdentifiesPortalSetStage) {
+  RunningSystem system{
+      [](const lunar::pure_planning::PlanningRequest&) {
+        return Failure(lunar::pure_planning::PlanningStatus::kPlannerError,
+                       "PLANNER_ERROR");
+      },
+      "wheel", ConfigPath("wheel.yaml").string(),
+      {rclcpp::Parameter{"rolling_surface_enabled", true}}};
+  system.PublishInputs();
+  system.PublishLocal(BlockedLocalMap());
+  std::this_thread::sleep_for(20ms);
+
+  const auto handle = system.SendGoal(system.Goal("rolling_portal_failure"));
+  ASSERT_NE(handle, nullptr);
+  const auto result = system.Result(handle);
+
+  EXPECT_EQ(result.code, rclcpp_action::ResultCode::ABORTED);
+  ASSERT_NE(result.result, nullptr);
+  EXPECT_EQ(result.result->reason_code, "NO_PATH");
+  ASSERT_TRUE(WaitFor([&] { return system.DiagnosticCount() == 1U; }));
+  EXPECT_EQ(FindDiagnosticValue(system.Diagnostics().front(),
+                                "rolling_failure_stage"),
+            "PORTAL_SET");
+}
+
+TEST(PurePlanMotionServer, RollingFirstLocalNoPathRemainsTerminal) {
+  std::atomic<std::uint64_t> calls{0U};
+  RunningSystem system{
+      [](const lunar::pure_planning::PlanningRequest&) {
+        return Failure(lunar::pure_planning::PlanningStatus::kPlannerError,
+                       "PLANNER_ERROR");
+      },
+      "wheel", ConfigPath("wheel.yaml").string(),
+      {rclcpp::Parameter{"rolling_surface_enabled", true},
+       rclcpp::Parameter{"rolling_poll_period_ms", 10}},
+      [&](const lunar::pure_planning::PlanningRequest&,
+          const lunar::pure_planning::LocalGoalSet&,
+          lunar::pure_planning::SearchControl) {
+        ++calls;
+        return lunar::pure_planning::LocalStageResult{
+            .status = lunar::pure_planning::LocalPlanStatus::kNoPath,
+            .reason_code = "NO_PATH"};
+      }};
+  system.PublishInputs();
+
+  const auto handle = system.SendGoal(system.Goal("rolling_first_no_path"));
+  ASSERT_NE(handle, nullptr);
+  const auto result = system.Result(handle);
+
+  EXPECT_EQ(result.code, rclcpp_action::ResultCode::ABORTED);
+  EXPECT_EQ(calls.load(), 1U);
+  ASSERT_TRUE(WaitFor([&] { return system.DiagnosticCount() == 1U; }));
+  EXPECT_EQ(FindDiagnosticValue(system.Diagnostics().front(),
+                                "rolling_recovery"),
+            "");
+}
+
+TEST(PurePlanMotionServer,
+     RollingRecoversPostSuccessNoPathClearsOutputsAndResetsAttempt) {
+  std::atomic<std::uint64_t> calls{0U};
+  RunningSystem system{
+      [](const lunar::pure_planning::PlanningRequest&) {
+        return Failure(lunar::pure_planning::PlanningStatus::kPlannerError,
+                       "PLANNER_ERROR");
+      },
+      "wheel", ConfigPath("wheel.yaml").string(),
+      {rclcpp::Parameter{"rolling_surface_enabled", true},
+       rclcpp::Parameter{"rolling_poll_period_ms", 10},
+       rclcpp::Parameter{"rolling_min_replan_interval_ms", 10}},
+      [&](const lunar::pure_planning::PlanningRequest& request,
+          const lunar::pure_planning::LocalGoalSet& goals,
+          lunar::pure_planning::SearchControl) {
+        const auto call = ++calls;
+        if (call == 2U || call == 4U) {
+          return lunar::pure_planning::LocalStageResult{
+              .status = lunar::pure_planning::LocalPlanStatus::kNoPath,
+              .reason_code = "NO_PATH"};
+        }
+        return LocalSuccess(request, goals);
+      }};
+  system.PublishInputs();
+
+  const auto handle = system.SendGoal(system.Goal("rolling_recovery"));
+  ASSERT_NE(handle, nullptr);
+  ASSERT_TRUE(WaitFor([&] { return calls.load() >= 1U; }));
+  ASSERT_TRUE(WaitFor([&] {
+    return std::ranges::any_of(system.WheeledPaths(), [](const auto& path) {
+      return !path.poses.empty();
+    });
+  }));
+  system.PublishLocalOnly();
+  ASSERT_TRUE(WaitFor([&] { return calls.load() >= 3U; }));
+  system.PublishLocalOnly();
+  ASSERT_TRUE(WaitFor([&] { return calls.load() >= 5U; }));
+  ASSERT_TRUE(WaitFor([&] { return system.DiagnosticCount() >= 5U; }));
+
+  const auto diagnostics = system.Diagnostics();
+  std::vector<std::string> recovery_attempts;
+  for (const auto& diagnostic : diagnostics) {
+    if (FindDiagnosticValue(diagnostic, "rolling_recovery") == "true") {
+      recovery_attempts.push_back(
+          FindDiagnosticValue(diagnostic, "rolling_recovery_attempt"));
+    }
+  }
+  EXPECT_EQ(recovery_attempts, (std::vector<std::string>{"1", "1"}));
+
+  const auto paths = system.WheeledPaths();
+  const auto cleared_path = std::ranges::find_if(
+      paths, [](const auto& path) { return path.poses.empty(); });
+  ASSERT_NE(cleared_path, paths.end());
+  EXPECT_EQ(cleared_path->header.frame_id, "odom");
+  const auto global_paths = system.WheeledGlobalPaths();
+  const auto cleared_global = std::ranges::find_if(
+      global_paths, [](const auto& path) { return path.poses.empty(); });
+  ASSERT_NE(cleared_global, global_paths.end());
+  EXPECT_EQ(cleared_global->header.frame_id, "map");
+  const auto timed_paths = system.TimedPaths();
+  const auto cleared_timed = std::ranges::find_if(
+      timed_paths,
+      [](const auto& path) { return path.path.poses.empty(); });
+  ASSERT_NE(cleared_timed, timed_paths.end());
+  EXPECT_EQ(cleared_timed->path.header.frame_id, "odom");
+
+  auto cancel = system.action_client->async_cancel_goal(handle);
+  ASSERT_EQ(cancel.wait_for(3s), std::future_status::ready);
+  EXPECT_EQ(cancel.get()->return_code,
+            action_msgs::srv::CancelGoal::Response::ERROR_NONE);
+  EXPECT_EQ(system.Result(handle).code, rclcpp_action::ResultCode::CANCELED);
+}
+
+TEST(PurePlanMotionServer, RollingExhaustsTwoPostSuccessNoPathRetries) {
+  std::atomic<std::uint64_t> calls{0U};
+  RunningSystem system{
+      [](const lunar::pure_planning::PlanningRequest&) {
+        return Failure(lunar::pure_planning::PlanningStatus::kPlannerError,
+                       "PLANNER_ERROR");
+      },
+      "wheel", ConfigPath("wheel.yaml").string(),
+      {rclcpp::Parameter{"rolling_surface_enabled", true},
+       rclcpp::Parameter{"rolling_poll_period_ms", 10},
+       rclcpp::Parameter{"rolling_min_replan_interval_ms", 10},
+       rclcpp::Parameter{"rolling_transient_retry_limit", 2}},
+      [&](const lunar::pure_planning::PlanningRequest& request,
+          const lunar::pure_planning::LocalGoalSet& goals,
+          lunar::pure_planning::SearchControl) {
+        if (++calls == 1U) {
+          return LocalSuccess(request, goals);
+        }
+        return lunar::pure_planning::LocalStageResult{
+            .status = lunar::pure_planning::LocalPlanStatus::kNoPath,
+            .reason_code = "NO_PATH"};
+      }};
+  system.PublishInputs();
+
+  const auto handle = system.SendGoal(system.Goal("rolling_exhaustion"));
+  ASSERT_NE(handle, nullptr);
+  ASSERT_TRUE(WaitFor([&] {
+    return std::ranges::any_of(system.WheeledPaths(), [](const auto& path) {
+      return !path.poses.empty();
+    });
+  }));
+  system.PublishLocalOnly();
+  const auto result = system.Result(handle);
+
+  EXPECT_EQ(result.code, rclcpp_action::ResultCode::ABORTED);
+  ASSERT_NE(result.result, nullptr);
+  EXPECT_EQ(result.result->reason_code, "NO_PATH");
+  EXPECT_EQ(calls.load(), 4U);
+  const auto diagnostics = system.Diagnostics();
+  std::vector<std::string> recovery_attempts;
+  for (const auto& diagnostic : diagnostics) {
+    if (FindDiagnosticValue(diagnostic, "rolling_recovery") == "true") {
+      recovery_attempts.push_back(
+          FindDiagnosticValue(diagnostic, "rolling_recovery_attempt"));
+    }
+  }
+  EXPECT_EQ(recovery_attempts, (std::vector<std::string>{"1", "2"}));
+}
+
+TEST(PurePlanMotionServer, RollingRecoversPostSuccessHardTimeout) {
+  std::atomic<std::uint64_t> calls{0U};
+  RunningSystem system{
+      [](const lunar::pure_planning::PlanningRequest&) {
+        return Failure(lunar::pure_planning::PlanningStatus::kPlannerError,
+                       "PLANNER_ERROR");
+      },
+      "wheel", ConfigPath("wheel.yaml").string(),
+      {rclcpp::Parameter{"rolling_surface_enabled", true},
+       rclcpp::Parameter{"rolling_poll_period_ms", 10},
+       rclcpp::Parameter{"rolling_min_replan_interval_ms", 10}},
+      [&](const lunar::pure_planning::PlanningRequest& request,
+          const lunar::pure_planning::LocalGoalSet& goals,
+          lunar::pure_planning::SearchControl) {
+        const auto call = ++calls;
+        if (call == 2U) {
+          std::this_thread::sleep_until(*request.request_started_at + 3s);
+        }
+        return LocalSuccess(request, goals);
+      }};
+  system.PublishInputs();
+
+  const auto handle = system.SendGoal(system.Goal("rolling_timeout_recovery"));
+  ASSERT_NE(handle, nullptr);
+  ASSERT_TRUE(WaitFor([&] {
+    return std::ranges::any_of(system.WheeledPaths(), [](const auto& path) {
+      return !path.poses.empty();
+    });
+  }));
+  system.PublishLocalOnly();
+  ASSERT_TRUE(WaitFor([&] { return calls.load() >= 3U; }, 5s));
+  ASSERT_TRUE(WaitFor([&] { return system.DiagnosticCount() >= 3U; }));
+  const auto diagnostics = system.Diagnostics();
+  EXPECT_EQ(FindDiagnosticValue(diagnostics[1], "reason_code"), "TIMEOUT");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics[1], "rolling_recovery"), "true");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics[1], "rolling_recovery_attempt"),
+            "1");
+
+  auto cancel = system.action_client->async_cancel_goal(handle);
+  ASSERT_EQ(cancel.wait_for(3s), std::future_status::ready);
+  EXPECT_EQ(cancel.get()->return_code,
+            action_msgs::srv::CancelGoal::Response::ERROR_NONE);
+  EXPECT_EQ(system.Result(handle).code, rclcpp_action::ResultCode::CANCELED);
+}
+
 TEST(PurePlanMotionServer,
      RollingFirstCycleFinalizedAtTwoPointFiveSecondsIsPlanFoundLate) {
   RunningSystem system{
@@ -2115,6 +2373,13 @@ TEST(PurePlanMotionServer,
   EXPECT_EQ(result_status, std::future_status::ready);
   ASSERT_TRUE(WaitFor([&] { return system.WheeledPaths().size() == 1U; }));
   EXPECT_TRUE(system.WheeledPaths().front().poses.empty());
+  EXPECT_EQ(system.WheeledPaths().front().header.frame_id, "odom");
+  ASSERT_TRUE(WaitFor([&] { return system.WheeledGlobalPaths().size() == 1U; }));
+  EXPECT_TRUE(system.WheeledGlobalPaths().front().poses.empty());
+  EXPECT_EQ(system.WheeledGlobalPaths().front().header.frame_id, "map");
+  ASSERT_TRUE(WaitFor([&] { return system.TimedPaths().size() == 1U; }));
+  EXPECT_TRUE(system.TimedPaths().front().path.poses.empty());
+  EXPECT_EQ(system.TimedPaths().front().path.header.frame_id, "odom");
   if (result_status != std::future_status::ready) {
     auto cancel = system.action_client->async_cancel_goal(handle);
     ASSERT_EQ(cancel.wait_for(3s), std::future_status::ready);

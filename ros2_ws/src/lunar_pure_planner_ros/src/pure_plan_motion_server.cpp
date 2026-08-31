@@ -75,6 +75,7 @@ struct RollingSurfaceParameters final {
   std::int64_t poll_period_ms{100};
   std::int64_t min_replan_interval_ms{500};
   double max_deviation_m{2.0};
+  std::int64_t transient_retry_limit{2};
 };
 
 struct RuntimeParameters final {
@@ -186,6 +187,8 @@ struct RuntimeParameters final {
           "rolling_min_replan_interval_ms", 500),
       .max_deviation_m =
           node.declare_parameter<double>("rolling_max_deviation_m", 2.0),
+      .transient_retry_limit = node.declare_parameter<std::int64_t>(
+          "rolling_transient_retry_limit", 2),
   };
   if (!std::isfinite(rolling_surface.horizon_m) ||
       rolling_surface.horizon_m <= 0.0 ||
@@ -194,7 +197,9 @@ struct RuntimeParameters final {
       rolling_surface.poll_period_ms < 10 ||
       rolling_surface.poll_period_ms > 10000 ||
       rolling_surface.min_replan_interval_ms < 10 ||
-      rolling_surface.min_replan_interval_ms > 10000) {
+      rolling_surface.min_replan_interval_ms > 10000 ||
+      rolling_surface.transient_retry_limit < 0 ||
+      rolling_surface.transient_retry_limit > 10) {
     throw std::runtime_error{"PLANNER_ERROR: rolling parameter invalid"};
   }
 
@@ -343,6 +348,10 @@ void SetDiagnosticValue(diagnostic_msgs::msg::DiagnosticArray& diagnostics,
       return;
     }
   }
+  diagnostic_msgs::msg::KeyValue field;
+  field.key = key;
+  field.value = std::move(value);
+  diagnostics.status.front().values.push_back(std::move(field));
 }
 
 [[nodiscard]] std::vector<lunar::pure_planning::Pose3> ResultPathPoses(
@@ -716,7 +725,10 @@ struct PurePlanMotionServer::Impl final {
   void PublishCycleDiagnostics(
       const std::shared_ptr<const Action::Goal>& request_goal,
       const lunar::pure_planning::PlanningResult& result,
-      const bool stale_input = false) {
+      const bool stale_input = false,
+      const std::string_view rolling_failure_stage = {},
+      const std::optional<std::size_t> rolling_recovery_attempt =
+          std::nullopt) {
     auto diagnostics = MakeRequestDiagnostics(
         request_goal ? std::string_view{request_goal->request_id}
                      : std::string_view{},
@@ -732,6 +744,15 @@ struct PurePlanMotionServer::Impl final {
       SetDiagnosticValue(diagnostics, "planning_outcome",
                          std::to_string(Action::Result::STALE_INPUT));
       SetDiagnosticValue(diagnostics, "reason_code", "STALE_INPUT");
+    }
+    if (!rolling_failure_stage.empty()) {
+      SetDiagnosticValue(diagnostics, "rolling_failure_stage",
+                         std::string{rolling_failure_stage});
+    }
+    if (rolling_recovery_attempt.has_value()) {
+      SetDiagnosticValue(diagnostics, "rolling_recovery", "true");
+      SetDiagnosticValue(diagnostics, "rolling_recovery_attempt",
+                         std::to_string(*rolling_recovery_attempt));
     }
     if (!ContextIsValid()) {
       return;
@@ -1104,11 +1125,40 @@ struct PurePlanMotionServer::Impl final {
     std::uint64_t route_global_sequence{};
     std::uint64_t route_tf_sequence{};
     std::uint64_t seen_local_sequence{};
+    std::size_t transient_retry_count{};
     double minimum_route_progress_m{};
     bool force_replan = true;
     auto last_replan = std::chrono::steady_clock::now() -
         std::chrono::milliseconds{
             parameters.rolling_surface.min_replan_interval_ms};
+    const auto recover_transient_local_failure =
+        [&](const PlanningResult& failure,
+            const std::string_view failure_stage) {
+          const bool transient = failure.status == PlanningStatus::kNoPath ||
+                                 failure.status == PlanningStatus::kTimedOut;
+          if (!transient || !last_segment.has_value() ||
+              transient_retry_count >= static_cast<std::size_t>(
+                                           parameters.rolling_surface
+                                               .transient_retry_limit)) {
+            return false;
+          }
+          ++transient_retry_count;
+          PublishCycleDiagnostics(request_goal, failure, false, failure_stage,
+                                  transient_retry_count);
+          if (result_diagnostic_published != nullptr) {
+            *result_diagnostic_published = true;
+          }
+          if (ContextIsValid()) {
+            auto cleared =
+                ConvertResult(failure, request_goal->mission_revision);
+            PublishWheeledPath(failure, cleared,
+                               failure.timing.total_elapsed);
+          }
+          force_replan = true;
+          std::this_thread::sleep_for(std::chrono::milliseconds{
+              parameters.rolling_surface.poll_period_ms});
+          return true;
+        };
 
     while (!stop_token.stop_requested()) {
       InputSnapshot snapshot = input_store.Capture();
@@ -1350,7 +1400,10 @@ struct PurePlanMotionServer::Impl final {
               std::chrono::duration_cast<std::chrono::nanoseconds>(
                   local_goal_finished - cycle_timing->started_at);
         }
-        PublishCycleDiagnostics(request_goal, failed);
+        if (recover_transient_local_failure(failed, "PORTAL_SET")) {
+          continue;
+        }
+        PublishCycleDiagnostics(request_goal, failed, false, "PORTAL_SET");
         if (result_diagnostic_published != nullptr) {
           *result_diagnostic_published = true;
         }
@@ -1427,6 +1480,9 @@ struct PurePlanMotionServer::Impl final {
       if (cycle_finalized >= cycle_timing->hard_deadline) {
         auto timeout = Failure(PlanningStatus::kTimedOut, "TIMEOUT");
         timeout.timing = segment.timing;
+        if (recover_transient_local_failure(timeout, "LOCAL_SEARCH")) {
+          continue;
+        }
         PublishCycleDiagnostics(request_goal, timeout);
         if (result_diagnostic_published != nullptr) {
           *result_diagnostic_published = true;
@@ -1435,6 +1491,9 @@ struct PurePlanMotionServer::Impl final {
       }
       if (segment.status != PlanningStatus::kSuccess ||
           !segment.reference.has_value()) {
+        if (recover_transient_local_failure(segment, "LOCAL_SEARCH")) {
+          continue;
+        }
         PublishCycleDiagnostics(request_goal, segment);
         if (result_diagnostic_published != nullptr) {
           *result_diagnostic_published = true;
@@ -1463,6 +1522,9 @@ struct PurePlanMotionServer::Impl final {
         timeout.timing.total_elapsed =
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 cycle_finalized - cycle_timing->started_at);
+        if (recover_transient_local_failure(timeout, "LOCAL_SEARCH")) {
+          continue;
+        }
         PublishCycleDiagnostics(request_goal, timeout);
         if (result_diagnostic_published != nullptr) {
           *result_diagnostic_published = true;
@@ -1496,6 +1558,9 @@ struct PurePlanMotionServer::Impl final {
       if (cycle_finalized >= cycle_timing->hard_deadline) {
         auto timeout = Failure(PlanningStatus::kTimedOut, "TIMEOUT");
         timeout.timing = segment.timing;
+        if (recover_transient_local_failure(timeout, "LOCAL_SEARCH")) {
+          continue;
+        }
         PublishCycleDiagnostics(request_goal, timeout);
         if (result_diagnostic_published != nullptr) {
           *result_diagnostic_published = true;
@@ -1549,6 +1614,7 @@ struct PurePlanMotionServer::Impl final {
         }
       }
       last_segment = std::move(segment);
+      transient_retry_count = 0U;
       seen_local_sequence = snapshot.local_sequence;
       last_replan = std::chrono::steady_clock::now();
       force_replan = false;
@@ -1836,6 +1902,7 @@ struct PurePlanMotionServer::Impl final {
       const std::chrono::nanoseconds planning_time) {
     lunar_planning_msgs::msg::MotionReference reference;
     nav_msgs::msg::Path path;
+    path.header.frame_id = "odom";
     if (result.has_reference &&
         result.reference.platform_type == result.reference.WHEELED) {
       reference = result.reference;
@@ -1845,6 +1912,7 @@ struct PurePlanMotionServer::Impl final {
     wheeled_path_publisher->publish(path);
 
     nav_msgs::msg::Path global_path;
+    global_path.header.frame_id = "map";
     if (result.has_reference &&
         result.reference.platform_type == result.reference.WHEELED &&
         !planning_result.global_route_preview.poses_map.empty()) {

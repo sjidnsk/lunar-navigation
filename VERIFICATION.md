@@ -7,6 +7,27 @@
 Action/graph、接口合同和仓库边界。没有真实 rosbag、在线全局图、生产 ROS domain 切换或 Jetson
 AGX Orin 证据，因此不声明真实 `LAVA_TUBE`、`LUNAR_SURFACE` 端到端或设备发布就绪。
 
+## 2026-08-31 轮式滚动 Demo 稳定性变更
+
+本节对应 `fix/wheel-rolling-demo-stability`，不覆盖下方历史 Task 16 Humble 报告。变更保持
+`SamePlanningIdentity` 的全局图、局部图和 TF 序列校验以及单周期 `3 s` 硬截止不变，并增加：
+
+- 12 m 前瞻内从前瞻端回退到投影点前一格的有界 portal 采样，诊断可用
+  `rolling_failure_stage=PORTAL_SET` 区分局部门点失败；
+- 成功段之后最多两次局部 `NO_PATH`/`TIMEOUT` 恢复，恢复前清空参考、局部/全局 Path 和 TimedPath；
+- Demo 在所需消费者发现后短暂重发启动局部图，稳定阶段按 `4 m` 位移更新；空 Path 停止旧路径，
+  Reporter 使用诊断时的最新 odometry 起点。
+
+当前证据状态：
+
+| 层级 | 状态 | 证据/边界 |
+| --- | --- | --- |
+| source / focused TDD | `PASS` | portal、参数边界、恢复/耗尽/超时、空路径 frame、4 m cadence、空路径停止和 reporter 起点均完成 RED→GREEN；server 55/55 |
+| local ROS 2 Jazzy package/full tests | `PASS` | 根目录 pytest `350 passed, 1 skipped`；隔离 domain 的 ROS 包 CTest `19/19`；core CTest 最终串行复验 `21/21`；受影响 portal 通过，server `55/55`。较早一次 current 与 detached baseline 均在 750 m 随机场景 segment 107 约 3003 ms 超时，最终复验通过，未因此放宽截止或算法门限 |
+| local Jazzy headless Demo | `PASS_JAZZY_DEMO` | 隔离 domain 201、`start_rviz:=false auto_goal:=true`：连续获得至少 9 次正式成功三元组，Reporter 起点随 odometry 推进；发布空 `/lunar_demo/wheeled_path` 后 3 s 内 odometry 保持 `(-146.24224793079367, -9.426541380124155)` |
+| Ubuntu 22.04 / ROS 2 Humble | `NOT_RUN_THIS_CHANGE` | 下方历史证据不覆盖本次改动 |
+| Jetson AGX Orin / DDS / rosbag / controller / vehicle | `NOT_RUN` | 本次范围不包含目标机部署或车辆控制 |
+
 ## 1. 源码与证据目录
 
 生产源码/前置测试基线：

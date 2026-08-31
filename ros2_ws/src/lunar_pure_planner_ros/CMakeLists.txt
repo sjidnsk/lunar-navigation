@@ -36,6 +36,7 @@ set(LUNAR_PURE_PLANNER_ROS_SOURCES
   src/rviz_goal_bridge.cpp)
 if(LUNAR_BUILD_DEMO)
   list(APPEND LUNAR_PURE_PLANNER_ROS_SOURCES
+    src/lunar_surface_demo_state.cpp
     src/lunar_surface_scenario.cpp
     src/lunar_surface_local_map.cpp
     src/lunar_surface_reporter.cpp
@@ -232,6 +233,10 @@ if(BUILD_TESTING)
     ament_add_gtest(lunar_surface_scenario_test
       test/lunar_surface_scenario_test.cpp)
     target_link_libraries(lunar_surface_scenario_test ${PROJECT_NAME})
+
+    ament_add_gtest(lunar_surface_demo_state_test
+      test/lunar_surface_demo_state_test.cpp)
+    target_link_libraries(lunar_surface_demo_state_test ${PROJECT_NAME})
 
     ament_add_gtest(lunar_surface_reporter_test
       test/lunar_surface_reporter_test.cpp)

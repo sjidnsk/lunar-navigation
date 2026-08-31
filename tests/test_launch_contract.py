@@ -64,6 +64,7 @@ EXPECTED_PARAMETERS = {
     "rolling_poll_period_ms",
     "rolling_min_replan_interval_ms",
     "rolling_max_deviation_m",
+    "rolling_transient_retry_limit",
     *EXPECTED_TOPICS,
 }
 FORBIDDEN_PARAMETER_FRAGMENTS = {
@@ -82,6 +83,11 @@ def load_parameters() -> dict[str, object]:
     """Read the one ROS parameters document and return its shared defaults."""
     document = yaml.safe_load(PARAMETERS_PATH.read_text(encoding="utf-8"))
     return document["/**"]["ros__parameters"]
+
+
+def test_rolling_transient_retry_limit_defaults_to_two() -> None:
+    """The shared runtime contract must keep recovery bounded by default."""
+    assert load_parameters()["rolling_transient_retry_limit"] == 2
 
 
 def _markdown_section(text: str, heading: str) -> str:

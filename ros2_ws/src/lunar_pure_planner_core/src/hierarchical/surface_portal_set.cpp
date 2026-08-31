@@ -9,6 +9,7 @@
 #include <set>
 #include <tuple>
 #include <utility>
+#include <vector>
 
 #include "hierarchical/frame_transform.hpp"
 #include "shared/controlled_work.hpp"
@@ -19,8 +20,7 @@ namespace lunar::pure_planning::hierarchical {
 namespace {
 
 constexpr std::size_t kMaximumPortalCandidates = 32U;
-constexpr std::array<double, 8> kBackoffCells{0.0, 1.0, 2.0, 3.0,
-                                              4.0, 5.0, 6.0, 7.0};
+constexpr std::size_t kMaximumLongitudinalSamples = 32U;
 constexpr std::array<std::int32_t, 9> kLateralCells{0, -1, 1, -2, 2,
                                                     -3, 3, -4, 4};
 
@@ -125,6 +125,33 @@ struct RouteSample final {
   return index < local.free_with_height.size() &&
          local.free_with_height[index] != 0U &&
          index < local.clearance_m.size();
+}
+
+[[nodiscard]] std::vector<double> LongitudinalProgresses(
+    const SurfaceRollingDecision& decision,
+    const double resolution_m) {
+  const double progress_span_m = decision.desired_horizon_progress_m -
+                                 decision.projected_route_progress_m;
+  const auto available_cells = static_cast<std::size_t>(
+      std::max(0.0, std::floor(progress_span_m / resolution_m + 1.0e-9)));
+  const std::size_t sample_count = std::clamp(
+      available_cells, std::size_t{1U}, kMaximumLongitudinalSamples);
+
+  std::vector<double> progresses;
+  progresses.reserve(sample_count);
+  for (std::size_t sample = 0U; sample < sample_count; ++sample) {
+    std::size_t backoff_cells = sample;
+    if (available_cells > kMaximumLongitudinalSamples &&
+        sample_count > 1U) {
+      backoff_cells = static_cast<std::size_t>(std::llround(
+          static_cast<double>(sample) *
+          static_cast<double>(available_cells - 1U) /
+          static_cast<double>(sample_count - 1U)));
+    }
+    progresses.push_back(decision.desired_horizon_progress_m -
+                         static_cast<double>(backoff_cells) * resolution_m);
+  }
+  return progresses;
 }
 
 }  // namespace
@@ -234,16 +261,14 @@ SurfacePortalSetResult BuildSurfacePortalSet(
     };
   }
 
+  const auto longitudinal_progresses = LongitudinalProgresses(
+      decision, global_map.snapshot->resolution_m());
   std::vector<SurfacePortalCandidate> candidates;
-  candidates.reserve(kBackoffCells.size() * kLateralCells.size());
+  candidates.reserve(longitudinal_progresses.size() * kLateralCells.size());
   std::set<std::tuple<std::int32_t, std::int32_t, std::int32_t, std::int32_t>>
       seen_cells;
   std::size_t creation_rank{};
-  for (const double backoff_cells : kBackoffCells) {
-    const double progress_m = std::max(
-        decision.projected_route_progress_m,
-        decision.desired_horizon_progress_m -
-            backoff_cells * global_map.snapshot->resolution_m());
+  for (const double progress_m : longitudinal_progresses) {
     const auto sample = SampleRoute(route, progress_m);
     if (!sample.has_value()) {
       return Failure("INVALID_INPUT");
