@@ -5,6 +5,16 @@
 
 namespace lunar::pure_planner_ros {
 
+bool LocalMapPublicationReady(const bool local_map_due,
+                              const bool startup_delivery_active,
+                              const std::size_t subscriber_count) noexcept {
+  // The isolated launch has two required consumers: the planner and the
+  // local traversability visualizer. Waiting for both prevents the visualizer
+  // from consuming the only startup sample before the planner is discovered.
+  return (local_map_due || startup_delivery_active) &&
+         subscriber_count >= 2U;
+}
+
 void LunarSurfaceDemoState::Reset(const double x_m, const double y_m,
                                   const double yaw_rad) noexcept {
   x_m_ = x_m;

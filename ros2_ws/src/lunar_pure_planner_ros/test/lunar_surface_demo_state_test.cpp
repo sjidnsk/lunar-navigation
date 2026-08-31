@@ -31,6 +31,14 @@ TEST(LunarSurfaceDemoState, PublishesFirstLocalMapThenEveryFourMetres) {
   EXPECT_TRUE(state.LocalMapDue(4.0));
 }
 
+TEST(LunarSurfaceDemoState, WaitsForBothConsumersBeforePublishing) {
+  EXPECT_FALSE(LocalMapPublicationReady(true, false, 0U));
+  EXPECT_FALSE(LocalMapPublicationReady(true, false, 1U));
+  EXPECT_TRUE(LocalMapPublicationReady(true, false, 2U));
+  EXPECT_FALSE(LocalMapPublicationReady(false, false, 2U));
+  EXPECT_TRUE(LocalMapPublicationReady(false, true, 2U));
+}
+
 TEST(LunarSurfaceDemoState, ResetForcesLocalMapAndClearsMotion) {
   LunarSurfaceDemoState state;
   state.Reset(0.0, 0.0);

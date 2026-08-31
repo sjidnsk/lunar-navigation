@@ -166,14 +166,19 @@ class LunarSurfaceDemoNode final : public rclcpp::Node {
     // Global terrain and map->odom are static in this test-only scene.
     // Republishing them after rolling has started increments their input
     // sequences and forces an unnecessary global-route rebuild every cycle.
-    const bool static_inputs_discovered =
+    const bool planner_inputs_discovered =
         global_pub_->get_subscription_count() > 0U &&
+        local_pub_->get_subscription_count() >= 2U &&
+        odom_pub_->get_subscription_count() >= 2U &&
         tf_pub_->get_subscription_count() > 0U;
     if (static_delivery_count_ < 12U) {
       global_pub_->publish(global);
     }
 
-    if (state_.LocalMapDue(kLocalMapUpdateDistanceM)) {
+    if (LocalMapPublicationReady(
+            state_.LocalMapDue(kLocalMapUpdateDistanceM),
+            static_delivery_count_ < 12U,
+            local_pub_->get_subscription_count())) {
       const LunarSurfaceLocalRaster raster =
           BuildLunarSurfaceLocalRaster(scenario_, start_x, start_y);
       grid_map_msgs::msg::GridMap local;
@@ -243,7 +248,7 @@ class LunarSurfaceDemoNode final : public rclcpp::Node {
     // publications before issuing the automatic goal so every planner input
     // has reached its callback cache; the former 1.5 s delay raced startup
     // and produced an INVALID_INPUT result.
-    if (static_inputs_discovered && static_delivery_count_ < 12U) {
+    if (planner_inputs_discovered && static_delivery_count_ < 12U) {
       ++static_delivery_count_;
       if (static_delivery_count_ == 12U && auto_goal_) {
         goal_pub_->publish(goal);

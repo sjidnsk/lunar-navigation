@@ -7,6 +7,10 @@
 
 namespace lunar::pure_planner_ros {
 
+[[nodiscard]] bool LocalMapPublicationReady(
+    bool local_map_due, bool startup_delivery_active,
+    std::size_t subscriber_count) noexcept;
+
 class LunarSurfaceDemoState final {
  public:
   void Reset(double x_m, double y_m, double yaw_rad = 0.0) noexcept;
