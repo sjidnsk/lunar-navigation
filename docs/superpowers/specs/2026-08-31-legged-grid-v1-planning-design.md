@@ -2,9 +2,11 @@
 
 ## 状态
 
-本设计于 2026-08-31 在对话中确认。它定义足式平台如何复用 Grid V1
-持久化可通行性地图，并保留现有全局 ARA*、局部足式 lattice/anytime
-规划器和 `kLeggedBodyReference` 输出契约。
+本设计于 2026-08-31 在对话中确认，并在 RViz 计算效率复核后补充局部边认证优化。
+它定义足式平台如何复用 Grid V1 持久化可通行性地图，保留现有全局 ARA*、
+局部足式 lattice/anytime 搜索和 `kLeggedBodyReference` 输出契约，同时把局部搜索
+中的逐边密集机身扫掠改为“足式地形预计算 + 开阔区域快速包络判定 + 障碍邻域精确
+回退”。
 
 本文档本身不修改规划代码。后续实施必须先形成独立实施计划，并保持现有轮式
 Grid V1 行为不变。
@@ -34,8 +36,9 @@ map <- odom TF ───────────────────┘     
                                     足式机身位姿轨迹
 ```
 
-Grid V1 负责统一地图语义和全局路线约束；现有足式局部规划器继续负责坡度、
-台阶、沟宽、机身高度和完整机身扫掠。下游足式控制器继续负责步态和逐脚控制。
+Grid V1 负责统一地图语义和全局路线约束；足式局部规划器继续负责坡度、台阶、
+沟宽、机身高度和机身几何有效性，但不得在每个搜索状态的每条候选边上重复计算
+逐格台阶邻域并执行密集完整机身扫掠。下游足式控制器继续负责步态和逐脚控制。
 
 足式默认模式为：
 
@@ -60,9 +63,30 @@ legged_global_mode: grid_traversability_v1
 足式请求得到零硬膨胀；局部 elevation 也不会修正全局路线。因而当前全局路线
 可能穿过局部足式规划器随后会拒绝的陡坡或狭窄区域。
 
-本设计不开发另一套足式局部规划器。它只将现有足式全局阶段的可行性来源从
-`GlobalOccupancyProjection` 替换为由足式 Grid V1 快照生成的投影，并继续调用
-现有 ARA*、局部目标选择、足式局部规划和 reference 组合逻辑。
+本设计不开发另一套足式局部规划器，也不改变局部状态空间、动作原语或 anytime
+搜索框架。全局阶段将可行性来源从 `GlobalOccupancyProjection` 替换为由足式
+Grid V1 快照生成的投影；局部阶段在现有 `PlanLegged` 内部增加足式专属地形投影
+和两级边认证，针对生产六动作原语在约 `3 m` 局部目标上触发 `3 s`
+`HARD_TIMEOUT` 的问题。
+
+## 局部效率问题与设计依据
+
+当前 `PlanLegged` 对每条候选边按 `local_resolution / 4` 插值。每个插值位姿重新
+计算旋转矩形 AABB，遍历覆盖栅格，并为栅格重复执行 `3 x 3` 台阶邻域检查。当前
+冻结配置的动作步长和地图分辨率均为 `0.2 m`，一次平移动作至少检查约五个机身
+位姿；机身尺寸加净空后的矩形约为 `1.28 m x 0.93 m`。同一批地图栅格因此会在
+同一条边和相邻边中被重复访问。
+
+代表性足式导航工作采用分层和缓存化处理：先从高程图生成逐格可通行性，再缓存
+圆形或足迹级结果；开阔区域优先使用简化足迹，精确多边形只用于验证或修复复杂
+路径。本文采用相同原则，但不引入论文中的方差、学习模型或新传感器数据：
+
+- [Wermelinger et al., *Navigation Planning for Legged Robots in Challenging Terrain*,
+  IROS 2016](https://doi.org/10.3929/ethz-a-010686519)；
+- [ETH `traversability_estimation`](https://github.com/leggedrobotics/traversability_estimation)
+  的 footprint map 与 footprint path 检查；
+- [Wellhausen and Hutter, *ArtPlanner: Robust Legged Robot Navigation in the Field*,
+  Field Robotics 2023](https://arxiv.org/abs/2303.01420)。
 
 ## 输入契约
 
@@ -96,8 +120,9 @@ hypot(body_extent_m.x, body_extent_m.y) / 2
 ```
 
 按当前冻结配置，足式机身尺寸为 `0.68 m x 0.33 m`，最小机身净空为
-`0.3 m`，对应全局圆形近似半径约 `0.678 m`。局部规划器仍使用带朝向的矩形
-机身扫掠，因此它是最终局部可执行性的权威。
+`0.3 m`，对应全局圆形近似半径约 `0.678 m`。局部规划器使用保守扫掠包络快速
+判定，并仅在包络包含危险或未知栅格时回退带朝向矩形检查；两条分支共同构成局部
+可执行性的权威，不增加规划完成后的第二次认证。
 
 ## 地图分类与融合
 
@@ -195,20 +220,73 @@ atan(max(abs(neighbor_elevation - center_elevation) / resolution))
 本设计不再运行轮式 Grid V1 自带的第二次二维局部 A*。足式请求只运行现有足式
 局部规划器，避免重复局部搜索。
 
-## 足式局部规划
+## 足式局部地形投影
 
-现有 `PlanLegged` 保持不变。它继续使用：
+`LocalTerrainProjection` 仍只从局部 `occupancy` 和 `elevation` 派生基础地形数据。
+在其后构建足式专属只读 `LeggedTraversalProjection`，字段固定为：
 
-- `x/y/yaw` 离散状态和可达机身高度区间；
-- 前进、后退、左右横移和原地旋转动作原语；
-- 局部 occupancy 与 elevation；
-- 最大坡度、最大台阶高度和最大沟宽；
-- 带朝向的机身矩形全边扫掠；
+```text
+hard_feasible[cell]
+step_feasible[cell]
+slope_rad[cell]
+roughness_m[cell]
+clearance_m[cell]
+hard_infeasible_prefix_sum
+```
+
+其中 `hard_feasible` 和 `step_feasible` 必须与当前局部边验证消费的占据、有限高程、
+最大坡度和 `3 x 3` 邻域台阶规则一致。台阶邻域在投影构建时对每格只计算一次，
+不得在搜索边验证中重复计算。`roughness_m` 继续由 elevation 内部派生，仅保留为
+现有地形代价；它不是新增输入层，也不成为新的硬准入条件。
+
+投影缓存键至少包含：
+
+```text
+local map sequence
+map width/height
+map resolution
+local occupancy threshold
+legged capability fingerprint
+```
+
+构建复杂度为 `O(Nl)`，其中 `Nl` 为局部地图栅格数。相同地图和 capability 的请求
+复用只读投影。
+
+## 足式局部两级边认证
+
+现有 `PlanLegged` 保留：
+
+- `x/y/yaw` 离散状态、普通区域与狭窄区域分辨率；
+- 前进、后退、左右横移和原地旋转六种动作原语；
 - 速度、转动、地形、净空和运动模式代价；
-- 现有 anytime 搜索、deadline 和取消语义。
+- 现有 anytime 搜索、deadline、取消和边结果缓存。
+
+每条动作边按以下顺序认证：
+
+1. 检查源点、终点、地图边界，并沿动作中心线执行现有机身高度等局部条件；
+2. 用源点、终点、动作转角和机身外接半径构造覆盖整个动作的保守 swept AABB；
+3. 通过 `hard_infeasible_prefix_sum` 常数时间查询 swept AABB 中是否存在不可行格；
+4. 若不存在，执行快速接受，不再进行带朝向矩形逐格扫掠；
+5. 若存在危险或未知格，执行现有带朝向矩形精确回退，并直接读取预计算地形字段；
+6. 精确回退遇到首个相交的不可行栅格立即拒绝。
+
+快速分支中的坡度、粗糙度和净空代价沿动作中心线 supercover 栅格聚合。它们用于
+路径优选，不增加新的硬准入条件。精确分支保留当前相交矩形内的代价聚合。该差异
+允许开阔地形以少量顺序数组查询完成边评估，同时仍由精确分支处理障碍边缘、狭窄
+通道和原地旋转。
 
 当前冻结能力中的最大台阶高度为 `0.5 m`，最大沟宽为 `0.3 m`。这些参数只在
 局部动作可执行性中使用，不写入全局三值地图。
+
+本设计不增加候选路径生成后的完整二次扫掠。每条输出边已经满足“保守 swept AABB
+全部可行”或“精确带朝向矩形检查通过”之一，因此不存在未经机身约束的输出边。
+
+## 后续优化门槛
+
+首版不预计算 `(yaw_bin, primitive)` 完整扫掠掩码。搜索状态存在普通 `64` 航向格、
+狭窄区 `128` 航向格和亚栅格位姿，相位处理会扩大实现和测试范围。只有本设计的
+生产配置基准仍不能达到性能验收时，才单独设计动作原语扫掠掩码；不得在首版中
+同时修改状态键、启发函数或动作原语集合。
 
 ## 输出契约
 
@@ -260,14 +338,17 @@ legged_global_mode = grid_traversability_v1 | legacy_occupancy
 
 ## 计算量约束
 
-设全局投影栅格数为 `Ng`、局部更新影响栅格数为 `deltaNl`、全局展开状态数为
-`Vg`、局部足式展开状态数为 `Vl`：
+设全局投影栅格数为 `Ng`、局部更新影响栅格数为 `deltaNl`、局部地图栅格数为
+`Nl`、全局展开状态数为 `Vg`、局部足式展开状态数为 `Vl`、进入精确回退的边数
+为 `Efallback`：
 
 ```text
 增量地图更新       O(deltaNl)
 全局投影构建       O(Ng)，按 revision 缓存
 全局 ARA*          O(Vg log Vg)
-局部足式搜索       保持现有复杂度
+足式局部投影       O(Nl)，按局部地图和 capability 缓存
+普通局部边判定     O(1) 包络查询 + O(L) 中心线代价聚合
+精确局部边判定     仅 Efallback 条边执行矩形扫掠
 发布前新增复核     无
 ```
 
@@ -277,6 +358,8 @@ legged_global_mode = grid_traversability_v1 | legacy_occupancy
 - 规划请求只捕获只读快照；
 - ARA* 的可行性和净空查询必须为 `O(1)`；
 - 禁止在 ARA* 循环中执行足式半径邻域扫描；
+- 禁止在普通局部边中重复执行 `3 x 3` 台阶邻域检查；
+- 开阔区域不得进入精确矩形扫掠；
 - 局部足式规划不得因本设计重复执行一套二维局部 Grid V1 搜索。
 
 ## 诊断
@@ -290,9 +373,13 @@ legged_global_mode = grid_traversability_v1 | legacy_occupancy
 - 全局投影与路线缓存命中；
 - 全局和局部展开状态、OPEN 峰值与耗时；
 - 局部候选数量和选中候选；
+- 足式局部投影构建时间与缓存命中；
+- 快速接受边数、精确回退边数、精确扫掠栅格数和边认证缓存命中；
 - 最终轨迹点数、总耗时、status、reason code 和是否存在 reference。
 
 不新增 publish-check revision、足式 supercover 复核计数或足式二次认证耗时字段。
+局部规划因总 deadline 被外层转换为 `TIMEOUT` 时，必须保留局部展开状态和上述边
+认证统计，不得用全零诊断覆盖真实搜索工作量。
 
 ## 验收
 
@@ -317,7 +404,10 @@ legged_global_mode = grid_traversability_v1 | legacy_occupancy
 5. `0.4 m` 台阶场景允许足式局部通过，`0.6 m` 台阶拒绝。
 6. `0.2 m` 沟宽场景允许足式局部通过，`0.4 m` 沟宽拒绝。
 7. 横移和原地旋转动作仍可生成合法机身 reference。
-8. 中心线自由但机身矩形扫掠碰撞时，现有局部规划器拒绝该动作。
+8. 开阔平地动作走快速包络分支，不执行精确矩形扫掠。
+9. 中心线自由但 swept AABB 含危险格时进入精确回退；危险格与实际机身矩形相交时
+   拒绝，不相交时允许通过。
+10. 精确回退的平移、横移和旋转边有效性与优化前保持一致。
 
 ### 模式与输出
 
@@ -338,10 +428,16 @@ legged_global_mode = grid_traversability_v1 | legacy_occupancy
 - 地图更新时间；
 - 全局投影构建与缓存命中时间；
 - 全局展开状态和耗时；
-- 局部展开状态、机身扫掠单元数和耗时；
+- 局部展开状态、快速接受边、精确回退边、精确扫掠单元数和耗时；
 - 总规划时间和峰值内存。
 
-复杂度分析不替代实测。首版不预设未经基准验证的相对加速百分比。
+新增生产局部性能场景：`64 m` 局部地图、`0.2 m` 分辨率、`3 m` 局部目标、生产
+六动作原语和非零起点 yaw。开阔可行场景的目标是 `local_search < 1 s`；所有已知
+可行或不可行场景必须在 `3 s` 硬截止前给出 `PLAN_FOUND` 或 `NO_PATH`，不得仅因
+局部边认证重复计算返回 `TIMEOUT`。用户 RViz 复现场景必须记录相同阶段耗时和边
+认证统计。
+
+复杂度分析不替代实测，也不得把本机 Jazzy 结果表述为 Humble、Orin 或实车通过。
 
 ## 实施边界
 
@@ -351,8 +447,10 @@ legged_global_mode = grid_traversability_v1 | legacy_occupancy
 2. 足式 `TraversabilityProfile` 与服务端地图输入；
 3. 按 revision 缓存的足式全局可行性投影；
 4. 现有 `PlanSurfaceGlobal` 对足式 Grid V1 投影的适配；
-5. 现有局部目标、`PlanLegged` 和 reference 组合复用；
-6. 诊断、单元测试、集成测试和性能基准。
+5. 足式局部地形投影、前缀和与缓存；
+6. `PlanLegged` 两级边认证和超时诊断保留；
+7. 现有局部目标和 reference 组合复用；
+8. 单元测试、集成测试、生产配置性能基准和 RViz 复现。
 
 每个单元必须先有失败测试，再实施最小改动。不得借本设计重构无关平台路径。
 
@@ -371,4 +469,6 @@ legged_global_mode = grid_traversability_v1 | legacy_occupancy
 - 控制器修改；
 - Hopper 修改；
 - 轮式 Grid V1 行为变更；
+- 首版动作原语完整扫掠掩码；
+- 状态键、启发函数、航向格数或动作原语集合调整；
 - 自动 legacy fallback。
