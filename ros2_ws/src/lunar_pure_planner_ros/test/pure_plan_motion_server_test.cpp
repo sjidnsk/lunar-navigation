@@ -2116,9 +2116,10 @@ TEST(PurePlanMotionServer,
         ++local_calls;
         return LocalSuccess(request, goals);
       }};
-  system.PublishInputs(true, 0.0, 64U, 128U, 1U);
+  system.PublishInputs(true, 0.0, 128U, 128U, 1U);
 
   auto goal = system.Goal("delivery-1");
+  goal.goal.point.x = 20.5;
   const auto handle = system.SendGoal(goal);
   ASSERT_NE(handle, nullptr);
   ASSERT_TRUE(WaitFor([&] {
@@ -2149,6 +2150,17 @@ TEST(PurePlanMotionServer,
   EXPECT_EQ(execute.map_token, ack.map_token);
   EXPECT_EQ(execute.segment_index, 1U);
   EXPECT_FALSE(execute.executable_path.poses.empty());
+  ASSERT_TRUE(WaitFor([&] { return !system.WheeledReferences().empty(); }));
+  const auto reference = system.WheeledReferences().back();
+  ASSERT_FALSE(reference.trajectory.points.empty());
+  ASSERT_FALSE(reference.trajectory.points.back().transforms.empty());
+  EXPECT_EQ(execute.executable_path.poses.size(),
+            reference.trajectory.points.size());
+  EXPECT_DOUBLE_EQ(
+      execute.executable_path.poses.back().pose.position.x,
+      reference.trajectory.points.back().transforms.front().translation.x);
+  EXPECT_LT(execute.executable_path.poses.back().pose.position.x,
+            goal.goal.point.x);
   EXPECT_EQ(local_calls.load(), 1U);
   ASSERT_TRUE(WaitFor([&] {
     return std::ranges::count_if(

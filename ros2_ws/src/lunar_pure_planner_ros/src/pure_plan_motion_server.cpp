@@ -1337,10 +1337,7 @@ struct PurePlanMotionServer::Impl final {
     segment.segment_index = segment_index;
     segment.platform_type = DemoPlatformType();
     segment.command = lunar_planning_msgs::msg::DemoPlanSegment::EXECUTE;
-    segment.executable_path =
-        parameters.platform_type == lunar::pure_planning::PlatformType::kLegged
-            ? ConvertTrajectoryPath(result.reference)
-            : result.reference.path_preview;
+    segment.executable_path = ConvertTrajectoryPath(result.reference);
     demo_plan_segment_publisher->publish(segment);
   }
 
