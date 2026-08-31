@@ -35,12 +35,15 @@ nav_msgs::msg::OccupancyGrid::ConstSharedPtr GlobalMap() {
   return map;
 }
 
-grid_map_msgs::msg::GridMap::ConstSharedPtr LocalMap() {
+grid_map_msgs::msg::GridMap::ConstSharedPtr LocalMap(const std::int32_t sec = 0,
+                                                      const double x_m = 0.0) {
   auto map = std::make_shared<grid_map_msgs::msg::GridMap>();
   map->header.frame_id = "odom";
+  map->header.stamp.sec = sec;
   map->info.resolution = 0.5;
   map->info.length_x = 1.0;
   map->info.length_y = 1.0;
+  map->info.pose.position.x = x_m;
   map->info.pose.orientation.w = 1.0;
   map->layers = {"occupancy", "elevation"};
   map->data = {Layer({0.F, 0.F, 0.F, 0.F}), Layer({0.F, 0.F, 0.F, 0.F})};
@@ -172,6 +175,32 @@ TEST(TraversabilityInput,
   ASSERT_TRUE(recovered.snapshot);
   EXPECT_EQ(recovered.snapshot->revision(), revision);
   EXPECT_TRUE(recovered.reason_code.empty());
+}
+
+TEST(TraversabilityInput,
+     TokenIdempotenceDoesNotReapplyDuplicateLocalProjection) {
+  TraversabilityInput input{Profile(), true};
+  input.UpdateTf(MapFromOdom());
+  input.UpdateLocal(LocalMap(10));
+  const auto first = input.Capture();
+  ASSERT_TRUE(first.snapshot);
+  EXPECT_EQ(first.local_sequence, 1U);
+  EXPECT_EQ(first.local_map_stamp.sec, 10);
+  const std::uint64_t first_revision = first.snapshot->revision();
+
+  input.UpdateLocal(LocalMap(10));
+  const auto duplicate = input.Capture();
+  ASSERT_TRUE(duplicate.snapshot);
+  EXPECT_EQ(duplicate.local_sequence, first.local_sequence);
+  EXPECT_EQ(duplicate.local_map_stamp.sec, first.local_map_stamp.sec);
+  EXPECT_EQ(duplicate.snapshot->revision(), first_revision);
+
+  input.UpdateLocal(LocalMap(11, 2.0));
+  const auto next = input.Capture();
+  ASSERT_TRUE(next.snapshot);
+  EXPECT_GT(next.local_sequence, first.local_sequence);
+  EXPECT_EQ(next.local_map_stamp.sec, 11);
+  EXPECT_GT(next.snapshot->revision(), first_revision);
 }
 
 }  // namespace

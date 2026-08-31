@@ -49,6 +49,27 @@ TEST(InputStore, LocalSequenceAdvancesForEachArrivalRegardlessOfStamp) {
   EXPECT_EQ(second.local_map->header.stamp.sec, 0);
 }
 
+TEST(InputStore, CapturesOnlyMatchingTokenAndKeepsDuplicateTokenSequence) {
+  InputStore store{true};
+  store.UpdateLocal(LocalMap(10));
+  store.UpdateOdometry(StampedOdometry(9));
+  EXPECT_FALSE(store.CaptureSynchronized().has_value());
+
+  store.UpdateOdometry(StampedOdometry(10));
+  const auto first = store.CaptureSynchronized();
+  ASSERT_TRUE(first.has_value());
+  EXPECT_EQ(first->local_sequence, 1U);
+  EXPECT_EQ(first->local_arrival_sequence, 1U);
+  ASSERT_TRUE(first->local_map);
+  EXPECT_EQ(first->local_map->header.stamp.sec, 10);
+
+  store.UpdateLocal(LocalMap(10));
+  const auto duplicate = store.CaptureSynchronized();
+  ASSERT_TRUE(duplicate.has_value());
+  EXPECT_EQ(duplicate->local_sequence, first->local_sequence);
+  EXPECT_GT(duplicate->local_arrival_sequence, first->local_arrival_sequence);
+}
+
 TEST(InputStore, KeepsOnlyDirectMapFromOdomFromTfMessages) {
   InputStore store;
   tf2_msgs::msg::TFMessage message;

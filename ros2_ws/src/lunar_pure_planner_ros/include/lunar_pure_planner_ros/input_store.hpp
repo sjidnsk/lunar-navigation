@@ -26,22 +26,27 @@ struct InputSnapshot final {
   std::optional<geometry_msgs::msg::TransformStamped> map_from_odom;
   std::uint64_t global_sequence{};
   std::uint64_t local_sequence{};
+  std::uint64_t local_arrival_sequence{};
   std::uint64_t odometry_sequence{};
   std::uint64_t tf_sequence{};
 };
 
 class InputStore final {
  public:
+  explicit InputStore(bool token_idempotent = false);
+
   void UpdateGlobal(nav_msgs::msg::OccupancyGrid::ConstSharedPtr message);
   void UpdateLocal(grid_map_msgs::msg::GridMap::ConstSharedPtr message);
   void UpdateOdometry(nav_msgs::msg::Odometry::ConstSharedPtr message);
   void UpdateTf(const tf2_msgs::msg::TFMessage& message);
 
   [[nodiscard]] InputSnapshot Capture() const;
+  [[nodiscard]] std::optional<InputSnapshot> CaptureSynchronized() const;
 
  private:
   mutable std::mutex mutex_;
   InputSnapshot latest_;
+  bool token_idempotent_{};
 };
 
 }  // namespace lunar::pure_planner_ros

@@ -14,11 +14,17 @@ constexpr char kTfUnavailable[] = "TF_UNAVAILABLE";
   return reason_code.empty() ? kInvalidInput : reason_code;
 }
 
+[[nodiscard]] bool SameStamp(const builtin_interfaces::msg::Time& left,
+                             const builtin_interfaces::msg::Time& right) {
+  return left.sec == right.sec && left.nanosec == right.nanosec;
+}
+
 }  // namespace
 
 TraversabilityInput::TraversabilityInput(
-    lunar::pure_planning::TraversabilityProfile profile)
-    : map_(std::move(profile)) {}
+    lunar::pure_planning::TraversabilityProfile profile,
+    const bool token_idempotent)
+    : map_(std::move(profile)), token_idempotent_(token_idempotent) {}
 
 void TraversabilityInput::UpdateGlobal(
     nav_msgs::msg::OccupancyGrid::ConstSharedPtr message) {
@@ -57,8 +63,15 @@ void TraversabilityInput::UpdateLocal(
     reason_code_ = ReasonOrInvalid(adapted.reason_code);
     return;
   }
+  const auto stamp = message->header.stamp;
+  const bool duplicate_token =
+      token_idempotent_ && latest_local_map_stamp_.has_value() &&
+      SameStamp(stamp, *latest_local_map_stamp_);
   latest_local_ = std::move(*adapted.value);
-  ++local_sequence_;
+  latest_local_map_stamp_ = stamp;
+  if (!duplicate_token) {
+    ++local_sequence_;
+  }
   ApplyPendingLocalLocked();
 }
 
@@ -98,9 +111,15 @@ TraversabilityInputSnapshot TraversabilityInput::Capture() const {
   std::scoped_lock lock{mutex_};
   if (applied_local_sequence_ == 0U) {
     return {.snapshot = nullptr,
-            .reason_code = reason_code_.empty() ? kTfUnavailable : reason_code_};
+            .reason_code = reason_code_.empty() ? kTfUnavailable : reason_code_,
+            .local_sequence = 0U,
+            .local_map_stamp = builtin_interfaces::msg::Time{}};
   }
-  return {.snapshot = map_.Capture(), .reason_code = reason_code_};
+  return {.snapshot = map_.Capture(),
+          .reason_code = reason_code_,
+          .local_sequence = applied_local_sequence_,
+          .local_map_stamp = applied_local_map_stamp_.value_or(
+              builtin_interfaces::msg::Time{})};
 }
 
 void TraversabilityInput::ApplyPendingLocalLocked() {
@@ -113,8 +132,9 @@ void TraversabilityInput::ApplyPendingLocalLocked() {
   }
   const auto update = map_.UpdateLocal(*latest_local_, *latest_map_from_odom_,
                                         local_sequence_);
-  applied_local_sequence_ = local_sequence_;
   if (update.accepted) {
+    applied_local_sequence_ = local_sequence_;
+    applied_local_map_stamp_ = latest_local_map_stamp_;
     direct_tf_error_ = false;
   }
   reason_code_ = update.accepted ? std::string{} : ReasonOrInvalid(update.reason_code);
