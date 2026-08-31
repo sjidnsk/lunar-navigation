@@ -3,10 +3,12 @@
 #include <array>
 #include <cstddef>
 #include <limits>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "legged/legged_types.hpp"
+#include "legged/legged_traversal_projection.hpp"
 #include "lunar_pure_planner_core/search_control.hpp"
 #include "lunar_pure_planner_core/types/planning_request.hpp"
 #include "shared/local_terrain_projection.hpp"
@@ -18,6 +20,7 @@ struct LeggedPlanRequest final {
   LeggedState start;
   GoalRegion goal_odom;
   const shared::LocalTerrainProjection* terrain{};
+  std::shared_ptr<const LeggedTraversalProjection> traversal;
   const LeggedCapability* capability{};
   SearchControl control;
   AnytimeSearchConfig search;
@@ -32,6 +35,9 @@ struct LeggedPlanResult final {
   std::size_t edge_validation_cache_hits{};
   std::size_t maximum_edge_sweep_evaluations{};
   std::size_t sweep_cell_checks{};
+  std::size_t fast_path_accepts{};
+  std::size_t exact_sweep_fallbacks{};
+  std::size_t exact_sweep_cell_checks{};
   std::size_t quantized_endpoint_aliases{};
   std::size_t quantized_state_count{};
   std::size_t mode_change_edge_count{};

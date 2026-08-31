@@ -112,6 +112,9 @@ struct EvaluatedEdge final {
   double maximum_translation_step_m{};
   bool mode_changed{};
   std::size_t sweep_cell_checks{};
+  std::size_t fast_path_accepts{};
+  std::size_t exact_sweep_fallbacks{};
+  std::size_t exact_sweep_cell_checks{};
   std::array<double, 5U> cost_components{};
   LeggedTransition transition;
 };
@@ -308,36 +311,6 @@ struct TransitionRecord final {
           half_width * std::abs(lateral.y) + kTolerance;
 }
 
-[[nodiscard]] bool CellStepFeasible(
-    const shared::GridCell cell,
-    const shared::LocalTerrainProjection& terrain,
-    const LeggedCapability& capability) noexcept {
-  const auto elevation = terrain.map->FloatLayer("elevation");
-  const double center = elevation[terrain.map->Index(cell)];
-  if (!std::isfinite(center)) {
-    return false;
-  }
-  for (std::int32_t dy = -1; dy <= 1; ++dy) {
-    for (std::int32_t dx = -1; dx <= 1; ++dx) {
-      const shared::GridCell neighbor{.x = cell.x + dx, .y = cell.y + dy};
-      if (!terrain.map->InBounds(neighbor)) {
-        continue;
-      }
-      const std::size_t neighbor_index = terrain.map->Index(neighbor);
-      if (terrain.free_with_height[neighbor_index] == 0U) {
-        continue;
-      }
-      const double neighbor_height = elevation[neighbor_index];
-      if (!std::isfinite(neighbor_height) ||
-          std::abs(neighbor_height - center) >
-              capability.maximum_step_height_m + kTolerance) {
-        return false;
-      }
-    }
-  }
-  return true;
-}
-
 [[nodiscard]] bool PoseHeightFeasible(
     const LeggedPose& pose, const shared::GridCell center_cell,
     const shared::LocalTerrainProjection& terrain,
@@ -351,11 +324,54 @@ struct TransitionRecord final {
           elevation + capability.body_height_m.upper + kTolerance;
 }
 
+void AppendUnique(std::vector<shared::GridCell>& cells,
+                  const shared::GridCell cell) {
+  if (cells.empty() || cells.back() != cell) {
+    cells.push_back(cell);
+  }
+}
+
+[[nodiscard]] std::vector<shared::GridCell> Supercover(
+    const shared::GridCell start, const shared::GridCell end) {
+  std::vector<shared::GridCell> cells;
+  std::int32_t x = start.x;
+  std::int32_t y = start.y;
+  const std::int32_t dx = end.x - start.x;
+  const std::int32_t dy = end.y - start.y;
+  const std::int32_t sign_x = dx < 0 ? -1 : 1;
+  const std::int32_t sign_y = dy < 0 ? -1 : 1;
+  const std::int64_t nx = std::abs(static_cast<std::int64_t>(dx));
+  const std::int64_t ny = std::abs(static_cast<std::int64_t>(dy));
+  std::int64_t ix{};
+  std::int64_t iy{};
+  AppendUnique(cells, {.x = x, .y = y});
+  while (ix < nx || iy < ny) {
+    const std::int64_t decision = (1 + 2 * ix) * ny - (1 + 2 * iy) * nx;
+    if (decision == 0) {
+      AppendUnique(cells, {.x = x + sign_x, .y = y});
+      AppendUnique(cells, {.x = x, .y = y + sign_y});
+      x += sign_x;
+      y += sign_y;
+      ++ix;
+      ++iy;
+    } else if (decision < 0) {
+      x += sign_x;
+      ++ix;
+    } else {
+      y += sign_y;
+      ++iy;
+    }
+    AppendUnique(cells, {.x = x, .y = y});
+  }
+  return cells;
+}
+
 [[nodiscard]] EvaluatedEdge SweepBody(
     const std::size_t primitive_index, const LeggedPrimitiveKind kind,
     const LeggedPose& source, const LeggedPose& target,
     const LeggedMotionMode source_mode, const LeggedMotionMode target_mode,
     const shared::LocalTerrainProjection& terrain,
+    const LeggedTraversalProjection& traversal,
     const LeggedCapability& capability,
     const std::array<double, 5U>& cost_scales,
     const SearchControl& control,
@@ -385,7 +401,67 @@ struct TransitionRecord final {
   double maximum_slope = 0.0;
   double maximum_roughness = 0.0;
   double minimum_clearance = std::numeric_limits<double>::infinity();
-  for (std::size_t sample = 0U; sample <= subdivisions; ++sample) {
+  const double radius = std::hypot(half_length, half_width);
+  const auto swept_minimum = terrain.map->PositionToCell({
+      .x = std::min(source.position_m.x, target.position_m.x) - radius,
+      .y = std::min(source.position_m.y, target.position_m.y) - radius,
+  });
+  const auto swept_maximum = terrain.map->PositionToCell({
+      .x = std::max(source.position_m.x, target.position_m.x) + radius,
+      .y = std::max(source.position_m.y, target.position_m.y) + radius,
+  });
+  const auto source_cell = terrain.map->PositionToCell(
+      {.x = source.position_m.x, .y = source.position_m.y});
+  const auto target_cell = terrain.map->PositionToCell(
+      {.x = target.position_m.x, .y = target.position_m.y});
+  if (!swept_minimum.has_value() || !swept_maximum.has_value() ||
+      !source_cell.has_value() || !target_cell.has_value()) {
+    return result;
+  }
+  const bool fast_path = traversal.AllCellsTraversable(
+      *swept_minimum, *swept_maximum);
+  if (fast_path) {
+    result.fast_path_accepts = 1U;
+    const std::vector<shared::GridCell> centerline =
+        Supercover(*source_cell, *target_cell);
+    for (std::size_t index = 0U; index < centerline.size(); ++index) {
+      if ((index & 63U) == 0U &&
+          (control.canceled() || control.expired())) {
+        result.canceled = control.canceled();
+        return result;
+      }
+      const double ratio = centerline.size() <= 1U
+          ? 0.0
+          : static_cast<double>(index) /
+                static_cast<double>(centerline.size() - 1U);
+      const LeggedPose sample_pose{
+          .position_m = {
+              source.position_m.x +
+                  ratio * (target.position_m.x - source.position_m.x),
+              source.position_m.y +
+                  ratio * (target.position_m.y - source.position_m.y),
+              source.position_m.z +
+                  ratio * (target.position_m.z - source.position_m.z)},
+          .yaw_rad = source.yaw_rad + ratio * yaw_delta,
+      };
+      if (!PoseHeightFeasible(
+              sample_pose, centerline[index], terrain, capability)) {
+        return result;
+      }
+      const std::size_t cell_index = terrain.map->Index(centerline[index]);
+      maximum_slope = std::max(
+          maximum_slope, static_cast<double>(traversal.slope_rad[cell_index]));
+      const double roughness = traversal.roughness_m[cell_index];
+      if (std::isfinite(roughness)) {
+        maximum_roughness = std::max(maximum_roughness, roughness);
+      }
+      minimum_clearance = std::min(
+          minimum_clearance,
+          static_cast<double>(traversal.clearance_m[cell_index]));
+    }
+  } else {
+    result.exact_sweep_fallbacks = 1U;
+    for (std::size_t sample = 0U; sample <= subdivisions; ++sample) {
     if (control.canceled()) {
       result.canceled = true;
       return result;
@@ -432,6 +508,7 @@ struct TransitionRecord final {
     for (std::int32_t y = minimum_cell->y; y <= maximum_cell->y; ++y) {
       for (std::int32_t x = minimum_cell->x; x <= maximum_cell->x; ++x) {
         ++result.sweep_cell_checks;
+        ++result.exact_sweep_cell_checks;
         if ((result.sweep_cell_checks & 63U) == 0U) {
           if (control.canceled()) {
             result.canceled = true;
@@ -447,12 +524,10 @@ struct TransitionRecord final {
           continue;
         }
         const std::size_t index = terrain.map->Index(cell);
-        const double slope = terrain.slope_rad[index];
-        const double roughness = terrain.roughness_m[index];
-        if (terrain.free_with_height[index] == 0U ||
-            !std::isfinite(slope) ||
-            slope > capability.maximum_slope_rad + kTolerance ||
-            !CellStepFeasible(cell, terrain, capability)) {
+        const double slope = traversal.slope_rad[index];
+        const double roughness = traversal.roughness_m[index];
+        if (traversal.hard_feasible[index] == 0U ||
+            traversal.step_feasible[index] == 0U) {
           return result;
         }
         maximum_slope = std::max(maximum_slope, slope);
@@ -460,9 +535,11 @@ struct TransitionRecord final {
           maximum_roughness = std::max(maximum_roughness, roughness);
         }
         minimum_clearance = std::min(
-            minimum_clearance, static_cast<double>(terrain.clearance_m[index]));
+            minimum_clearance,
+            static_cast<double>(traversal.clearance_m[index]));
       }
     }
+  }
   }
 
   const double cosine = std::cos(source.yaw_rad);
@@ -649,6 +726,7 @@ class LeggedSearchGraph final {
                     const PointGoal goal_region,
                     const std::optional<double> goal_yaw)
       : request_(request), terrain_(*request.terrain),
+        traversal_(*request.traversal),
         capability_(*request.capability), goal_region_(goal_region),
         goal_yaw_(goal_yaw), cost_scales_(CostScales(capability_)) {
     const std::size_t cell_count = terrain_.map->cell_count();
@@ -709,6 +787,18 @@ class LeggedSearchGraph final {
     return sweep_cell_checks_;
   }
 
+  [[nodiscard]] std::size_t fast_path_accepts() const noexcept {
+    return fast_path_accepts_;
+  }
+
+  [[nodiscard]] std::size_t exact_sweep_fallbacks() const noexcept {
+    return exact_sweep_fallbacks_;
+  }
+
+  [[nodiscard]] std::size_t exact_sweep_cell_checks() const noexcept {
+    return exact_sweep_cell_checks_;
+  }
+
   [[nodiscard]] double maximum_sweep_step() const noexcept {
     return maximum_sweep_step_;
   }
@@ -760,8 +850,8 @@ class LeggedSearchGraph final {
             key, [&] {
               EvaluatedEdge value = SweepBody(
                   primitive_index, primitive.kind, source.pose, *target_pose,
-                  source.mode, target_mode, terrain_, capability_, cost_scales_,
-                  request_.control);
+                  source.mode, target_mode, terrain_, traversal_, capability_,
+                  cost_scales_, request_.control);
               maximum_sweep_step_ = std::max(
                   maximum_sweep_step_, value.maximum_translation_step_m);
               return value;
@@ -796,7 +886,7 @@ class LeggedSearchGraph final {
             EvaluatedEdge value = SweepBody(
                 primitive_index, primitive.kind, source.pose,
                 canonical_target, source.mode, target_mode, terrain_,
-                capability_, cost_scales_, request_.control);
+                traversal_, capability_, cost_scales_, request_.control);
             maximum_sweep_step_ = std::max(
                 maximum_sweep_step_, value.maximum_translation_step_m);
             return value;
@@ -856,6 +946,9 @@ class LeggedSearchGraph final {
               maximum_edge_sweep_evaluations_, evaluations);
           EvaluatedEdge result = evaluate();
           sweep_cell_checks_ += result.sweep_cell_checks;
+          fast_path_accepts_ += result.fast_path_accepts;
+          exact_sweep_fallbacks_ += result.exact_sweep_fallbacks;
+          exact_sweep_cell_checks_ += result.exact_sweep_cell_checks;
           return result;
         });
   }
@@ -978,8 +1071,8 @@ class LeggedSearchGraph final {
           key, [&] {
             EvaluatedEdge value = SweepBody(
                 primitive_index, primitive.kind, source.pose, target,
-                source.mode, target_mode, terrain_, capability_, cost_scales_,
-                request_.control);
+                source.mode, target_mode, terrain_, traversal_, capability_,
+                cost_scales_, request_.control);
             maximum_sweep_step_ = std::max(
                 maximum_sweep_step_, value.maximum_translation_step_m);
             return value;
@@ -1020,6 +1113,7 @@ class LeggedSearchGraph final {
 
   const LeggedPlanRequest& request_;
   const shared::LocalTerrainProjection& terrain_;
+  const LeggedTraversalProjection& traversal_;
   const LeggedCapability& capability_;
   PointGoal goal_region_;
   std::optional<double> goal_yaw_;
@@ -1032,6 +1126,9 @@ class LeggedSearchGraph final {
   std::size_t validation_requests_{};
   std::size_t maximum_edge_sweep_evaluations_{};
   std::size_t sweep_cell_checks_{};
+  std::size_t fast_path_accepts_{};
+  std::size_t exact_sweep_fallbacks_{};
+  std::size_t exact_sweep_cell_checks_{};
   std::size_t quantized_endpoint_aliases_{};
   double maximum_sweep_step_{};
   std::vector<std::size_t> ordered_primitives_;
@@ -1060,7 +1157,9 @@ LeggedPlanResult PlanLegged(const LeggedPlanRequest& request) try {
               std::isfinite(*request.goal_odom.yaw_rad)
           ? std::optional<double>{NormalizeYaw(*request.goal_odom.yaw_rad)}
           : std::nullopt;
-  if (request.terrain == nullptr || request.capability == nullptr ||
+  if (request.terrain == nullptr || request.traversal == nullptr ||
+      request.capability == nullptr ||
+      request.traversal->terrain.get() != request.terrain ||
       !ValidTerrain(*request.terrain) ||
       !ValidCapability(*request.capability) || point == nullptr ||
       !Finite(request.start.body_pose) ||
@@ -1102,7 +1201,8 @@ LeggedPlanResult PlanLegged(const LeggedPlanRequest& request) try {
         capability.motion_primitives.size() + 1U,
         LeggedPrimitiveKind::kForward, start, start,
         LeggedMotionMode::kStart, LeggedMotionMode::kStart, terrain,
-        capability, CostScales(capability), request.control, true);
+        *request.traversal, capability, CostScales(capability),
+        request.control, true);
     if (!pose.valid) {
       if (request.control.canceled()) {
         return Failure(LocalPlanStatus::kCanceled, "REQUEST_CANCELED");
@@ -1125,6 +1225,9 @@ LeggedPlanResult PlanLegged(const LeggedPlanRequest& request) try {
             .edge_validation_evaluations = 1U,
             .used_narrow_resolution = narrow,
         },
+        .fast_path_accepts = pose.fast_path_accepts,
+        .exact_sweep_fallbacks = pose.exact_sweep_fallbacks,
+        .exact_sweep_cell_checks = pose.exact_sweep_cell_checks,
         .finest_xy_key_resolution_m = terrain.map->resolution_m() *
             (narrow ? 0.5 : 1.0),
         .maximum_yaw_bin_count = narrow ? 128U : 64U,
@@ -1165,6 +1268,9 @@ LeggedPlanResult PlanLegged(const LeggedPlanRequest& request) try {
     result.maximum_edge_sweep_evaluations =
         graph.maximum_edge_sweep_evaluations();
     result.sweep_cell_checks = graph.sweep_cell_checks();
+    result.fast_path_accepts = graph.fast_path_accepts();
+    result.exact_sweep_fallbacks = graph.exact_sweep_fallbacks();
+    result.exact_sweep_cell_checks = graph.exact_sweep_cell_checks();
     result.quantized_endpoint_aliases =
         graph.quantized_endpoint_aliases();
     result.quantized_state_count = graph.quantized_state_count();
@@ -1244,6 +1350,9 @@ LeggedPlanResult PlanLegged(const LeggedPlanRequest& request) try {
   result.maximum_edge_sweep_evaluations =
       graph.maximum_edge_sweep_evaluations();
   result.sweep_cell_checks = graph.sweep_cell_checks();
+  result.fast_path_accepts = graph.fast_path_accepts();
+  result.exact_sweep_fallbacks = graph.exact_sweep_fallbacks();
+  result.exact_sweep_cell_checks = graph.exact_sweep_cell_checks();
   if (const auto stopped = control_failure(); stopped.has_value()) {
     return *stopped;
   }
