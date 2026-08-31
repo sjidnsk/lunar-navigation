@@ -72,7 +72,7 @@ def test_demo_can_select_legged_grid_v1_and_publish_rviz_paths() -> None:
     assert '"legged_local_path_topic": "/lunar_demo/legged_path"' in launch_text
 
 
-def test_legged_rviz_paths_are_displayed_and_consumed_by_demo_helpers() -> None:
+def test_legged_rviz_paths_are_displayed_and_reporter_uses_authorized_segments() -> None:
     rviz_text = RVIZ.read_text(encoding="utf-8")
     demo_text = DEMO_NODE.read_text(encoding="utf-8")
     reporter_text = REPORTER_NODE.read_text(encoding="utf-8")
@@ -81,7 +81,9 @@ def test_legged_rviz_paths_are_displayed_and_consumed_by_demo_helpers() -> None:
     assert "/lunar_demo/legged_path" in rviz_text
     assert '"/lunar_demo/legged_path"' in demo_text
     assert '"/lunar_demo/legged_global_path"' in reporter_text
-    assert '"/lunar_demo/legged_path"' in reporter_text
+    assert '"/lunar_demo/plan_segment"' in reporter_text
+    assert "DemoPlanSegment::EXECUTE" in reporter_text
+    assert '"/lunar_demo/legged_path"' not in reporter_text
 
 
 def test_demo_publishes_legged_body_height_in_odometry() -> None:
