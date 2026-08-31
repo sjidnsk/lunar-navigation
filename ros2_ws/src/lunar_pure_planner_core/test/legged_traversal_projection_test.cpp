@@ -84,5 +84,47 @@ TEST(LeggedTraversalProjection, RejectsNonFiniteElevationThroughBaseProjection) 
   EXPECT_FALSE(built.value->AllCellsTraversable({2, 2}, {2, 2}));
 }
 
+TEST(LeggedTraversalProjection,
+     NecessaryBodyCenterMaskRejectsInscribedDiskAndMapBoundary) {
+  constexpr std::size_t kWidth = 5U;
+  constexpr std::size_t kCount = kWidth * kWidth;
+  constexpr std::size_t kHazard = 2U * kWidth + 1U;
+  constexpr std::size_t kAdjacent = 2U * kWidth + 2U;
+  constexpr std::size_t kClearInterior = 2U * kWidth + 3U;
+  constexpr std::size_t kBoundary = 4U * kWidth + 3U;
+  std::vector<float> occupancy(kCount, 0.0F);
+  occupancy[kHazard] = 1.0F;
+
+  const auto built = BuildLeggedTraversalProjection(
+      Terrain(std::move(occupancy), std::vector<float>(kCount, 0.0F)),
+      Capability(), {});
+
+  ASSERT_TRUE(built.ok()) << built.reason_code;
+  ASSERT_EQ(built.value->body_center_feasible.size(), kCount);
+  EXPECT_EQ(built.value->body_center_feasible[kHazard], 0U);
+  EXPECT_EQ(built.value->body_center_feasible[kAdjacent], 0U);
+  EXPECT_EQ(built.value->body_center_feasible[kClearInterior], 1U);
+  EXPECT_EQ(built.value->body_center_feasible[kBoundary], 0U);
+}
+
+TEST(LeggedTraversalProjection,
+     NecessaryBodyCenterMaskDoesNotAddHalfCellInflation) {
+  constexpr std::size_t kWidth = 5U;
+  constexpr std::size_t kCount = kWidth * kWidth;
+  constexpr std::size_t kHazard = 2U * kWidth + 1U;
+  constexpr std::size_t kAdjacent = 2U * kWidth + 2U;
+  std::vector<float> occupancy(kCount, 0.0F);
+  occupancy[kHazard] = 1.0F;
+  LeggedCapability capability = Capability();
+  capability.body_extent_m.y = 0.1;
+
+  const auto built = BuildLeggedTraversalProjection(
+      Terrain(std::move(occupancy), std::vector<float>(kCount, 0.0F)),
+      capability, {});
+
+  ASSERT_TRUE(built.ok()) << built.reason_code;
+  EXPECT_EQ(built.value->body_center_feasible[kAdjacent], 1U);
+}
+
 }  // namespace
 }  // namespace lunar::pure_planning::legged

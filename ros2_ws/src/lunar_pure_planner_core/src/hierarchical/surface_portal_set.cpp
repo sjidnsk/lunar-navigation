@@ -5,12 +5,14 @@
 #include <cmath>
 #include <cstddef>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <set>
 #include <tuple>
 #include <utility>
 
 #include "hierarchical/frame_transform.hpp"
+#include "legged/legged_traversal_projection.hpp"
 #include "shared/controlled_work.hpp"
 #include "shared/global_occupancy_projection.hpp"
 #include "shared/local_terrain_projection.hpp"
@@ -124,14 +126,18 @@ struct RouteSample final {
 
 [[nodiscard]] bool LocalCellSafe(
     const shared::LocalTerrainProjection& local,
-    const shared::GridCell cell) noexcept {
+    const shared::GridCell cell,
+    const legged::LeggedTraversalProjection* legged_local = nullptr) noexcept {
   if (local.map == nullptr || !local.map->InBounds(cell)) {
     return false;
   }
   const std::size_t index = local.map->Index(cell);
   return index < local.free_with_height.size() &&
          local.free_with_height[index] != 0U &&
-         index < local.clearance_m.size();
+         index < local.clearance_m.size() &&
+         (legged_local == nullptr ||
+          (index < legged_local->body_center_feasible.size() &&
+           legged_local->body_center_feasible[index] != 0U));
 }
 
 }  // namespace
@@ -198,6 +204,27 @@ SurfacePortalSetResult BuildSurfacePortalSet(
                        ? local.reason_code
                        : "INVALID_INPUT");
   }
+  std::shared_ptr<const shared::LocalTerrainProjection> local_projection =
+      std::make_shared<const shared::LocalTerrainProjection>(
+          std::move(*local.value));
+  std::shared_ptr<const legged::LeggedTraversalProjection> legged_local;
+  if (!decision.targets_final_goal &&
+      input.config.legged_global_mode ==
+          LeggedGlobalMode::kGridTraversabilityV1) {
+    if (const auto* capability =
+            std::get_if<LeggedCapability>(&input.capability);
+        capability != nullptr) {
+      auto built = legged::BuildLeggedTraversalProjection(
+          local_projection, *capability, control);
+      if (!built.ok()) {
+        return Failure(built.reason_code == "TIMEOUT" ||
+                               built.reason_code == "REQUEST_CANCELED"
+                           ? std::move(built.reason_code)
+                           : "INVALID_INPUT");
+      }
+      legged_local = std::move(built.value);
+    }
+  }
 
   const auto global_view = global.projection->View();
   const std::size_t bounded_max =
@@ -224,7 +251,7 @@ SurfacePortalSetResult BuildSurfacePortalSet(
          .y = final_odom_point->position_m.y});
     if (!global_cell.has_value() || !local_cell.has_value() ||
         !global_view.HardFeasible(*global_cell) ||
-        !LocalCellSafe(*local.value, *local_cell)) {
+        !LocalCellSafe(*local_projection, *local_cell)) {
       return Failure("NO_PATH");
     }
     const std::size_t local_index = local_map.snapshot->Index(*local_cell);
@@ -235,7 +262,7 @@ SurfacePortalSetResult BuildSurfacePortalSet(
             .global_cell = *global_cell,
             .local_cell = *local_cell,
             .global_clearance_m = global_view.ClearanceMeters(*global_cell),
-            .local_clearance_m = local.value->clearance_m[local_index],
+            .local_clearance_m = local_projection->clearance_m[local_index],
             .lateral_offset_cells = 0,
             .stable_rank = 0U,
         }},
@@ -284,7 +311,8 @@ SurfacePortalSetResult BuildSurfacePortalSet(
       const auto local_cell = local_map.snapshot->PositionToCell(
           {.x = center_odom->x, .y = center_odom->y});
       if (!local_cell.has_value() ||
-          !LocalCellSafe(*local.value, *local_cell)) {
+          !LocalCellSafe(*local_projection, *local_cell,
+                         legged_local.get())) {
         ++creation_rank;
         continue;
       }
@@ -311,7 +339,7 @@ SurfacePortalSetResult BuildSurfacePortalSet(
           .global_cell = *global_cell,
           .local_cell = *local_cell,
           .global_clearance_m = global_view.ClearanceMeters(*global_cell),
-          .local_clearance_m = local.value->clearance_m[local_index],
+          .local_clearance_m = local_projection->clearance_m[local_index],
           .lateral_offset_cells = lateral_cells,
           .stable_rank = creation_rank,
       });

@@ -16,6 +16,7 @@ struct LeggedTraversalProjection final {
   std::shared_ptr<const shared::LocalTerrainProjection> terrain;
   std::vector<std::uint8_t> hard_feasible;
   std::vector<std::uint8_t> step_feasible;
+  std::vector<std::uint8_t> body_center_feasible;
   std::vector<float> slope_rad;
   std::vector<float> roughness_m;
   std::vector<float> clearance_m;

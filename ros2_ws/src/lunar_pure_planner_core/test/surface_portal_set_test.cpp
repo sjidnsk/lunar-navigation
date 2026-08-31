@@ -46,6 +46,12 @@ namespace {
   };
 }
 
+[[nodiscard]] GridMap FineLocalMap() {
+  GridMap map = LocalMap(250U, 105U);
+  map.resolution_m = 0.2;
+  return map;
+}
+
 void SetGlobalHazard(GridMap& map, const std::size_t x,
                      const std::size_t y) {
   auto& occupancy =
@@ -57,6 +63,23 @@ void SetLocalHazard(GridMap& map, const std::size_t x, const std::size_t y) {
   auto& occupancy =
       std::get<std::vector<float>>(map.layers.at("occupancy").values);
   occupancy.at(y * map.width + x) = 1.0F;
+}
+
+void SetLocalHazardAt(GridMap& map, const double x_m, const double y_m) {
+  const auto x = static_cast<std::size_t>(
+      std::floor((x_m - map.origin_m.x) / map.resolution_m));
+  const auto y = static_cast<std::size_t>(
+      std::floor((y_m - map.origin_m.y) / map.resolution_m));
+  SetLocalHazard(map, x, y);
+}
+
+[[nodiscard]] LeggedCapability LeggedPortalCapability() {
+  return LeggedCapability{
+      .body_extent_m = {.x = 0.68, .y = 0.33, .z = 0.35},
+      .maximum_slope_rad = 0.5235987755982988,
+      .maximum_step_height_m = 0.5,
+      .minimum_body_clearance_m = 0.3,
+  };
 }
 
 [[nodiscard]] GoalRegion FinalGoal(const double x = 40.25,
@@ -153,7 +176,7 @@ TEST(SurfacePortalSet,
   input.current_state = LeggedState{
       .body_pose = {.position_m = {.x = 1.5, .y = 10.5, .z = 0.0}},
   };
-  input.capability = LeggedCapability{};
+  input.capability = LeggedPortalCapability();
   SetGlobalHazard(*input.world.global_map, 9U, 11U);
   const GlobalRoute route = StraightRoute();
   const auto decision = RollingDecision(route, input.goal_map);
@@ -166,6 +189,33 @@ TEST(SurfacePortalSet,
                    decision.desired_horizon_progress_m);
   EXPECT_EQ(result.candidates.front().global_cell,
             (shared::GridCell{.x = 9, .y = 10}));
+}
+
+TEST(SurfacePortalSet,
+     LeggedFiltersBodyInfeasiblePortalsBeforeTheThirtyTwoCandidateCap) {
+  PlanningRequest input = Request();
+  input.current_state = LeggedState{
+      .body_pose = {.position_m = {.x = 1.5, .y = 10.5, .z = 0.33}},
+  };
+  input.capability = LeggedPortalCapability();
+  input.world.local_map = FineLocalMap();
+  for (const double portal_x : {9.5, 8.5, 7.5, 6.5}) {
+    for (std::int32_t lateral = -4; lateral <= 4; ++lateral) {
+      SetLocalHazardAt(input.world.local_map, portal_x + 0.2,
+                       10.5 + static_cast<double>(lateral));
+    }
+  }
+  const GlobalRoute route = StraightRoute();
+  const auto decision = RollingDecision(route, input.goal_map);
+
+  const auto result = BuildSurfacePortalSet(input, route, decision, 32U, {});
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  ASSERT_FALSE(result.candidates.empty());
+  EXPECT_LE(result.candidates.front().route_progress_m, 4.0);
+  EXPECT_TRUE(std::ranges::all_of(result.candidates, [](const auto& candidate) {
+    return candidate.route_progress_m <= 4.0;
+  }));
 }
 
 TEST(SurfacePortalSet, BacksOffLongitudinallyWhenHorizonColumnIsBlocked) {

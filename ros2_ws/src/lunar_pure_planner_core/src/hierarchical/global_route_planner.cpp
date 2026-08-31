@@ -453,7 +453,7 @@ LocalGoalSetResult SelectSurfaceLocalGoals(
     return {.reason_code = "INVALID_INPUT"};
   }
   const double horizon_m =
-      std::holds_alternative<LeggedCapability>(input.capability) ? 3.0 : 8.0;
+      std::holds_alternative<LeggedCapability>(input.capability) ? 4.0 : 8.0;
   const SurfaceRollingSession session(
       route, input.goal_map,
       SurfaceRollingConfig{.horizon_m = horizon_m, .max_deviation_m = 2.0});

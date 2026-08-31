@@ -242,6 +242,39 @@ struct TransitionRecord final {
   };
 }
 
+[[nodiscard]] double MinimumTranslationCostPerMeter(
+    const LeggedCapability& capability,
+    const std::array<double, 5U>& cost_scales) noexcept {
+  const double forward_speed = std::max(
+      std::abs(capability.forward_speed_mps.lower),
+      std::abs(capability.forward_speed_mps.upper));
+  const double lateral_speed = std::max(
+      std::abs(capability.lateral_speed_mps.lower),
+      std::abs(capability.lateral_speed_mps.upper));
+  const double planar_speed = std::hypot(forward_speed, lateral_speed);
+  double minimum = std::numeric_limits<double>::infinity();
+  for (const LeggedBodyPrimitive& primitive :
+       capability.motion_primitives) {
+    const double planar_distance = std::hypot(
+        primitive.body_frame_displacement_m.x,
+        primitive.body_frame_displacement_m.y);
+    if (planar_distance <= kTolerance) {
+      continue;
+    }
+    const double spatial_distance = std::hypot(
+        planar_distance, primitive.body_frame_displacement_m.z);
+    const double execution_time = std::max(
+        planar_distance / planar_speed,
+        std::sqrt(6.0 * spatial_distance /
+                  capability.maximum_linear_acceleration_mps2));
+    const double lower_cost =
+        kCostWeights[0U] * spatial_distance / cost_scales[0U] +
+        kCostWeights[1U] * execution_time / cost_scales[1U];
+    minimum = std::min(minimum, lower_cost / planar_distance);
+  }
+  return minimum;
+}
+
 [[nodiscard]] bool NarrowAt(
     const Vec2 position, const shared::LocalTerrainProjection& terrain,
     const LeggedCapability& capability) noexcept {
@@ -290,7 +323,7 @@ struct TransitionRecord final {
   return StateKey{
       .x = Quantize(local_x, 0.0, resolution),
       .y = Quantize(local_y, 0.0, resolution),
-      .yaw = YawBin(pose.yaw_rad - origin_yaw, narrow ? 128U : 64U),
+      .yaw = YawBin(pose.yaw_rad - origin_yaw, 32U),
       .mode = mode,
       .narrow = narrow,
   };
@@ -748,6 +781,8 @@ class LeggedSearchGraph final {
         lattice_origin_{.x = start.position_m.x, .y = start.position_m.y},
         lattice_origin_yaw_(start.yaw_rad),
         cost_scales_(CostScales(capability_)) {
+    minimum_translation_cost_per_m_ =
+        MinimumTranslationCostPerMeter(capability_, cost_scales_);
     const std::size_t cell_count = terrain_.map->cell_count();
     const std::size_t reserve_hint = cell_count >
             (std::numeric_limits<std::size_t>::max() - goals_.size()) / 2U
@@ -939,10 +974,10 @@ class LeggedSearchGraph final {
     if (state >= states_.size()) {
       return 0.0;
     }
-    double best = std::numeric_limits<double>::infinity();
+    double euclidean_distance = std::numeric_limits<double>::infinity();
     for (const LeggedGoal& goal : goals_) {
-      best = std::min(
-          best,
+      euclidean_distance = std::min(
+          euclidean_distance,
           std::max(0.0,
                    std::hypot(goal.point.position_m.x -
                                   states_[state].pose.position_m.x,
@@ -950,7 +985,37 @@ class LeggedSearchGraph final {
                                   states_[state].pose.position_m.y) -
                        goal.point.tolerance_m));
     }
-    return best;
+    const auto normalized_distance_cost = [&](const double distance_m) {
+      if (!std::isfinite(distance_m) || distance_m <= 0.0) {
+        return 0.0;
+      }
+      if (std::isfinite(minimum_translation_cost_per_m_)) {
+        return distance_m * minimum_translation_cost_per_m_;
+      }
+      return kCostWeights[0U] * distance_m / cost_scales_[0U];
+    };
+    double heuristic = normalized_distance_cost(euclidean_distance);
+    const auto cell = terrain_.map->PositionToCell(
+        {.x = states_[state].pose.position_m.x,
+         .y = states_[state].pose.position_m.y});
+    if (!cell.has_value()) {
+      return heuristic;
+    }
+    const std::size_t cell_index = terrain_.map->Index(*cell);
+    const double relaxed_distance =
+        request_.goal_distance_field->distance_m[cell_index];
+    const std::size_t nearest_goal =
+        request_.goal_distance_field->nearest_goal_index[cell_index];
+    if (!std::isfinite(relaxed_distance) || nearest_goal >= goals_.size()) {
+      return heuristic;
+    }
+    const double cell_center_allowance =
+        std::numbers::sqrt2 * terrain_.map->resolution_m();
+    const double relaxed_region_distance = std::max(
+        0.0, relaxed_distance - goals_[nearest_goal].point.tolerance_m -
+            cell_center_allowance);
+    return std::max(
+        heuristic, normalized_distance_cost(relaxed_region_distance));
   }
 
   [[nodiscard]] double Guidance(const std::size_t state) const noexcept {
@@ -1096,10 +1161,80 @@ class LeggedSearchGraph final {
     return state;
   }
 
+  [[nodiscard]] bool HasForwardTranslationSuccessor(
+      const std::size_t source_state, const std::size_t incoming_slot,
+      const std::size_t goal_index, const LeggedPose& terminal_pose,
+      const LeggedMotionMode terminal_mode) {
+    if (request_.goals_odom.exact_final_goal) {
+      return true;
+    }
+    const Vec2 forward{
+        .x = goals_[goal_index].point.position_m.x - lattice_origin_.x,
+        .y = goals_[goal_index].point.position_m.y - lattice_origin_.y,
+    };
+    const double forward_norm = std::hypot(forward.x, forward.y);
+    if (forward_norm <= kTolerance) {
+      return false;
+    }
+    const std::size_t primitive_count =
+        capability_.motion_primitives.size();
+    const std::size_t continuation_base =
+        primitive_count * (1U + 2U * goals_.size());
+    for (const std::size_t primitive_index : ordered_primitives_) {
+      const LeggedBodyPrimitive& primitive =
+          capability_.motion_primitives[primitive_index];
+      if (std::hypot(primitive.body_frame_displacement_m.x,
+                     primitive.body_frame_displacement_m.y) <= kTolerance ||
+          std::abs(primitive.yaw_change_rad) > kTolerance) {
+        continue;
+      }
+      const auto successor = ApplyPrimitive(terminal_pose, primitive);
+      if (!successor.has_value()) {
+        continue;
+      }
+      const double progress =
+          (successor->position_m.x - terminal_pose.position_m.x) *
+              forward.x +
+          (successor->position_m.y - terminal_pose.position_m.y) *
+              forward.y;
+      if (progress <= kTolerance * forward_norm) {
+        continue;
+      }
+      const std::size_t continuation_slot = continuation_base +
+          ((incoming_slot * goals_.size() + goal_index) * primitive_count +
+           primitive_index);
+      const EdgeKey key{
+          .source = source_state,
+          .primitive = continuation_slot,
+      };
+      const LeggedMotionMode successor_mode = ModeFor(primitive.kind);
+      const EvaluatedEdge& evaluated = CachedEvaluation(
+          key, [&] {
+            EvaluatedEdge value = SweepBody(
+                primitive_index, primitive.kind, terminal_pose, *successor,
+                terminal_mode, successor_mode, terrain_, traversal_,
+                capability_, cost_scales_, request_.control);
+            maximum_sweep_step_ = std::max(
+                maximum_sweep_step_, value.maximum_translation_step_m);
+            return value;
+          });
+      if (evaluated.valid) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   void AppendTerminalEdge(
       const std::size_t source_state, const std::size_t primitive_index,
       const std::size_t goal_index, const EdgeKey key,
       const EvaluatedEdge& evaluated, std::vector<shared::GraphEdge>& edges) {
+    if (!HasForwardTranslationSuccessor(
+            source_state, key.primitive, goal_index,
+            evaluated.transition.target_pose,
+            ModeFor(evaluated.transition.primitive_kind))) {
+      return;
+    }
     const std::size_t terminal_slot =
         capability_.motion_primitives.size() * (1U + goal_index) +
         primitive_index;
@@ -1175,6 +1310,10 @@ class LeggedSearchGraph final {
         if (!evaluated.valid) {
           continue;
         }
+        if (!HasForwardTranslationSuccessor(
+                state, connector_slot, goal_index, target, target_mode)) {
+          continue;
+        }
         const std::size_t stable_index =
             StableEdgeIndex(state, connector_slot);
         transitions_[stable_index] = TransitionRecord{
@@ -1224,6 +1363,8 @@ class LeggedSearchGraph final {
   std::size_t exact_sweep_cell_checks_{};
   std::size_t quantized_endpoint_aliases_{};
   double maximum_sweep_step_{};
+  double minimum_translation_cost_per_m_{
+      std::numeric_limits<double>::infinity()};
   std::vector<std::size_t> ordered_primitives_;
   std::vector<SearchState> states_;
   std::vector<std::optional<std::size_t>> goal_states_;
@@ -1368,7 +1509,7 @@ LeggedPlanResult PlanLegged(const LeggedPlanRequest& request) try {
         .exact_sweep_cell_checks = pose.exact_sweep_cell_checks,
         .finest_xy_key_resolution_m = terrain.map->resolution_m() *
             (narrow ? 0.5 : 1.0),
-        .maximum_yaw_bin_count = narrow ? 128U : 64U,
+        .maximum_yaw_bin_count = 32U,
         .maximum_sweep_translation_step_m = 0.0,
         .cost_scales = CostScales(capability),
     };
@@ -1417,8 +1558,7 @@ LeggedPlanResult PlanLegged(const LeggedPlanRequest& request) try {
     result.quantized_state_count = graph.quantized_state_count();
     result.finest_xy_key_resolution_m = terrain.map->resolution_m() *
         (graph.used_narrow_resolution() ? 0.5 : 1.0);
-    result.maximum_yaw_bin_count =
-        graph.used_narrow_resolution() ? 128U : 64U;
+    result.maximum_yaw_bin_count = 32U;
     result.maximum_sweep_translation_step_m = graph.maximum_sweep_step();
     result.cost_scales = graph.cost_scales();
     return result;

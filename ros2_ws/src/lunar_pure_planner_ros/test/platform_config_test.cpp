@@ -1,6 +1,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <numbers>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -93,6 +94,10 @@ TEST(PlatformConfig, UsesApprovedPrimitiveIdsAndOrder) {
   for (std::size_t index = 0U; index < legged_ids.size(); ++index) {
     EXPECT_EQ(legged.motion_primitives[index].primitive_id, legged_ids[index]);
   }
+  EXPECT_NEAR(legged.motion_primitives[4U].yaw_change_rad,
+              std::numbers::pi / 16.0, 1.0e-15);
+  EXPECT_NEAR(legged.motion_primitives[5U].yaw_change_rad,
+              -std::numbers::pi / 16.0, 1.0e-15);
 }
 
 TEST(PlatformConfig, RejectsAConfigWhoseDeclaredPlatformDoesNotMatch) {
@@ -142,8 +147,8 @@ TEST(PlatformConfig, RejectsCapabilityVersionDrift) {
   const auto path = WriteTemporaryConfig(
       "platform_config_version_drift",
       ReplaceExactlyOnce(ReadText(ConfigPath("legged.yaml")),
-                         "capability_version: quad48-approved-baseline-v1",
-                         "capability_version: quad48-approved-baseline-v2"));
+                         "capability_version: quad48-approved-baseline-v2",
+                         "capability_version: quad48-approved-baseline-v1"));
   ExpectRejected(path, "legged");
   std::filesystem::remove(path);
 }

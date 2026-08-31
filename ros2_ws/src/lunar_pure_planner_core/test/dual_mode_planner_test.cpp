@@ -1268,6 +1268,59 @@ TEST(DualModePlanner,
   EXPECT_FALSE(capability_changed.goal_field_cache_hit);
 }
 
+TEST(DualModePlanner,
+     LeggedLocalDistanceFieldRejectsBodyImpossibleCorridorBeforeSearch) {
+  constexpr std::size_t kWidth = 25U;
+  constexpr std::size_t kHeight = 9U;
+  PlanningRequest input =
+      RealRequest(PlatformType::kLegged, EnvironmentMode::kLavaTube);
+  input.world.local_map = GridMap{
+      .frame_id = "odom",
+      .width = kWidth,
+      .height = kHeight,
+      .resolution_m = 0.2,
+      .origin_m = {},
+      .layers = {
+          {"occupancy", GridLayer{.values =
+              std::vector<float>(kWidth * kHeight, 1.0F)}},
+          {"elevation", GridLayer{.values =
+              std::vector<float>(kWidth * kHeight, 0.0F)}},
+      },
+  };
+  auto& occupancy = std::get<std::vector<float>>(
+      input.world.local_map.layers.at("occupancy").values);
+  for (std::size_t y = 3U; y <= 5U; ++y) {
+    std::fill_n(occupancy.begin() +
+                    static_cast<std::ptrdiff_t>(y * kWidth),
+                kWidth, 0.0F);
+  }
+  auto& state = std::get<LeggedState>(input.current_state);
+  state.body_pose.position_m = {.x = 0.7, .y = 0.9, .z = 0.5};
+  auto& capability = std::get<LeggedCapability>(input.capability);
+  capability.body_extent_m = {0.68, 0.33, 0.35};
+  capability.minimum_body_clearance_m = 0.21;
+  capability.motion_primitives.front().body_frame_displacement_m =
+      {0.2, 0.0, 0.0};
+  capability.motion_primitives.resize(1U);
+  const LocalGoalSet goals{
+      .goals_odom = {GoalRegion{
+          .goal_id = "corridor-goal",
+          .target = PointGoal{
+              .position_m = {.x = 4.1, .y = 0.9, .z = 0.0},
+              .tolerance_m = 0.0,
+          },
+      }},
+      .exact_final_goal = true,
+  };
+
+  const LocalStageResult result =
+      Planner{}.PlanLocal(input, goals, SearchControl{});
+
+  EXPECT_EQ(result.status, LocalPlanStatus::kNoPath);
+  EXPECT_EQ(result.reason_code, "LEGGED_NO_PATH");
+  EXPECT_EQ(result.expanded_states, 0U);
+}
+
 TEST(DualModePlanner, OuterHardDeadlineRetainsLeggedLocalWorkDiagnostics) {
   ManualClock clock;
   Planner planner(PlannerBackends{
@@ -1342,7 +1395,7 @@ TEST(DualModePlanner, LeggedGridV1GlobalRouteAvoidsLocalSlopeBarrier) {
       }));
 }
 
-TEST(DualModePlanner, LeggedSurfaceLocalGoalsUseThreeMeterHorizon) {
+TEST(DualModePlanner, LeggedSurfaceLocalGoalsUseFourMeterHorizon) {
   PlanningRequest input =
       RealRequest(PlatformType::kLegged, EnvironmentMode::kLunarSurface);
   input.goal_map = PointTarget(8.0, 1.0);
@@ -1363,9 +1416,9 @@ TEST(DualModePlanner, LeggedSurfaceLocalGoalsUseThreeMeterHorizon) {
     const auto* point = std::get_if<PointGoal>(&goal.target);
     ASSERT_NE(point, nullptr);
     maximum_forward_x = std::max(maximum_forward_x, point->position_m.x);
-    EXPECT_LE(point->position_m.x, 4.5 + 1.0e-9);
+    EXPECT_LE(point->position_m.x, 5.5 + 1.0e-9);
   }
-  EXPECT_GE(maximum_forward_x, 3.5 - 1.0e-9);
+  EXPECT_GE(maximum_forward_x, 5.5 - 1.0e-9);
 }
 
 void ExpectEveryCacheMiss(const PlanningResult& result) {
@@ -1725,19 +1778,13 @@ TEST(DualModePlanner,
   const auto traversal = legged::BuildLeggedTraversalProjection(
       terrain, capability, backend_control);
   ASSERT_TRUE(traversal.ok()) << traversal.reason_code;
-  std::vector<std::uint8_t> feasible(terrain->map->cell_count(), 0U);
-  for (std::size_t index = 0U; index < feasible.size(); ++index) {
-    feasible[index] = static_cast<std::uint8_t>(
-      traversal.value->hard_feasible[index] != 0U &&
-      traversal.value->step_feasible[index] != 0U);
-  }
   const auto * goal = std::get_if<PointGoal>(&baseline.goal_map.target);
   ASSERT_NE(goal, nullptr);
   const auto goal_cell = terrain->map->PositionToCell(
     {.x = goal->position_m.x, .y = goal->position_m.y});
   ASSERT_TRUE(goal_cell.has_value());
   const auto goal_field = shared::BuildGoalDistanceField(
-      *terrain->map, feasible,
+      *terrain->map, traversal.value->body_center_feasible,
       std::span<const shared::GridCell>{&*goal_cell, 1U}, backend_control);
   ASSERT_TRUE(goal_field.has_value());
   const legged::LeggedPlanResult backend_result = legged::PlanLegged({

@@ -69,7 +69,8 @@ using GoalHandle = rclcpp_action::ServerGoalHandle<Action>;
 using namespace std::chrono_literals;
 
 constexpr std::string_view kPackageName{"lunar_pure_planner_ros"};
-constexpr double kLeggedRollingHorizonM = 3.0;
+constexpr double kLeggedRollingHorizonM = 4.0;
+constexpr double kLeggedReplanStrideM = 1.5;
 constexpr double kLeggedGoalToleranceEpsilonM = 1.0e-9;
 
 struct RollingSurfaceParameters final {
@@ -1164,6 +1165,7 @@ struct PurePlanMotionServer::Impl final {
     std::uint64_t route_tf_sequence{};
     std::uint64_t seen_local_sequence{};
     double minimum_route_progress_m{};
+    std::optional<double> legged_replan_anchor_progress_m;
     bool force_replan = true;
     auto last_replan = std::chrono::steady_clock::now() -
         std::chrono::milliseconds{
@@ -1315,6 +1317,7 @@ struct PurePlanMotionServer::Impl final {
         route_global_sequence = snapshot.global_sequence;
         route_tf_sequence = snapshot.tf_sequence;
         minimum_route_progress_m = 0.0;
+        legged_replan_anchor_progress_m.reset();
         active_goal.reset();
         session.emplace(
             *route, *converted_goal.goal,
@@ -1344,6 +1347,10 @@ struct PurePlanMotionServer::Impl final {
         }
         return Failure(PlanningStatus::kNoPath, "NO_PATH");
       }
+      if (legged_rolling) {
+        minimum_route_progress_m = std::max(
+            minimum_route_progress_m, decision.projected_route_progress_m);
+      }
 
       const auto* active = active_goal.has_value()
           ? std::get_if<lunar::pure_planning::PointGoal>(&active_goal->target)
@@ -1364,8 +1371,13 @@ struct PurePlanMotionServer::Impl final {
           !legged_rolling &&
           decision.lateral_deviation_m >
               parameters.rolling_surface.max_deviation_m;
+      const bool legged_stride_reached =
+          legged_rolling && legged_replan_anchor_progress_m.has_value() &&
+          decision.projected_route_progress_m +
+                  kLeggedGoalToleranceEpsilonM >=
+              *legged_replan_anchor_progress_m + kLeggedReplanStrideM;
       if (!force_replan && last_segment.has_value() && !target_reached &&
-          !local_changed && !deviated) {
+          !local_changed && !deviated && !legged_stride_reached) {
         std::this_thread::sleep_for(std::chrono::milliseconds{
             parameters.rolling_surface.poll_period_ms});
         continue;
@@ -1636,13 +1648,19 @@ struct PurePlanMotionServer::Impl final {
             if (candidate != nullptr &&
                 candidate->position_m.x == selected->position_m.x &&
                 candidate->position_m.y == selected->position_m.y) {
-              minimum_route_progress_m =
-                  std::max(minimum_route_progress_m,
-                           portal.route_progress_m);
+              if (!legged_rolling) {
+                minimum_route_progress_m =
+                    std::max(minimum_route_progress_m,
+                             portal.route_progress_m);
+              }
               break;
             }
           }
         }
+      }
+      if (legged_rolling) {
+        legged_replan_anchor_progress_m =
+            decision.projected_route_progress_m;
       }
       last_segment = std::move(segment);
       seen_local_sequence = snapshot.local_sequence;

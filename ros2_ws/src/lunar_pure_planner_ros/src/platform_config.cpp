@@ -264,7 +264,7 @@ PlatformCapability ParseWheel(const YAML::Node& root) {
 
 PlatformCapability ParseLegged(const YAML::Node& root) {
   ValidateIdentity(root, "legged", "yobotics-quad48", "LEGGED",
-                   "quad48-approved-baseline-v1", "base_link");
+                   "quad48-approved-baseline-v2", "base_link");
   const YAML::Node& node = Require(root, "capability");
   RequireKeys(node, {"body_extent_m", "nominal_body_height_m", "body_height_m", "platform_mass_kg",
                      "nominal_payload_kg", "maximum_payload_kg", "maximum_forward_speed_mps",
@@ -504,8 +504,8 @@ PlatformCapability ExpectedCapability(const std::string_view platform) {
             {"backward", LeggedPrimitiveKind::kBackward, {-0.2, 0.0, 0.0}, 0.0},
             {"lateral-left", LeggedPrimitiveKind::kLateralLeft, {0.0, 0.2, 0.0}, 0.0},
             {"lateral-right", LeggedPrimitiveKind::kLateralRight, {0.0, -0.2, 0.0}, 0.0},
-            {"spin-left", LeggedPrimitiveKind::kSpin, {0.0, 0.0, 0.0}, 0.09817477042468103},
-            {"spin-right", LeggedPrimitiveKind::kSpin, {0.0, 0.0, 0.0}, -0.09817477042468103},
+            {"spin-left", LeggedPrimitiveKind::kSpin, {0.0, 0.0, 0.0}, 0.19634954084936207},
+            {"spin-right", LeggedPrimitiveKind::kSpin, {0.0, 0.0, 0.0}, -0.19634954084936207},
         },
     };
   }

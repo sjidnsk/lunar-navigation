@@ -2002,6 +2002,8 @@ TEST(PurePlanMotionServer,
 TEST(PurePlanMotionServer,
      LeggedGridV1RollingPublishesEachSegmentAndRunsUntilFinalOdometry) {
   std::atomic<std::uint64_t> local_calls{0U};
+  std::mutex selected_goals_mutex;
+  std::vector<double> selected_goal_x;
   RunningSystem system{
       [](const lunar::pure_planning::PlanningRequest&) {
         return Failure(lunar::pure_planning::PlanningStatus::kPlannerError,
@@ -2014,15 +2016,22 @@ TEST(PurePlanMotionServer,
       [&](const lunar::pure_planning::PlanningRequest& request,
           const lunar::pure_planning::LocalGoalSet& goals,
           lunar::pure_planning::SearchControl) {
+        if (request.request_id != "legged_rolling") {
+          return LocalSuccess(request, goals);
+        }
         ++local_calls;
         EXPECT_TRUE(std::holds_alternative<
                     lunar::pure_planning::LeggedState>(
             request.current_state));
         EXPECT_TRUE(request.world.traversability_snapshot != nullptr);
         auto local = LocalSuccess(request, goals);
+        const auto& selected = std::get<lunar::pure_planning::PointGoal>(
+            goals.goals_odom[*local.selected_goal_index].target);
+        {
+          std::scoped_lock lock{selected_goals_mutex};
+          selected_goal_x.push_back(selected.position_m.x);
+        }
         if (local_calls.load() == 1U && !goals.exact_final_goal) {
-          const auto& selected = std::get<lunar::pure_planning::PointGoal>(
-              goals.goals_odom[*local.selected_goal_index].target);
           auto& trajectory =
               std::get<lunar::pure_planning::TrajectoryReference>(*local.data);
           trajectory.points.back().pose.position_m.x =
@@ -2061,23 +2070,42 @@ TEST(PurePlanMotionServer,
   std::this_thread::sleep_for(100ms);
   EXPECT_EQ(local_calls.load(), 1U);
 
-  const auto first_paths = system.LeggedPaths();
-  const auto first_nonempty = std::ranges::find_if(
-      first_paths, [](const auto& path) { return !path.poses.empty(); });
-  ASSERT_NE(first_nonempty, first_paths.end());
-  const double first_endpoint_x =
-      first_nonempty->poses.back().pose.position.x;
-  const double first_endpoint_y =
-      first_nonempty->poses.back().pose.position.y;
-  system.PublishLocalAndOdometry(first_endpoint_x, 64U, first_endpoint_y);
+  {
+    std::scoped_lock lock{selected_goals_mutex};
+    ASSERT_EQ(selected_goal_x.size(), 1U);
+    EXPECT_DOUBLE_EQ(selected_goal_x.front(), 3.5);
+  }
+
+  system.PublishOdometryOnly(1.49);
+  std::this_thread::sleep_for(100ms);
+  EXPECT_EQ(local_calls.load(), 1U);
+
+  system.PublishLocalAndOdometry(1.5, 128U);
   ASSERT_TRUE(WaitFor([&] {
     return local_calls.load() >= 2U &&
            std::ranges::count_if(system.LeggedPaths(), [](const auto& path) {
              return !path.poses.empty();
            }) >= 2;
   }));
-  ASSERT_TRUE(WaitFor([&] { return system.DiagnosticCount() >= 2U; }));
-  const auto diagnostics = system.Diagnostics();
+  {
+    std::scoped_lock lock{selected_goals_mutex};
+    ASSERT_GE(selected_goal_x.size(), 2U);
+    EXPECT_DOUBLE_EQ(selected_goal_x[1U], 3.5);
+  }
+  ASSERT_TRUE(WaitFor([&] {
+    return std::ranges::count_if(
+               system.Diagnostics(), [](const auto& diagnostic) {
+                 return FindDiagnosticValue(diagnostic, "request_id") ==
+                        "legged_rolling";
+               }) >= 2;
+  }));
+  std::vector<diagnostic_msgs::msg::DiagnosticArray> diagnostics;
+  for (const auto& diagnostic : system.Diagnostics()) {
+    if (FindDiagnosticValue(diagnostic, "request_id") == "legged_rolling") {
+      diagnostics.push_back(diagnostic);
+    }
+  }
+  ASSERT_GE(diagnostics.size(), 2U);
   for (std::size_t index = 0U; index < 2U; ++index) {
     EXPECT_EQ(FindDiagnosticValue(diagnostics[index], "grid_v1_active"),
               "true");

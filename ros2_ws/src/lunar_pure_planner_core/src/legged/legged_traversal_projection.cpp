@@ -1,5 +1,6 @@
 #include "legged/legged_traversal_projection.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -7,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "shared/cell_area_distance_transform.hpp"
 #include "shared/controlled_work.hpp"
 
 namespace lunar::pure_planning::legged {
@@ -84,7 +86,13 @@ LeggedTraversalProjectionBuildResult BuildLeggedTraversalProjection(
       !std::isfinite(capability.maximum_slope_rad) ||
       capability.maximum_slope_rad < 0.0 ||
       !std::isfinite(capability.maximum_step_height_m) ||
-      capability.maximum_step_height_m < 0.0) {
+      capability.maximum_step_height_m < 0.0 ||
+      !std::isfinite(capability.body_extent_m.x) ||
+      capability.body_extent_m.x <= 0.0 ||
+      !std::isfinite(capability.body_extent_m.y) ||
+      capability.body_extent_m.y <= 0.0 ||
+      !std::isfinite(capability.minimum_body_clearance_m) ||
+      capability.minimum_body_clearance_m < 0.0) {
     return Failure("INVALID_INPUT");
   }
   const std::size_t count = terrain->map->cell_count();
@@ -99,6 +107,7 @@ LeggedTraversalProjectionBuildResult BuildLeggedTraversalProjection(
   value->terrain = std::move(terrain);
   value->hard_feasible.resize(count, 0U);
   value->step_feasible.resize(count, 0U);
+  value->body_center_feasible.resize(count, 0U);
   value->slope_rad = value->terrain->slope_rad;
   value->roughness_m = value->terrain->roughness_m;
   value->clearance_m = value->terrain->clearance_m;
@@ -125,6 +134,55 @@ LeggedTraversalProjectionBuildResult BuildLeggedTraversalProjection(
         StepFeasible(cell, *value->terrain, capability)
         ? 1U
         : 0U;
+  }
+
+  std::vector<std::uint8_t> body_center_hazards(count, 0U);
+  for (std::size_t index = 0U; index < count; ++index) {
+    body_center_hazards[index] = static_cast<std::uint8_t>(
+        value->hard_feasible[index] == 0U ||
+        value->step_feasible[index] == 0U);
+  }
+  auto body_center_clearance = shared::BuildCellAreaClearance(
+      value->terrain->map->width(), value->terrain->map->height(),
+      value->terrain->map->resolution_m(), body_center_hazards, control);
+  if (!body_center_clearance.ok()) {
+    return Failure(std::move(body_center_clearance.reason_code));
+  }
+  const double inscribed_radius_m =
+      std::min(capability.body_extent_m.x, capability.body_extent_m.y) /
+          2.0 +
+      capability.minimum_body_clearance_m;
+  const Vec3 map_origin = value->terrain->map->origin_m();
+  const double map_maximum_x = map_origin.x +
+      static_cast<double>(value->terrain->map->width()) *
+          value->terrain->map->resolution_m();
+  const double map_maximum_y = map_origin.y +
+      static_cast<double>(value->terrain->map->height()) *
+          value->terrain->map->resolution_m();
+  for (std::size_t index = 0U; index < count; ++index) {
+    if (shared::ControlCheckDue(index)) {
+      if (const auto stopped = shared::StopReason(control);
+          stopped.has_value()) {
+        return Failure(std::string{*stopped});
+      }
+    }
+    if (body_center_hazards[index] != 0U ||
+        static_cast<double>(body_center_clearance.clearance_m[index]) <=
+            inscribed_radius_m + kTolerance) {
+      continue;
+    }
+    const shared::GridCell cell{
+        .x = static_cast<std::int32_t>(
+            index % value->terrain->map->width()),
+        .y = static_cast<std::int32_t>(
+            index / value->terrain->map->width()),
+    };
+    const Vec3 center = value->terrain->map->CellCenter(cell);
+    const double boundary_clearance_m = std::min(
+        {center.x - map_origin.x, map_maximum_x - center.x,
+         center.y - map_origin.y, map_maximum_y - center.y});
+    value->body_center_feasible[index] = static_cast<std::uint8_t>(
+        boundary_clearance_m > inscribed_radius_m + kTolerance);
   }
 
   const std::size_t width = value->terrain->map->width();

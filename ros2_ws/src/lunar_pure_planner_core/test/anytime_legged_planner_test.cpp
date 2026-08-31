@@ -115,19 +115,13 @@ struct TerrainFixture final {
     .yaw_rad = goal_yaw,
     .yaw_tolerance_rad = 0.0,
   };
-  std::vector<std::uint8_t> feasible(fixture.map->cell_count(), 0U);
-  for (std::size_t index = 0U; index < feasible.size(); ++index) {
-    feasible[index] = static_cast<std::uint8_t>(
-      traversal.value->hard_feasible[index] != 0U &&
-      traversal.value->step_feasible[index] != 0U);
-  }
   std::shared_ptr<const shared::GoalDistanceField> goal_field;
   if (const auto goal_cell = fixture.map->PositionToCell(
       {.x = goal.x, .y = goal.y});
     goal_cell.has_value())
   {
     const auto built = shared::BuildGoalDistanceField(
-        *fixture.map, feasible,
+        *fixture.map, traversal.value->body_center_feasible,
         std::span<const shared::GridCell>{&*goal_cell, 1U});
     if (built.has_value()) {
       goal_field = std::make_shared<const shared::GoalDistanceField>(
@@ -180,8 +174,10 @@ struct TerrainFixture final {
        {0.0, 0.2, 0.0}, 0.0},
       {"lateral-right", LeggedPrimitiveKind::kLateralRight,
        {0.0, -0.2, 0.0}, 0.0},
-      {"spin-left", LeggedPrimitiveKind::kSpin, {}, 0.09817477042468103},
-      {"spin-right", LeggedPrimitiveKind::kSpin, {}, -0.09817477042468103},
+      {"spin-left", LeggedPrimitiveKind::kSpin, {},
+       std::numbers::pi / 16.0},
+      {"spin-right", LeggedPrimitiveKind::kSpin, {},
+       -std::numbers::pi / 16.0},
   };
   return capability;
 }
@@ -240,18 +236,12 @@ TEST(AnytimeLeggedPlanner, SelectsAReachableLaterPortalInOneSearch) {
     },
     .exact_final_goal = false,
   };
-  std::vector<std::uint8_t> feasible(fixture.map->cell_count(), 0U);
-  for (std::size_t index = 0U; index < feasible.size(); ++index) {
-    feasible[index] = static_cast<std::uint8_t>(
-      request.traversal->hard_feasible[index] != 0U &&
-      request.traversal->step_feasible[index] != 0U);
-  }
   const std::vector<shared::GridCell> goal_cells{
     *fixture.map->PositionToCell({.x = 1.1, .y = 1.9}),
     *fixture.map->PositionToCell({.x = 1.5, .y = 1.5}),
   };
   const auto field = shared::BuildGoalDistanceField(
-      *fixture.map, feasible, goal_cells);
+      *fixture.map, request.traversal->body_center_feasible, goal_cells);
   ASSERT_TRUE(field.has_value());
   request.goal_distance_field =
     std::make_shared<const shared::GoalDistanceField>(*field);
@@ -266,6 +256,53 @@ TEST(AnytimeLeggedPlanner, SelectsAReachableLaterPortalInOneSearch) {
               1.0e-9);
   EXPECT_NEAR(result.trajectory.back().target_pose.position_m.y, 1.5,
               1.0e-9);
+}
+
+TEST(AnytimeLeggedPlanner,
+     RejectsIntermediatePortalWithoutForwardTranslationSuccessor) {
+  constexpr std::size_t kWidth = 20U;
+  constexpr std::size_t kHeight = 15U;
+  std::vector<float> occupancy(kWidth * kHeight, 0.0F);
+  occupancy[7U * kWidth + 10U] = 1.0F;
+  const TerrainFixture fixture =
+      MakeTerrain(kWidth, kHeight, 0.2, std::move(occupancy));
+  LeggedCapability capability = Capability();
+  capability.motion_primitives = {
+      capability.motion_primitives.at(0U),
+      capability.motion_primitives.at(1U),
+  };
+  LeggedPlanRequest request = RequestTo(
+      fixture, capability, {1.1, 1.5, 0.5}, {1.5, 1.5, 0.0});
+  request.goals_odom.exact_final_goal = false;
+  request.goals_odom.goals_odom.front().yaw_rad.reset();
+
+  const LeggedPlanResult result = PlanLegged(request);
+
+  EXPECT_EQ(result.status, LocalPlanStatus::kNoPath);
+  EXPECT_EQ(result.reason_code, "LEGGED_NO_PATH");
+}
+
+TEST(AnytimeLeggedPlanner,
+     ExactFinalGoalDoesNotRequireForwardTranslationSuccessor) {
+  constexpr std::size_t kWidth = 20U;
+  constexpr std::size_t kHeight = 15U;
+  std::vector<float> occupancy(kWidth * kHeight, 0.0F);
+  occupancy[7U * kWidth + 10U] = 1.0F;
+  const TerrainFixture fixture =
+      MakeTerrain(kWidth, kHeight, 0.2, std::move(occupancy));
+  LeggedCapability capability = Capability();
+  capability.motion_primitives = {
+      capability.motion_primitives.at(0U),
+      capability.motion_primitives.at(1U),
+  };
+
+  const LeggedPlanResult result = PlanLegged(RequestTo(
+      fixture, capability, {1.1, 1.5, 0.5}, {1.5, 1.5, 0.0}));
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  ASSERT_FALSE(result.trajectory.empty());
+  EXPECT_NEAR(result.trajectory.back().target_pose.position_m.x,
+              1.5, 1.0e-9);
 }
 
 TEST(AnytimeLeggedPlanner, RejectsDisconnectedGoalsBeforeStateExpansion) {
@@ -607,12 +644,34 @@ TEST(AnytimeLeggedPlanner, PlansFarAcrossLargeMapWithinOneSecond) {
 
   const auto elapsed = std::chrono::steady_clock::now() - started;
   ASSERT_TRUE(result.ok()) << result.reason_code;
-  EXPECT_GT(result.metrics.expanded_states, 100U);
+  EXPECT_GT(result.metrics.expanded_states, 0U);
 #if !defined(__SANITIZE_ADDRESS__)
   EXPECT_LT(elapsed, std::chrono::seconds{1});
 #else
   (void)elapsed;
 #endif
+}
+
+TEST(AnytimeLeggedPlanner,
+     BodyCenterDistanceFieldGuidesSearchAroundLongBarrier) {
+  constexpr std::size_t kWidth = 100U;
+  constexpr std::size_t kHeight = 60U;
+  std::vector<float> occupancy(kWidth * kHeight, 0.0F);
+  for (std::size_t y = 0U; y <= 42U; ++y) {
+    occupancy[y * kWidth + 50U] = 1.0F;
+  }
+  const TerrainFixture fixture =
+      MakeTerrain(kWidth, kHeight, 0.2, std::move(occupancy));
+  LeggedCapability capability = Capability();
+  capability.motion_primitives.resize(4U);
+
+  const LeggedPlanResult result = PlanLegged(RequestTo(
+      fixture, capability, {2.1, 4.1, 0.5}, {17.1, 4.1, 0.0}));
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  RecordProperty("expanded_states",
+                 std::to_string(result.metrics.expanded_states));
+  EXPECT_LT(result.metrics.expanded_states, 200U);
 }
 
 TEST(AnytimeLeggedPlanner, OpenTerrainUsesOnlyTheFastBodySweepPath) {
@@ -739,6 +798,25 @@ TEST(AnytimeLeggedPlanner, UsesLateralAndBackwardCapabilityPrimitives) {
       }));
 }
 
+TEST(AnytimeLeggedPlanner, UsesTwoThirtyTwoBinSpinStepsToReachGoalYaw) {
+  const TerrainFixture fixture = MakeTerrain(30U, 30U, 0.2);
+  LeggedCapability capability = ProductionCapability();
+  capability.motion_primitives = {
+      capability.motion_primitives.at(4U),
+      capability.motion_primitives.at(5U),
+  };
+
+  const LeggedPlanResult result = PlanLegged(RequestTo(
+      fixture, capability, {3.1, 3.1, 0.33}, {3.1, 3.1, 0.0},
+      std::numbers::pi / 8.0));
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  ASSERT_EQ(result.trajectory.size(), 2U);
+  EXPECT_NEAR(result.trajectory.back().target_pose.yaw_rad,
+              std::numbers::pi / 8.0, 1.0e-12);
+  EXPECT_EQ(result.maximum_yaw_bin_count, 32U);
+}
+
 TEST(AnytimeLeggedPlanner, RejectsQuantizedAliasWithDifferentPhysicalEndpoint) {
   const TerrainFixture fixture = MakeTerrain(24U, 20U, 0.2);
   LeggedCapability capability = Capability();
@@ -835,6 +913,7 @@ TEST(AnytimeLeggedPlanner, RejectsNonFiniteElevationInsideSearch) {
       fixture, capability, {0.9, 1.1, 0.5}, {2.7, 1.1, 0.0}));
 
   EXPECT_EQ(result.status, LocalPlanStatus::kNoPath);
+  EXPECT_EQ(result.metrics.expanded_states, 0U);
 }
 
 TEST(AnytimeLeggedPlanner, RejectsSlopeAboveCapabilityInsideSearch) {
@@ -916,7 +995,7 @@ TEST(AnytimeLeggedPlanner, UsesRectangleInsteadOfCircumscribedCircleInCorridor) 
   ASSERT_TRUE(result.ok()) << result.reason_code;
   EXPECT_TRUE(result.metrics.used_narrow_resolution);
   EXPECT_NEAR(result.finest_xy_key_resolution_m, 0.1, 1.0e-12);
-  EXPECT_EQ(result.maximum_yaw_bin_count, 128U);
+  EXPECT_EQ(result.maximum_yaw_bin_count, 32U);
 }
 
 TEST(AnytimeLeggedPlanner, RejectsCorridorNarrowerThanClearedBodyRectangle) {
@@ -997,8 +1076,9 @@ TEST(AnytimeLeggedPlanner, StopsForCancellationAndDeadlineDuringSearch) {
   const auto timeout_reads = std::make_shared<std::int64_t>(0);
   LeggedPlanRequest timed_out = RequestTo(
       fixture, capability, {10.1, 10.1, 0.5}, {50.1, 50.1, 0.0});
+  constexpr std::int64_t kInterruptRead = 1000;
   timed_out.control.deadline = SteadyClock::time_point{
-      std::chrono::nanoseconds{20695}};
+      std::chrono::nanoseconds{kInterruptRead}};
   timed_out.control.now = [timeout_reads] {
     return SteadyClock::time_point{
         std::chrono::nanoseconds{(*timeout_reads)++}};
@@ -1017,7 +1097,7 @@ TEST(AnytimeLeggedPlanner, StopsForCancellationAndDeadlineDuringSearch) {
   canceled.control.stop_token = stop.get_token();
   canceled.control.deadline = SteadyClock::time_point::max();
   canceled.control.now = [cancel_reads, &stop] {
-    if ((*cancel_reads)++ == 20695) {
+    if ((*cancel_reads)++ == kInterruptRead) {
       stop.request_stop();
     }
     return SteadyClock::time_point{};

@@ -377,13 +377,6 @@ using namespace std::chrono_literals;
       }
       goal_cells.push_back(*cell);
     }
-    std::vector<std::uint8_t> necessary_feasible(
-        terrain.map->cell_count(), 0U);
-    for (std::size_t index = 0U; index < necessary_feasible.size(); ++index) {
-      necessary_feasible[index] = static_cast<std::uint8_t>(
-          legged_projection.value->hard_feasible[index] != 0U &&
-          legged_projection.value->step_feasible[index] != 0U);
-    }
     const auto goal_field = cache.goal_field().GetOrBuild(
         shared::MakeGoalFieldCacheKey(
             input.world.local_map_sequence,
@@ -391,7 +384,9 @@ using namespace std::chrono_literals;
             goals_odom, input.config.search, start_patch.identity),
         control, [&](const SearchControl& build_control) {
           auto built = shared::BuildGoalDistanceField(
-              *terrain.map, necessary_feasible, goal_cells, build_control);
+              *terrain.map,
+              legged_projection.value->body_center_feasible,
+              goal_cells, build_control);
           return shared::ImmutableCacheBuildResult<shared::GoalDistanceField>{
               .value = !built.has_value()
                   ? nullptr
