@@ -20,6 +20,10 @@ namespace lunar::pure_planning {
 
 struct GlobalRoute;
 
+namespace legged {
+struct LeggedTraversalProjection;
+}
+
 namespace shared {
 
 class GoalDistanceField;
@@ -32,6 +36,7 @@ struct GlobalProjectionCacheDomain;
 struct GlobalRouteCacheDomain;
 struct LocalSnapshotCacheDomain;
 struct LocalProjectionCacheDomain;
+struct LeggedLocalProjectionCacheDomain;
 struct GoalFieldCacheDomain;
 
 }  // namespace shared
@@ -273,6 +278,8 @@ using LocalSnapshotCacheKey =
     RevisionCacheKey<LocalSnapshotCacheDomain, 1U, 1U>;
 using LocalProjectionCacheKey =
     RevisionCacheKey<LocalProjectionCacheDomain, 1U, 2U>;
+using LeggedLocalProjectionCacheKey =
+    RevisionCacheKey<LeggedLocalProjectionCacheDomain, 1U, 5U>;
 using GoalFieldCacheKey =
     RevisionCacheKey<GoalFieldCacheDomain, 1U, 5U>;
 
@@ -301,6 +308,10 @@ MakeLeggedTraversabilityProjectionCacheKey(
 [[nodiscard]] LocalProjectionCacheKey MakeLocalProjectionCacheKey(
     std::uint64_t local_map_sequence, double occupancy_threshold,
     std::uint64_t start_patch_identity = 0U) noexcept;
+[[nodiscard]] LeggedLocalProjectionCacheKey MakeLeggedLocalProjectionCacheKey(
+    std::uint64_t local_map_sequence, std::size_t width, std::size_t height,
+    double resolution_m, double occupancy_threshold,
+    std::uint64_t capability_fingerprint) noexcept;
 [[nodiscard]] GoalFieldCacheKey MakeGoalFieldCacheKey(
     std::uint64_t local_map_sequence, double occupancy_threshold,
     std::uint64_t capability_fingerprint, const LocalGoalSet& goals,
@@ -319,6 +330,8 @@ class ActivePlannerCache final {
       ImmutableActiveCacheSlot<LocalSnapshotCacheKey, MapSnapshot>;
   using LocalProjectionSlot =
       ImmutableActiveCacheSlot<LocalProjectionCacheKey, LocalTerrainProjection>;
+  using LeggedLocalProjectionSlot = ImmutableActiveCacheSlot<
+      LeggedLocalProjectionCacheKey, legged::LeggedTraversalProjection>;
   using GoalFieldSlot =
       ImmutableActiveCacheSlot<GoalFieldCacheKey, GoalDistanceField>;
 
@@ -337,6 +350,9 @@ class ActivePlannerCache final {
   [[nodiscard]] LocalProjectionSlot& local_projection() noexcept {
     return local_projection_;
   }
+  [[nodiscard]] LeggedLocalProjectionSlot& legged_local_projection() noexcept {
+    return legged_local_projection_;
+  }
   [[nodiscard]] GoalFieldSlot& goal_field() noexcept { return goal_field_; }
 
  private:
@@ -345,6 +361,7 @@ class ActivePlannerCache final {
   GlobalRouteSlot global_route_;
   LocalSnapshotSlot local_snapshot_;
   LocalProjectionSlot local_projection_;
+  LeggedLocalProjectionSlot legged_local_projection_;
   GoalFieldSlot goal_field_;
 };
 

@@ -156,6 +156,25 @@ TEST(ActivePlannerCache,
   EXPECT_NE(route, route_revision_changed);
 }
 
+TEST(ActivePlannerCache,
+     LeggedLocalProjectionKeyIncludesMapShapeResolutionThresholdAndCapability) {
+  const auto original = MakeLeggedLocalProjectionCacheKey(
+      7U, 320U, 320U, 0.2, 0.5, 11U);
+
+  EXPECT_NE(original, MakeLeggedLocalProjectionCacheKey(
+                          8U, 320U, 320U, 0.2, 0.5, 11U));
+  EXPECT_NE(original, MakeLeggedLocalProjectionCacheKey(
+                          7U, 321U, 320U, 0.2, 0.5, 11U));
+  EXPECT_NE(original, MakeLeggedLocalProjectionCacheKey(
+                          7U, 320U, 321U, 0.2, 0.5, 11U));
+  EXPECT_NE(original, MakeLeggedLocalProjectionCacheKey(
+                          7U, 320U, 320U, 0.25, 0.5, 11U));
+  EXPECT_NE(original, MakeLeggedLocalProjectionCacheKey(
+                          7U, 320U, 320U, 0.2, 0.6, 11U));
+  EXPECT_NE(original, MakeLeggedLocalProjectionCacheKey(
+                          7U, 320U, 320U, 0.2, 0.5, 12U));
+}
+
 TEST(ActivePlannerCache, GoalFieldKeyPreservesOrderedGoalSemantics) {
   const LocalGoalSet ordered{
       .goals_odom = {CacheGoal("first", 1.0), CacheGoal("second", 2.0)},

@@ -37,6 +37,7 @@ set(LUNAR_ANYTIME_PRODUCTION_SOURCES
   src/hopper/ballistic_envelope.cpp
   src/hopper/ballistic_kinematics.cpp
   src/legged/anytime_legged_planner.cpp
+  src/legged/legged_traversal_projection.cpp
   src/shared/active_planner_cache.cpp
   src/shared/anytime_ara_star.cpp
   src/shared/cell_area_distance_transform.cpp
@@ -116,6 +117,8 @@ if(BUILD_TESTING)
     test/surface_portal_set_test.cpp)
   lunar_add_core_gtest(lunar_pure_planner_core_local_terrain_projection_test
     test/local_terrain_projection_test.cpp)
+  lunar_add_core_gtest(lunar_pure_planner_core_legged_traversal_projection_test
+    test/legged_traversal_projection_test.cpp)
   lunar_add_core_gtest(lunar_pure_planner_core_obstacle_height_estimator_test
     test/obstacle_height_estimator_test.cpp)
   lunar_add_core_gtest(lunar_pure_planner_core_anytime_wheel_planner_test
