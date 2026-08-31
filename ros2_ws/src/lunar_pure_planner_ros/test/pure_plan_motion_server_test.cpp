@@ -694,6 +694,38 @@ TEST(PurePlanMotionServer, RejectsInvalidRollingParameter) {
   }
 }
 
+TEST(PurePlanMotionServer, BoundsRollingTransientRetryLimit) {
+  auto planner = [](const auto&) {
+    return Failure(lunar::pure_planning::PlanningStatus::kNoPath, "NO_PATH");
+  };
+  auto defaults = std::make_shared<PurePlanMotionServer>(
+      ServerOptions("wheel", ConfigPath("wheel.yaml").string()), planner);
+  std::int64_t retry_limit{-1};
+  ASSERT_TRUE(defaults->get_parameter("rolling_transient_retry_limit",
+                                      retry_limit));
+  EXPECT_EQ(retry_limit, 2);
+
+  for (const std::int64_t valid : {0, 10}) {
+    EXPECT_NO_THROW({
+      auto server = std::make_shared<PurePlanMotionServer>(
+          ServerOptions(
+              "wheel", ConfigPath("wheel.yaml").string(),
+              {rclcpp::Parameter{"rolling_transient_retry_limit", valid}}),
+          planner);
+    }) << valid;
+  }
+  for (const std::int64_t invalid : {-1, 11}) {
+    EXPECT_THROW(
+        PurePlanMotionServer(
+            ServerOptions(
+                "wheel", ConfigPath("wheel.yaml").string(),
+                {rclcpp::Parameter{"rolling_transient_retry_limit", invalid}}),
+            planner),
+        std::runtime_error)
+        << invalid;
+  }
+}
+
 TEST(PurePlanMotionServer, RejectsUnknownWheelPlannerMode) {
   EXPECT_THROW(
       PurePlanMotionServer(

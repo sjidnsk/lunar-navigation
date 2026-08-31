@@ -21,3 +21,4 @@
     rolling_poll_period_ms: 100
     rolling_min_replan_interval_ms: 500
     rolling_max_deviation_m: 2.0
+    rolling_transient_retry_limit: 2

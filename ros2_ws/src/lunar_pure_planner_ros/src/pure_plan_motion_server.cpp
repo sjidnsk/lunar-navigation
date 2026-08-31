@@ -75,6 +75,7 @@ struct RollingSurfaceParameters final {
   std::int64_t poll_period_ms{100};
   std::int64_t min_replan_interval_ms{500};
   double max_deviation_m{2.0};
+  std::int64_t transient_retry_limit{2};
 };
 
 struct RuntimeParameters final {
@@ -186,6 +187,8 @@ struct RuntimeParameters final {
           "rolling_min_replan_interval_ms", 500),
       .max_deviation_m =
           node.declare_parameter<double>("rolling_max_deviation_m", 2.0),
+      .transient_retry_limit = node.declare_parameter<std::int64_t>(
+          "rolling_transient_retry_limit", 2),
   };
   if (!std::isfinite(rolling_surface.horizon_m) ||
       rolling_surface.horizon_m <= 0.0 ||
@@ -194,7 +197,9 @@ struct RuntimeParameters final {
       rolling_surface.poll_period_ms < 10 ||
       rolling_surface.poll_period_ms > 10000 ||
       rolling_surface.min_replan_interval_ms < 10 ||
-      rolling_surface.min_replan_interval_ms > 10000) {
+      rolling_surface.min_replan_interval_ms > 10000 ||
+      rolling_surface.transient_retry_limit < 0 ||
+      rolling_surface.transient_retry_limit > 10) {
     throw std::runtime_error{"PLANNER_ERROR: rolling parameter invalid"};
   }
 
