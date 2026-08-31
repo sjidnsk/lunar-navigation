@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include "lunar_pure_planner_ros/lunar_surface_demo_motion.hpp"
 #include "lunar_pure_planner_ros/lunar_surface_local_map.hpp"
 #include "lunar_pure_planner_ros/lunar_surface_scenario.hpp"
 
@@ -58,6 +59,24 @@ TEST(LunarSurfaceScenario, BuildsSixtyFourMetreHighResolutionLocalRaster) {
   EXPECT_DOUBLE_EQ(raster.length_y_m(), 64.0);
   EXPECT_EQ(raster.occupancy.size(), 320U * 320U);
   EXPECT_EQ(raster.elevation_m.size(), 320U * 320U);
+}
+
+TEST(LunarSurfaceScenario, DemoMotionConsumesOneDistanceBudgetPerTick) {
+  nav_msgs::msg::Path path;
+  for (const double x_m : {0.0, 0.2, 0.4, 0.6, 1.0}) {
+    geometry_msgs::msg::PoseStamped pose;
+    pose.pose.position.x = x_m;
+    path.poses.push_back(pose);
+  }
+  std::size_t next_pose = 1U;
+  double x_m = 0.0;
+  double y_m = 0.0;
+
+  AdvanceAlongDemoPath(path, next_pose, x_m, y_m, 0.5);
+
+  EXPECT_DOUBLE_EQ(x_m, 0.5);
+  EXPECT_DOUBLE_EQ(y_m, 0.0);
+  EXPECT_EQ(next_pose, 3U);
 }
 
 }  // namespace

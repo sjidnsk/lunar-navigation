@@ -267,7 +267,8 @@ double PathLengthMetres(const nav_msgs::msg::Path& path) noexcept {
 
 std::string FormatPlanningSummary(const PlanningSummary& summary) {
   std::ostringstream stream;
-  stream << "[PLAN " << std::setw(3) << std::setfill('0') << summary.sequence
+  stream << "----------------------------\n"
+         << "[PLAN " << std::setw(3) << std::setfill('0') << summary.sequence
          << "] " << (summary.success ? "OK" : "FAIL") << std::setfill(' ')
          << std::fixed << std::setprecision(2)
          << " start=(" << summary.start_x_m << ',' << summary.start_y_m << ')'

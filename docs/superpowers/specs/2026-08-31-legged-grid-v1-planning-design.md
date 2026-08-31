@@ -516,3 +516,22 @@ git diff --check                passed
 `Humble = NOT_RUN`、`Orin = NOT_RUN`、`DDS = NOT_RUN`、`rosbag = NOT_RUN`、
 `vehicle = NOT_RUN`。本机未安装 `clang-format`，自动格式化检查为 `NOT_RUN`，但
 源码已通过 Release 编译、全部受影响包测试和差异空白检查。
+
+## 2026-08-31 足式滚动与 RViz 输出补充
+
+足式 `grid_traversability_v1` 接入现有月面滚动调度，同一 Action 复用一次全局路线并
+按 `3.0 m` 前瞻发布足式局部分段。当前分段到达前，局部图刷新和全局路线偏离量
+不会抢占该分段；每个新周期使用当次冻结的可通行性快照。轮式滚动触发规则保持
+不变。
+
+足式局部轨迹和全局预览分别发布为 `legged_path_topic` 与
+`legged_global_path_topic`。正常路径及失败时的空 `Path` 均带 `map` frame，避免
+RViz Message Filter 因空 frame 丢弃清空消息。demo 每个 0.5 s 周期最多沿路径移动
+0.5 m，并同步更新运动方向 yaw，防止密集路径点被一次全部吞掉或移动后仍使用旧
+朝向。终端每条 `[PLAN nnn]` 前固定输出 `----------------------------`。
+
+本机 Jazzy 无 RViz 实节点以固定起终点运行时，首周期为 `786.5 ms`，随后五个连续
+滚动周期为 `198.0 ms`、`221.7 ms`、`185.0 ms`、`298.9 ms` 和 `161.4 ms`；六个
+周期均为 `planning_outcome=0`、`reason_code=PLAN_FOUND`、
+`has_reference=true`，未再出现局部图刷新导致的 `STALE_INPUT`。这是本机 demo
+证据，不外推为 Humble、Orin、DDS 或实车证据。

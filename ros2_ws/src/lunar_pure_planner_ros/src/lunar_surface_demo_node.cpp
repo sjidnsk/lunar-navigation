@@ -16,8 +16,9 @@
 #include <std_msgs/msg/float32_multi_array.hpp>
 #include <tf2_msgs/msg/tf_message.hpp>
 
-#include "lunar_pure_planner_ros/lunar_surface_scenario.hpp"
+#include "lunar_pure_planner_ros/lunar_surface_demo_motion.hpp"
 #include "lunar_pure_planner_ros/lunar_surface_local_map.hpp"
+#include "lunar_pure_planner_ros/lunar_surface_scenario.hpp"
 #include "lunar_pure_planner_ros/lunar_surface_traversability_viz.hpp"
 
 namespace lunar::pure_planner_ros {
@@ -252,20 +253,14 @@ class LunarSurfaceDemoNode final : public rclcpp::Node {
 
   void AdvanceRover() {
     constexpr double kStepM = 0.5;
-    while (next_path_pose_ < active_path_.poses.size()) {
-      const auto& target = active_path_.poses[next_path_pose_].pose.position;
-      const double dx = target.x - rover_x_m_;
-      const double dy = target.y - rover_y_m_;
-      const double distance = std::hypot(dx, dy);
-      if (distance <= kStepM) {
-        rover_x_m_ = target.x;
-        rover_y_m_ = target.y;
-        ++next_path_pose_;
-        continue;
-      }
-      rover_x_m_ += kStepM * dx / distance;
-      rover_y_m_ += kStepM * dy / distance;
-      break;
+    const double previous_x_m = rover_x_m_;
+    const double previous_y_m = rover_y_m_;
+    AdvanceAlongDemoPath(active_path_, next_path_pose_, rover_x_m_, rover_y_m_,
+                         kStepM);
+    const double dx = rover_x_m_ - previous_x_m;
+    const double dy = rover_y_m_ - previous_y_m;
+    if (std::hypot(dx, dy) > 1.0e-9) {
+      rover_yaw_rad_ = std::atan2(dy, dx);
     }
   }
 

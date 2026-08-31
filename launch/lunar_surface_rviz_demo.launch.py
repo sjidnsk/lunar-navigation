@@ -29,6 +29,8 @@ def generate_launch_description() -> LaunchDescription:
         "wheeled_path_topic": "/lunar_demo/wheeled_path",
         "wheeled_global_path_topic": "/lunar_demo/global_path",
         "wheeled_timed_path_topic": "/lunar_demo/wheeled_path_timing",
+        "legged_path_topic": "/lunar_demo/legged_path",
+        "legged_global_path_topic": "/lunar_demo/legged_global_path",
         "rolling_surface_enabled": True,
         "rolling_horizon_m": 12.0,
     }

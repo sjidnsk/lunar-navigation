@@ -372,4 +372,27 @@ nav_msgs::msg::Path ConvertGlobalPath(
   return path;
 }
 
+nav_msgs::msg::Path ConvertTrajectoryPath(
+    const lunar_planning_msgs::msg::MotionReference& reference) {
+  nav_msgs::msg::Path path;
+  path.header = reference.trajectory.header;
+  if (path.header.frame_id.empty()) {
+    path.header = reference.header;
+  }
+  path.poses.reserve(reference.trajectory.points.size());
+  for (const auto& point : reference.trajectory.points) {
+    if (point.transforms.empty()) {
+      continue;
+    }
+    geometry_msgs::msg::PoseStamped pose;
+    pose.header = path.header;
+    pose.pose.position.x = point.transforms.front().translation.x;
+    pose.pose.position.y = point.transforms.front().translation.y;
+    pose.pose.position.z = point.transforms.front().translation.z;
+    pose.pose.orientation = point.transforms.front().rotation;
+    path.poses.push_back(std::move(pose));
+  }
+  return path;
+}
+
 }  // namespace lunar::pure_planner_ros

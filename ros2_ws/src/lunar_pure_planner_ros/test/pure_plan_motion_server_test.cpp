@@ -120,18 +120,17 @@ std_msgs::msg::Float32MultiArray Layer(const std::size_t width,
   return layer;
 }
 
-grid_map_msgs::msg::GridMap LocalMap() {
-  constexpr std::size_t kWidth = 8U;
-  constexpr std::size_t kHeight = 8U;
+grid_map_msgs::msg::GridMap LocalMap(const std::size_t width = 8U,
+                                    const std::size_t height = 8U) {
   grid_map_msgs::msg::GridMap map;
   map.header.frame_id = "odom";
   map.info.resolution = 0.2;
-  map.info.length_x = kWidth * map.info.resolution;
-  map.info.length_y = kHeight * map.info.resolution;
+  map.info.length_x = width * map.info.resolution;
+  map.info.length_y = height * map.info.resolution;
   map.info.pose.orientation.w = 1.0;
   map.layers = {"occupancy", "semantic_id", "elevation", "roughness"};
-  map.data = {Layer(kWidth, kHeight, 0.0F), Layer(kWidth, kHeight, 17.0F),
-              Layer(kWidth, kHeight, 0.0F), Layer(kWidth, kHeight, 99.0F)};
+  map.data = {Layer(width, height, 0.0F), Layer(width, height, 17.0F),
+              Layer(width, height, 0.0F), Layer(width, height, 99.0F)};
   return map;
 }
 
@@ -154,11 +153,13 @@ nav_msgs::msg::OccupancyGrid GlobalMap(const std::uint32_t width = 8U) {
   return map;
 }
 
-nav_msgs::msg::Odometry Odometry(const double position_x = 0.0) {
+nav_msgs::msg::Odometry Odometry(const double position_x = 0.0,
+                                 const double position_y = 0.0) {
   nav_msgs::msg::Odometry state;
   state.header.frame_id = "odom";
   state.child_frame_id = "base_link";
   state.pose.pose.position.x = position_x;
+  state.pose.pose.position.y = position_y;
   state.pose.pose.orientation.w = 1.0;
   state.pose.covariance[0] = 1'000'000.0;
   state.twist.covariance[0] = 1'000'000.0;
@@ -226,15 +227,22 @@ lunar::pure_planning::LocalStageResult LocalSuccess(
   }
   const auto* point = std::get_if<lunar::pure_planning::PointGoal>(
       &goals.goals_odom[selected_goal_index].target);
-  const auto* state = std::get_if<lunar::pure_planning::WheeledState>(
+  const auto* wheel = std::get_if<lunar::pure_planning::WheeledState>(
       &request.current_state);
-  if (point == nullptr || state == nullptr) {
+  const auto* legged = std::get_if<lunar::pure_planning::LeggedState>(
+      &request.current_state);
+  const auto* pose = wheel != nullptr
+      ? &wheel->pose
+      : (legged != nullptr ? &legged->body_pose : nullptr);
+  if (point == nullptr || pose == nullptr) {
     return {.status = lunar::pure_planning::LocalPlanStatus::kInvalidInput,
             .reason_code = "INVALID_INPUT"};
   }
   lunar::pure_planning::TrajectoryReference trajectory{
-      .semantics = lunar::pure_planning::TrajectorySemantics::kWheeledBase,
-      .points = {{.pose = state->pose},
+      .semantics = legged != nullptr
+          ? lunar::pure_planning::TrajectorySemantics::kLeggedBodyReference
+          : lunar::pure_planning::TrajectorySemantics::kWheeledBase,
+      .points = {{.pose = *pose},
                  {.pose = {.position_m = point->position_m,
                            .orientation = {.w = 1.0}}}},
   };
@@ -297,6 +305,19 @@ class RunningSystem final {
               std::scoped_lock lock{wheeled_global_paths_mutex};
               wheeled_global_paths.push_back(*value);
             });
+    legged_path_subscription = client->create_subscription<nav_msgs::msg::Path>(
+        "/Car/T4/planning/legged_path", rclcpp::QoS{10}.reliable(),
+        [this](nav_msgs::msg::Path::ConstSharedPtr value) {
+          std::scoped_lock lock{legged_paths_mutex};
+          legged_paths.push_back(*value);
+        });
+    legged_global_path_subscription =
+        client->create_subscription<nav_msgs::msg::Path>(
+            "/Car/T4/planning/legged_global_path", rclcpp::QoS{10}.reliable(),
+            [this](nav_msgs::msg::Path::ConstSharedPtr value) {
+              std::scoped_lock lock{legged_global_paths_mutex};
+              legged_global_paths.push_back(*value);
+            });
     timed_path_subscription = client->create_subscription<
         lunar_planning_msgs::msg::TimedPath>(
         "/Car/T4/planning/wheeled_path_timing", rclcpp::QoS{10}.reliable(),
@@ -324,6 +345,8 @@ class RunningSystem final {
     wheeled_reference_subscription.reset();
     wheeled_path_subscription.reset();
     wheeled_global_path_subscription.reset();
+    legged_path_subscription.reset();
+    legged_global_path_subscription.reset();
     timed_path_subscription.reset();
     client.reset();
     server.reset();
@@ -331,7 +354,8 @@ class RunningSystem final {
 
   void PublishInputs(const bool include_global = true,
                      const double odometry_x = 0.0,
-                     const std::uint32_t global_width = 8U) {
+                     const std::uint32_t global_width = 8U,
+                     const std::size_t local_width = 8U) {
     // Destroyed endpoints may briefly remain in the same-process DDS graph
     // cache, so require a live subscriber without requiring an exact count.
     ASSERT_TRUE(WaitFor([this] {
@@ -344,7 +368,7 @@ class RunningSystem final {
       if (include_global) {
         global_publisher->publish(GlobalMap(global_width));
       }
-      local_publisher->publish(LocalMap());
+      local_publisher->publish(LocalMap(local_width, local_width));
       odometry_publisher->publish(Odometry(odometry_x));
       tf_publisher->publish(Transforms());
       std::this_thread::sleep_for(20ms);
@@ -420,6 +444,16 @@ class RunningSystem final {
     return wheeled_global_paths;
   }
 
+  std::vector<nav_msgs::msg::Path> LeggedPaths() const {
+    std::scoped_lock lock{legged_paths_mutex};
+    return legged_paths;
+  }
+
+  std::vector<nav_msgs::msg::Path> LeggedGlobalPaths() const {
+    std::scoped_lock lock{legged_global_paths_mutex};
+    return legged_global_paths;
+  }
+
   std::vector<lunar_planning_msgs::msg::TimedPath> TimedPaths() const {
     std::scoped_lock lock{timed_paths_mutex};
     return timed_paths;
@@ -436,8 +470,17 @@ class RunningSystem final {
     local_publisher->publish(std::move(map));
   }
 
-  void PublishOdometryOnly(const double position_x) {
-    odometry_publisher->publish(Odometry(position_x));
+  void PublishOdometryOnly(const double position_x,
+                           const double position_y = 0.0) {
+    odometry_publisher->publish(Odometry(position_x, position_y));
+  }
+
+  void PublishLocalAndOdometry(const double position_x,
+                               const std::size_t local_width,
+                               const double position_y = 0.0) {
+    local_publisher->publish(LocalMap(local_width, local_width));
+    std::this_thread::sleep_for(20ms);
+    odometry_publisher->publish(Odometry(position_x, position_y));
   }
 
   std::shared_ptr<PurePlanMotionServer> server;
@@ -464,6 +507,9 @@ class RunningSystem final {
   rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr wheeled_path_subscription;
   rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr
       wheeled_global_path_subscription;
+  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr legged_path_subscription;
+  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr
+      legged_global_path_subscription;
   rclcpp::Subscription<lunar_planning_msgs::msg::TimedPath>::SharedPtr
       timed_path_subscription;
   mutable std::mutex diagnostics_mutex;
@@ -474,6 +520,10 @@ class RunningSystem final {
   std::vector<nav_msgs::msg::Path> wheeled_paths;
   mutable std::mutex wheeled_global_paths_mutex;
   std::vector<nav_msgs::msg::Path> wheeled_global_paths;
+  mutable std::mutex legged_paths_mutex;
+  std::vector<nav_msgs::msg::Path> legged_paths;
+  mutable std::mutex legged_global_paths_mutex;
+  std::vector<nav_msgs::msg::Path> legged_global_paths;
   mutable std::mutex timed_paths_mutex;
   std::vector<lunar_planning_msgs::msg::TimedPath> timed_paths;
   mutable std::mutex feedback_mutex;
@@ -1025,13 +1075,17 @@ TEST(PurePlanMotionServer,
   EXPECT_TRUE(cleared_reference.trajectory.points.empty());
   ASSERT_TRUE(WaitFor([&] { return failed.WheeledPaths().size() == 1U; }));
   const auto cleared = failed.WheeledPaths().front();
-  EXPECT_TRUE(cleared.header.frame_id.empty());
+  EXPECT_EQ(cleared.header.frame_id, "map");
   EXPECT_TRUE(cleared.poses.empty());
   ASSERT_TRUE(
       WaitFor([&] { return failed.WheeledGlobalPaths().size() == 1U; }));
-  EXPECT_TRUE(failed.WheeledGlobalPaths().front().poses.empty());
+  const auto cleared_global = failed.WheeledGlobalPaths().front();
+  EXPECT_EQ(cleared_global.header.frame_id, "map");
+  EXPECT_TRUE(cleared_global.poses.empty());
   ASSERT_TRUE(WaitFor([&] { return failed.TimedPaths().size() == 1U; }));
-  EXPECT_TRUE(failed.TimedPaths().front().path.poses.empty());
+  const auto cleared_timed = failed.TimedPaths().front();
+  EXPECT_EQ(cleared_timed.path.header.frame_id, "map");
+  EXPECT_TRUE(cleared_timed.path.poses.empty());
 }
 
 TEST(PurePlanMotionServer,
@@ -1943,6 +1997,100 @@ TEST(PurePlanMotionServer,
             "PLAN_FOUND_LATE");
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "latency_class"),
             "SLA_MISSED");
+}
+
+TEST(PurePlanMotionServer,
+     LeggedGridV1RollingPublishesEachSegmentAndRunsUntilFinalOdometry) {
+  std::atomic<std::uint64_t> local_calls{0U};
+  RunningSystem system{
+      [](const lunar::pure_planning::PlanningRequest&) {
+        return Failure(lunar::pure_planning::PlanningStatus::kPlannerError,
+                       "PLANNER_ERROR");
+      },
+      "legged", ConfigPath("legged.yaml").string(),
+      {rclcpp::Parameter{"rolling_surface_enabled", true},
+       rclcpp::Parameter{"rolling_poll_period_ms", 10},
+       rclcpp::Parameter{"rolling_min_replan_interval_ms", 10}},
+      [&](const lunar::pure_planning::PlanningRequest& request,
+          const lunar::pure_planning::LocalGoalSet& goals,
+          lunar::pure_planning::SearchControl) {
+        ++local_calls;
+        EXPECT_TRUE(std::holds_alternative<
+                    lunar::pure_planning::LeggedState>(
+            request.current_state));
+        EXPECT_TRUE(request.world.traversability_snapshot != nullptr);
+        auto local = LocalSuccess(request, goals);
+        local.legged_local = {
+            .active = true,
+            .traversal_projection_cache_hit = local_calls.load() > 1U,
+            .fast_path_accepts = 17U,
+            .exact_sweep_fallbacks = 2U,
+            .exact_sweep_cell_checks = 9U,
+            .edge_validation_cache_hits = 3U,
+        };
+        return local;
+      }};
+  system.PublishInputs(true, 0.0, 64U, 128U);
+
+  auto goal = system.Goal("legged_rolling");
+  goal.goal.point.x = 3.5;
+  const auto handle = system.SendGoal(goal);
+  ASSERT_NE(handle, nullptr);
+
+  ASSERT_TRUE(WaitFor([&] {
+    return local_calls.load() >= 1U &&
+           std::ranges::any_of(system.LeggedPaths(), [](const auto& path) {
+             return path.header.frame_id == "map" && !path.poses.empty();
+           }) &&
+           std::ranges::any_of(system.LeggedGlobalPaths(),
+                               [](const auto& path) {
+                                 return path.header.frame_id == "map" &&
+                                        !path.poses.empty();
+                               });
+  }));
+
+  system.PublishLocalOnly();
+  std::this_thread::sleep_for(100ms);
+  EXPECT_EQ(local_calls.load(), 1U);
+
+  const auto first_paths = system.LeggedPaths();
+  const auto first_nonempty = std::ranges::find_if(
+      first_paths, [](const auto& path) { return !path.poses.empty(); });
+  ASSERT_NE(first_nonempty, first_paths.end());
+  const double first_endpoint_x =
+      first_nonempty->poses.back().pose.position.x;
+  const double first_endpoint_y =
+      first_nonempty->poses.back().pose.position.y;
+  system.PublishLocalAndOdometry(first_endpoint_x, 64U, first_endpoint_y);
+  ASSERT_TRUE(WaitFor([&] {
+    return local_calls.load() >= 2U &&
+           std::ranges::count_if(system.LeggedPaths(), [](const auto& path) {
+             return !path.poses.empty();
+           }) >= 2;
+  }));
+  ASSERT_TRUE(WaitFor([&] { return system.DiagnosticCount() >= 2U; }));
+  const auto diagnostics = system.Diagnostics();
+  for (std::size_t index = 0U; index < 2U; ++index) {
+    EXPECT_EQ(FindDiagnosticValue(diagnostics[index], "grid_v1_active"),
+              "true");
+    EXPECT_NE(FindDiagnosticValue(diagnostics[index],
+                                  "traversability_revision"),
+              "0");
+    EXPECT_EQ(FindDiagnosticValue(diagnostics[index],
+                                  "legged_fast_path_accepts"),
+              "17");
+  }
+
+  system.PublishOdometryOnly(3.5);
+  const auto result = system.Result(handle);
+  EXPECT_EQ(result.code, rclcpp_action::ResultCode::SUCCEEDED);
+  ASSERT_NE(result.result, nullptr);
+  EXPECT_EQ(result.result->planning_outcome,
+            Action::Result::NEW_REFERENCE_AVAILABLE);
+  EXPECT_EQ(result.result->reason_code, "PLAN_FOUND");
+  EXPECT_TRUE(result.result->has_reference);
+  EXPECT_EQ(result.result->reference.platform_type,
+            result.result->reference.LEGGED);
 }
 
 TEST(PurePlanMotionServer,

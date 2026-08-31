@@ -41,6 +41,7 @@ TEST(LunarSurfaceReporter, FormatsOneConciseSuccessfulPlanningLine) {
 
   EXPECT_EQ(
       FormatPlanningSummary(summary),
+      "----------------------------\n"
       "[PLAN 003] OK start=(-349.50,0.50) goal=(350.50,0.50) "
       "time=1284.6 ms path=712.3 m local=12.1 m reason=PLAN_FOUND");
 }
@@ -58,6 +59,7 @@ TEST(LunarSurfaceReporter, UsesNotAvailableLengthsForFailure) {
 
   EXPECT_EQ(
       FormatPlanningSummary(summary),
+      "----------------------------\n"
       "[PLAN 004] FAIL start=(-20.00,15.00) goal=(84.00,91.00) "
       "time=3000.0 ms path=N/A local=N/A reason=TIMEOUT");
 }
