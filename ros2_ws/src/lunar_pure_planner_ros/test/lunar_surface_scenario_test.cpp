@@ -78,6 +78,11 @@ TEST(LunarSurfaceScenario, HasFixedGeometryAndReachableDefaultGoal) {
   EXPECT_FALSE(scenario.Occupied(scenario.default_goal_cell));
   EXPECT_TRUE(CellsConnected(scenario, scenario.start_cell,
                              scenario.default_goal_cell));
+  const auto direct_cells =
+      Supercover(scenario.start_cell, scenario.default_goal_cell);
+  EXPECT_TRUE(std::ranges::any_of(
+      direct_cells,
+      [&](const LunarSurfaceCell cell) { return scenario.Occupied(cell); }));
 }
 
 TEST(LunarSurfaceScenario, RetainsCraterRimWithoutAnArtificialDemoCorridor) {
