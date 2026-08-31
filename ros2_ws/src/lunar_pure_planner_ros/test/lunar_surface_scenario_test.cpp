@@ -1,3 +1,10 @@
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
+#include <vector>
+
 #include <gtest/gtest.h>
 
 #include "lunar_pure_planner_ros/lunar_surface_demo_motion.hpp"
@@ -6,6 +13,54 @@
 
 namespace lunar::pure_planner_ros {
 namespace {
+
+void AppendUnique(std::vector<LunarSurfaceCell>& cells,
+                  const LunarSurfaceCell cell) {
+  if (cells.empty() || cells.back() != cell) {
+    cells.push_back(cell);
+  }
+}
+
+[[nodiscard]] std::vector<LunarSurfaceCell> Supercover(
+    const LunarSurfaceCell start, const LunarSurfaceCell end) {
+  std::vector<LunarSurfaceCell> cells;
+  std::int32_t x = static_cast<std::int32_t>(start.x);
+  std::int32_t y = static_cast<std::int32_t>(start.y);
+  const std::int32_t dx = static_cast<std::int32_t>(end.x) - x;
+  const std::int32_t dy = static_cast<std::int32_t>(end.y) - y;
+  const std::int32_t sign_x = dx < 0 ? -1 : 1;
+  const std::int32_t sign_y = dy < 0 ? -1 : 1;
+  const std::int64_t nx = std::llabs(static_cast<std::int64_t>(dx));
+  const std::int64_t ny = std::llabs(static_cast<std::int64_t>(dy));
+  std::int64_t ix{};
+  std::int64_t iy{};
+  AppendUnique(cells, start);
+  while (ix < nx || iy < ny) {
+    const std::int64_t decision = (1 + 2 * ix) * ny - (1 + 2 * iy) * nx;
+    if (decision == 0) {
+      AppendUnique(cells, LunarSurfaceCell{
+                              .x = static_cast<std::size_t>(x + sign_x),
+                              .y = static_cast<std::size_t>(y)});
+      AppendUnique(cells, LunarSurfaceCell{
+                              .x = static_cast<std::size_t>(x),
+                              .y = static_cast<std::size_t>(y + sign_y)});
+      x += sign_x;
+      y += sign_y;
+      ++ix;
+      ++iy;
+    } else if (decision < 0) {
+      x += sign_x;
+      ++ix;
+    } else {
+      y += sign_y;
+      ++iy;
+    }
+    AppendUnique(cells,
+                 LunarSurfaceCell{.x = static_cast<std::size_t>(x),
+                                  .y = static_cast<std::size_t>(y)});
+  }
+  return cells;
+}
 
 TEST(LunarSurfaceScenario, HasFixedGeometryAndReachableDefaultGoal) {
   const LunarSurfaceScenario scenario = BuildLunarSurfaceScenario(20260823U);
@@ -31,6 +86,32 @@ TEST(LunarSurfaceScenario, RetainsCraterRimWithoutAnArtificialDemoCorridor) {
   // This fixed-seed cell belongs to a crater rim.  It must remain an obstacle
   // rather than being cleared to guarantee a straight demo route.
   EXPECT_TRUE(scenario.Occupied(LunarSurfaceCell{238U, 101U}));
+}
+
+TEST(LunarSurfaceScenario,
+     FixedValidationGoalsAreReachableLongAndRequireObstacleDetours) {
+  const LunarSurfaceScenario scenario = BuildLunarSurfaceScenario(20260823U);
+  constexpr std::array<LunarSurfaceCell, 3U> kValidationGoals{{
+      {325U, 200U},
+      {400U, 300U},
+      {250U, 700U},
+  }};
+
+  for (const LunarSurfaceCell goal : kValidationGoals) {
+    SCOPED_TRACE(::testing::Message() << "goal=(" << goal.x << "," << goal.y
+                                      << ")");
+    EXPECT_FALSE(scenario.Occupied(goal));
+    EXPECT_TRUE(CellsConnected(scenario, scenario.start_cell, goal));
+    EXPECT_GT(std::hypot(static_cast<double>(goal.x) -
+                             static_cast<double>(scenario.start_cell.x),
+                         static_cast<double>(goal.y) -
+                             static_cast<double>(scenario.start_cell.y)),
+              100.0);
+    const auto direct_cells = Supercover(scenario.start_cell, goal);
+    EXPECT_TRUE(std::ranges::any_of(
+        direct_cells,
+        [&](const LunarSurfaceCell cell) { return scenario.Occupied(cell); }));
+  }
 }
 
 TEST(LunarSurfaceScenario, SamplesSubCellTerrainFromContinuousTruth) {
