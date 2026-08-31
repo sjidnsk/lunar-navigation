@@ -1,0 +1,10 @@
+uint8 WHEELED=1
+uint8 LEGGED=2
+uint8 STOP=1
+uint8 EXECUTE=2
+string request_id
+builtin_interfaces/Time map_token
+uint32 segment_index
+uint8 platform_type
+uint8 command
+nav_msgs/Path executable_path

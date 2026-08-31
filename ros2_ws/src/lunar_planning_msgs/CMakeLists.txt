@@ -11,6 +11,8 @@ find_package(std_msgs REQUIRED)
 find_package(trajectory_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/DemoMapAck.msg"
+  "msg/DemoPlanSegment.msg"
   "msg/GoalRegion.msg"
   "msg/HopSegment.msg"
   "msg/MotionReference.msg"
