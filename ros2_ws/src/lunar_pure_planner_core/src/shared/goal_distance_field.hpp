@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <span>
 #include <vector>
@@ -14,6 +15,10 @@ struct GoalDistanceField final {
   std::vector<double> distance_m;
   std::vector<std::size_t> nearest_goal_index;
 };
+
+[[nodiscard]] std::optional<GoalDistanceField> BuildGoalDistanceField(
+    const MapSnapshot& map, std::span<const std::uint8_t> feasible,
+    std::span<const GridCell> goals, SearchControl control = {});
 
 [[nodiscard]] std::optional<GoalDistanceField> BuildGoalDistanceField(
     const LocalTerrainProjection& terrain, std::span<const GridCell> goals,

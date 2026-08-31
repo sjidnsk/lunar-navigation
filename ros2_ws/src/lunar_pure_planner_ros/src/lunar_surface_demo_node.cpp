@@ -16,8 +16,9 @@
 #include <std_msgs/msg/float32_multi_array.hpp>
 #include <tf2_msgs/msg/tf_message.hpp>
 
-#include "lunar_pure_planner_ros/lunar_surface_scenario.hpp"
+#include "lunar_pure_planner_ros/lunar_surface_demo_state.hpp"
 #include "lunar_pure_planner_ros/lunar_surface_local_map.hpp"
+#include "lunar_pure_planner_ros/lunar_surface_scenario.hpp"
 #include "lunar_pure_planner_ros/lunar_surface_traversability_viz.hpp"
 
 namespace lunar::pure_planner_ros {
@@ -26,6 +27,8 @@ namespace {
 constexpr std::size_t kLocalWidth = 320U;
 constexpr std::size_t kLocalHeight = 320U;
 constexpr double kLocalResolutionM = 0.2;
+constexpr double kLocalMapUpdateDistanceM = 4.0;
+constexpr double kRoverStepM = 0.5;
 constexpr double kLeggedNominalBodyHeightM = 0.33;
 
 std_msgs::msg::Float32MultiArray MakeLayer(const std::vector<float>& values,
@@ -79,17 +82,14 @@ class LunarSurfaceDemoNode final : public rclcpp::Node {
     accepted_start_pub_ =
         create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(
             "/lunar_demo/accepted_start", rclcpp::QoS{1}.transient_local());
-    rover_x_m_ = scenario_.origin_x_m +
-                 (static_cast<double>(scenario_.start_cell.x) + 0.5) *
-                     scenario_.resolution_m;
-    rover_y_m_ = scenario_.origin_y_m +
-                 (static_cast<double>(scenario_.start_cell.y) + 0.5) *
-                     scenario_.resolution_m;
+    state_.Reset(scenario_.origin_x_m +
+                     (static_cast<double>(scenario_.start_cell.x) + 0.5) *
+                         scenario_.resolution_m,
+                 scenario_.origin_y_m +
+                     (static_cast<double>(scenario_.start_cell.y) + 0.5) *
+                         scenario_.resolution_m);
     const auto accept_path = [this](nav_msgs::msg::Path::ConstSharedPtr path) {
-      if (!path->poses.empty()) {
-        active_path_ = *path;
-        next_path_pose_ = active_path_.poses.size() > 1U ? 1U : 0U;
-      }
+      state_.AcceptPath(*path);
     };
     wheeled_path_sub_ = create_subscription<nav_msgs::msg::Path>(
         "/lunar_demo/wheeled_path", rclcpp::QoS{10}.reliable(),
@@ -134,23 +134,19 @@ class LunarSurfaceDemoNode final : public rclcpp::Node {
         (orientation.w * orientation.z + orientation.x * orientation.y);
     const double cosine = 1.0 - 2.0 *
         (orientation.y * orientation.y + orientation.z * orientation.z);
-    rover_x_m_ = x_m;
-    rover_y_m_ = y_m;
-    rover_yaw_rad_ = std::atan2(sine, cosine);
-    active_path_ = nav_msgs::msg::Path{};
-    next_path_pose_ = 0U;
+    state_.Reset(x_m, y_m, std::atan2(sine, cosine));
     auto accepted = start;
     accepted.header.frame_id = "map";
     accepted_start_pub_->publish(accepted);
     RCLCPP_INFO(get_logger(), "Accepted RViz start pose at (%.2f, %.2f)",
-                rover_x_m_, rover_y_m_);
+                state_.x_m(), state_.y_m());
   }
 
   void Publish() {
-    AdvanceRover();
+    state_.Advance(kRoverStepM);
     const rclcpp::Time stamp = now();
-    const double start_x = rover_x_m_;
-    const double start_y = rover_y_m_;
+    const double start_x = state_.x_m();
+    const double start_y = state_.y_m();
     nav_msgs::msg::OccupancyGrid global;
     global.header.stamp = stamp;
     global.header.frame_id = "map";
@@ -170,46 +166,56 @@ class LunarSurfaceDemoNode final : public rclcpp::Node {
     // Global terrain and map->odom are static in this test-only scene.
     // Republishing them after rolling has started increments their input
     // sequences and forces an unnecessary global-route rebuild every cycle.
-    const bool static_inputs_discovered =
+    const bool planner_inputs_discovered =
         global_pub_->get_subscription_count() > 0U &&
+        local_pub_->get_subscription_count() >= 2U &&
+        odom_pub_->get_subscription_count() >= 2U &&
         tf_pub_->get_subscription_count() > 0U;
     if (static_delivery_count_ < 12U) {
       global_pub_->publish(global);
     }
 
-    const LunarSurfaceLocalRaster raster =
-        BuildLunarSurfaceLocalRaster(scenario_, start_x, start_y);
-    grid_map_msgs::msg::GridMap local;
-    local.header.stamp = stamp;
-    local.header.frame_id = "odom";
-    local.info.resolution = kLocalResolutionM;
-    local.info.length_x = raster.length_x_m();
-    local.info.length_y = raster.length_y_m();
-    local.info.pose.position.x = start_x;
-    local.info.pose.position.y = start_y;
-    local.info.pose.orientation.w = 1.0;
-    local.layers = {"occupancy", "elevation"};
-    local.basic_layers = local.layers;
-    local.data = {MakeLayer(raster.occupancy, kLocalWidth, kLocalHeight),
-                  MakeLayer(raster.elevation_m, kLocalWidth, kLocalHeight)};
-    local_pub_->publish(local);
+    if (LocalMapPublicationReady(
+            state_.LocalMapDue(kLocalMapUpdateDistanceM),
+            static_delivery_count_ < 12U,
+            local_pub_->get_subscription_count())) {
+      const LunarSurfaceLocalRaster raster =
+          BuildLunarSurfaceLocalRaster(scenario_, start_x, start_y);
+      grid_map_msgs::msg::GridMap local;
+      local.header.stamp = stamp;
+      local.header.frame_id = "odom";
+      local.info.resolution = kLocalResolutionM;
+      local.info.length_x = raster.length_x_m();
+      local.info.length_y = raster.length_y_m();
+      local.info.pose.position.x = start_x;
+      local.info.pose.position.y = start_y;
+      local.info.pose.orientation.w = 1.0;
+      local.layers = {"occupancy", "elevation"};
+      local.basic_layers = local.layers;
+      local.data = {MakeLayer(raster.occupancy, kLocalWidth, kLocalHeight),
+                    MakeLayer(raster.elevation_m, kLocalWidth, kLocalHeight)};
+      local_pub_->publish(local);
 
-    nav_msgs::msg::OccupancyGrid local_viz;
-    local_viz.header = local.header;
-    local_viz.info.resolution = kLocalResolutionM;
-    local_viz.info.width = kLocalWidth;
-    local_viz.info.height = kLocalHeight;
-    local_viz.info.origin.position.x = start_x - raster.length_x_m() / 2.0;
-    local_viz.info.origin.position.y = start_y - raster.length_y_m() / 2.0;
-    local_viz.info.origin.position.z = 0.05;
-    local_viz.info.origin.orientation.w = 1.0;
-    local_viz.data.resize(raster.occupancy.size(), -1);
-    for (std::size_t index = 0U; index < raster.occupancy.size(); ++index) {
-      if (std::isfinite(raster.occupancy[index])) {
-        local_viz.data[index] = raster.occupancy[index] >= 0.5F ? 100 : 0;
+      nav_msgs::msg::OccupancyGrid local_viz;
+      local_viz.header = local.header;
+      local_viz.info.resolution = kLocalResolutionM;
+      local_viz.info.width = kLocalWidth;
+      local_viz.info.height = kLocalHeight;
+      local_viz.info.origin.position.x =
+          start_x - raster.length_x_m() / 2.0;
+      local_viz.info.origin.position.y =
+          start_y - raster.length_y_m() / 2.0;
+      local_viz.info.origin.position.z = 0.05;
+      local_viz.info.origin.orientation.w = 1.0;
+      local_viz.data.resize(raster.occupancy.size(), -1);
+      for (std::size_t index = 0U; index < raster.occupancy.size(); ++index) {
+        if (std::isfinite(raster.occupancy[index])) {
+          local_viz.data[index] = raster.occupancy[index] >= 0.5F ? 100 : 0;
+        }
       }
+      local_viz_pub_->publish(local_viz);
+      state_.MarkLocalMapPublished();
     }
-    local_viz_pub_->publish(local_viz);
 
     nav_msgs::msg::Odometry odometry;
     odometry.header.stamp = stamp;
@@ -221,8 +227,8 @@ class LunarSurfaceDemoNode final : public rclcpp::Node {
     odometry.pose.pose.position.z =
         (rover_sample.has_value() ? rover_sample->elevation_m : 0.0) +
         (platform_type_ == "legged" ? kLeggedNominalBodyHeightM : 0.0);
-    odometry.pose.pose.orientation.z = std::sin(0.5 * rover_yaw_rad_);
-    odometry.pose.pose.orientation.w = std::cos(0.5 * rover_yaw_rad_);
+    odometry.pose.pose.orientation.z = std::sin(0.5 * state_.yaw_rad());
+    odometry.pose.pose.orientation.w = std::cos(0.5 * state_.yaw_rad());
     odom_pub_->publish(odometry);
 
     if (static_delivery_count_ < 12U) {
@@ -242,7 +248,7 @@ class LunarSurfaceDemoNode final : public rclcpp::Node {
     // publications before issuing the automatic goal so every planner input
     // has reached its callback cache; the former 1.5 s delay raced startup
     // and produced an INVALID_INPUT result.
-    if (static_inputs_discovered && static_delivery_count_ < 12U) {
+    if (planner_inputs_discovered && static_delivery_count_ < 12U) {
       ++static_delivery_count_;
       if (static_delivery_count_ == 12U && auto_goal_) {
         goal_pub_->publish(goal);
@@ -250,33 +256,10 @@ class LunarSurfaceDemoNode final : public rclcpp::Node {
     }
   }
 
-  void AdvanceRover() {
-    constexpr double kStepM = 0.5;
-    while (next_path_pose_ < active_path_.poses.size()) {
-      const auto& target = active_path_.poses[next_path_pose_].pose.position;
-      const double dx = target.x - rover_x_m_;
-      const double dy = target.y - rover_y_m_;
-      const double distance = std::hypot(dx, dy);
-      if (distance <= kStepM) {
-        rover_x_m_ = target.x;
-        rover_y_m_ = target.y;
-        ++next_path_pose_;
-        continue;
-      }
-      rover_x_m_ += kStepM * dx / distance;
-      rover_y_m_ += kStepM * dy / distance;
-      break;
-    }
-  }
-
   LunarSurfaceScenario scenario_;
-  double rover_x_m_{};
-  double rover_y_m_{};
-  double rover_yaw_rad_{};
+  LunarSurfaceDemoState state_;
   std::string platform_type_;
   bool auto_goal_{};
-  nav_msgs::msg::Path active_path_;
-  std::size_t next_path_pose_{};
   std::size_t static_delivery_count_{};
   bool global_grid_published_{};
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr global_pub_;

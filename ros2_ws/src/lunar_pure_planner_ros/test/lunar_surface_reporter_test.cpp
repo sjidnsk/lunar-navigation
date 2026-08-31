@@ -41,6 +41,7 @@ TEST(LunarSurfaceReporter, FormatsOneConciseSuccessfulPlanningLine) {
 
   EXPECT_EQ(
       FormatPlanningSummary(summary),
+      "----------------------------\n"
       "[PLAN 003] OK start=(-349.50,0.50) goal=(350.50,0.50) "
       "time=1284.6 ms path=712.3 m local=12.1 m reason=PLAN_FOUND");
 }
@@ -58,6 +59,7 @@ TEST(LunarSurfaceReporter, UsesNotAvailableLengthsForFailure) {
 
   EXPECT_EQ(
       FormatPlanningSummary(summary),
+      "----------------------------\n"
       "[PLAN 004] FAIL start=(-20.00,15.00) goal=(84.00,91.00) "
       "time=3000.0 ms path=N/A local=N/A reason=TIMEOUT");
 }
@@ -79,6 +81,22 @@ TEST(LunarSurfaceReporter, WaitsForPathsWhenDiagnosticsArriveFirst) {
   EXPECT_DOUBLE_EQ(*summary->global_path_length_m, 10.0);
   EXPECT_DOUBLE_EQ(*summary->local_path_length_m, 10.0);
   EXPECT_FALSE(state.TakeReadySummary().has_value());
+}
+
+TEST(LunarSurfaceReporter, UsesLatestRollingStartForEachResult) {
+  PlanningReportState state;
+  state.Begin(-10.0, 2.0, 30.0, 40.0);
+  state.SetStart(-6.5, 3.25);
+  state.SetResult(false, "NO_PATH",
+                  std::chrono::duration<double, std::milli>{20.0});
+
+  const auto summary = state.TakeReadySummary();
+
+  ASSERT_TRUE(summary.has_value());
+  EXPECT_DOUBLE_EQ(summary->start_x_m, -6.5);
+  EXPECT_DOUBLE_EQ(summary->start_y_m, 3.25);
+  EXPECT_DOUBLE_EQ(summary->goal_x_m, 30.0);
+  EXPECT_DOUBLE_EQ(summary->goal_y_m, 40.0);
 }
 
 }  // namespace

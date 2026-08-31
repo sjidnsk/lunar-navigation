@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -17,6 +18,7 @@ struct SurfacePortalCandidate final {
   shared::GridCell local_cell;
   float global_clearance_m{};
   float local_clearance_m{};
+  std::int32_t lateral_offset_cells{};
   std::size_t stable_rank{};
 };
 

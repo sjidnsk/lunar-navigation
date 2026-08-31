@@ -110,6 +110,19 @@ diagnostic_msgs::msg::DiagnosticArray MakeRequestDiagnostics(
             Milliseconds(result.timing.certification_elapsed));
   add_value("output_elapsed_ms", Milliseconds(result.timing.output_elapsed));
   add_value("total_elapsed_ms", Milliseconds(result.timing.total_elapsed));
+  if (result.legged_local.active) {
+    const auto& legged = result.legged_local;
+    add_value("legged_traversal_projection_cache_hit",
+              legged.traversal_projection_cache_hit ? "true" : "false");
+    add_value("legged_fast_path_accepts",
+              std::to_string(legged.fast_path_accepts));
+    add_value("legged_exact_sweep_fallbacks",
+              std::to_string(legged.exact_sweep_fallbacks));
+    add_value("legged_exact_sweep_cell_checks",
+              std::to_string(legged.exact_sweep_cell_checks));
+    add_value("legged_edge_validation_cache_hits",
+              std::to_string(legged.edge_validation_cache_hits));
+  }
   if (result.grid_v1.active) {
     const auto& grid_v1 = result.grid_v1;
     add_value("grid_v1_active", "true");

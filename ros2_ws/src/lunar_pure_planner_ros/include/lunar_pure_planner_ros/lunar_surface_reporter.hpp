@@ -28,6 +28,7 @@ class PlanningReportState final {
  public:
   void Begin(double start_x_m, double start_y_m, double goal_x_m,
              double goal_y_m) noexcept;
+  void SetStart(double start_x_m, double start_y_m) noexcept;
   void SetGlobalPath(const nav_msgs::msg::Path& path) noexcept;
   void SetLocalPath(const nav_msgs::msg::Path& path) noexcept;
   void SetResult(bool success, std::string reason_code,

@@ -178,9 +178,9 @@ coverage 与 summary/status 完全一致、路程和完成目标数为正、全�
 这是 Ubuntu 本机 ROS 2 Jazzy 的功能仿真证据，不是 ROS 2 Humble、Jetson AGX Orin、实车控制、
 实时性、功耗或稳定性验收。部署前仍需在指定 Humble/Orin 环境重新构建并执行对应验收。
 
-## Jazzy 100 m 单次规划 RViz 演示（测试专用）
+## Jazzy 1 km 月表滚动规划 RViz 演示（测试专用）
 
-该演示生成固定种子的 `1 km × 1 km` 全局月表，分辨率为 `1 m/cell`（`1000 × 1000` 栅格）；规划器同时接收以车辆为中心的 `100 m × 100 m` 局部 GridMap，分辨率为 `0.2 m/cell`（`500 × 500` 栅格）。这保留全图路线语境，同时以适合轮式安全检查的局部精度规划默认目标。所有接口位于 `/lunar_demo/*`，Action 为 `/lunar_demo/plan_motion`，不会连接
+该演示生成固定种子的 `1 km × 1 km` 全局月表，分辨率为 `1 m/cell`（`1000 × 1000` 栅格）；规划器同时接收以车辆为中心的 `64 m × 64 m` 局部 GridMap，分辨率为 `0.2 m/cell`（`320 × 320` 栅格）。这保留全图路线语境，同时以适合轮式安全检查的局部精度滚动规划。所有接口位于 `/lunar_demo/*`，Action 为 `/lunar_demo/plan_motion`，不会连接
 生产 `/Car/T4/plan_motion`。
 
 外部里程计可提供地图范围内、有限且物理可行的任意 `x/y/yaw` 起点，不要求与地图原点、
@@ -196,6 +196,11 @@ colcon build --packages-up-to lunar_pure_planner_ros \
 source install/setup.bash
 ros2 launch lunar_pure_planner_ros lunar_surface_rviz_demo.launch.py
 ```
+
+Demo 的 timer、里程计和车辆显示保持 `2 Hz`。启动时先等待规划器、局部可通行性显示和 Reporter
+消费者被发现，再以 `2 Hz` 短暂发送 12 组局部 GridMap/OccupancyGrid 启动样本；启动交付完成后，
+两张局部图仅在车辆相对上一局部图中心移动至少 `4 m` 时成对更新。规划失败或恢复重试会发布带合法
+frame 的空路径，Demo 收到空轮式/足式路径后立即停止沿旧路径移动。
 
 RViz 固定坐标系为 `map`，初始顶视范围约为整张 1 km 地图。为规避部分 Mesa/RViz 组合中
 `Map` 与 GridMap 插件同时启用的 GLSL sampler 冲突，默认关闭原始占据图；**Wheel traversability**
@@ -282,14 +287,23 @@ ros2 launch lunar_pure_planner_ros pure_planner.launch.py platform_type:=legged
 ros2 launch lunar_pure_planner_ros pure_planner.launch.py platform_type:=hopper
 ```
 
-轮式月表的全局-局部滚动调度默认关闭。确认全局图、持续局部图与独立轮式控制器均已运行后，才显式启用：
+月表全局-局部滚动调度默认关闭。按平台确认全局图、持续局部图和下游执行器均已运行后，再显式启用：
 
 ```bash
 ros2 launch lunar_pure_planner_ros pure_planner.launch.py \
   platform_type:=wheel rolling_surface_enabled:=true
+ros2 launch lunar_pure_planner_ros pure_planner.launch.py \
+  platform_type:=legged rolling_surface_enabled:=true
 ```
 
-启用后，一条月表 Action 先计算一次按轮式包络膨胀的全局路线；随后以 8 m 路线前瞻重复产生严格局部路径，直到 odometry 进入最终目标容差。每个真正触发的冷启动或滚动规划周期共用一个时钟：`<1 s` 达到目标，`[1 s,2 s)` 记录变慢，`[2 s,3 s)` 记录 SLA 失败但继续搜索，只有 `>=3 s` 才硬停止且不发布新路径；车辆行驶和轮询时间不计入规划周期，也没有 300 s Action 业务截止时间。取消或替换优先于迟到结果，失败会同时发布空 `MotionReference`、空 `Path` 和空 `TimedPath`。控制器只订阅保留正反向速度及角速度的 `MotionReference`；两个 Path Topic 仅用于 RViz、rosbag 和外部观测。该模式不替代外部全局图生产者或独立轮式控制器。
+启用后，一条月表 Action 先计算一次全局路线，再重复产生局部分段，直到 odometry 进入最终目标容差；轮式前瞻为 8 m，足式 Grid V1 前瞻为 4 m。足式在实际路线进度前进 1.5 m 或到达当前门户时规划下一段，新目标从当时的实际路线进度重新计算，正常保留约 2.5 m 已规划尾段；周期内冻结本次可通行性快照，局部图刷新和全局路线偏离量本身不抢占已发布分段。每个真正触发的规划周期共用一个时钟：`<1 s` 达到目标，`[1 s,2 s)` 记录变慢，`[2 s,3 s)` 记录 SLA 失败但继续搜索，只有 `>=3 s` 才硬停止且不发布新路径；行驶和轮询时间不计入规划周期。轮式控制器继续订阅 `MotionReference`；足式滚动段发布到 `legged_path_topic`，全局预览发布到 `legged_global_path_topic`，二者均为 `map` 帧 `Path`。该模式不替代外部地图生产者或平台控制器。
+
+`rolling_transient_retry_limit` 默认是 `2`，合法范围为 `0..10`。它只适用于已经发布过至少一个
+有效滚动段之后的局部 `NO_PATH` 或单周期 `TIMEOUT`：每次恢复先发布空输出，并在诊断中增加
+`rolling_recovery=true`、`rolling_recovery_attempt=N`；任一后续成功会把连续计数清零。首次局部失败、
+全局失败、`INVALID_INPUT`、`PLANNER_ERROR`、取消和超过上限仍立即终止。`STALE_INPUT` 继续表示
+旧输入身份的结果未发布并重新计算，不占用恢复次数。该机制没有放宽地图身份校验，也没有延长
+单周期 `3 s` 硬截止。
 
 默认参数在 `config/pure_planner.yaml`；其中全局占据阈值为 `50` percent，局部占据阈值为 `0.5`。
 
@@ -374,6 +388,9 @@ Action Result 和 diagnostics Topic 的生产成功原因码为 `PLAN_FOUND`。�
 - `TIMEOUT`
 - `REQUEST_CANCELED`
 - `PLANNER_ERROR`
+
+正式规划成功还必须同时满足 `planning_outcome: 0` 与 `has_reference: true`；滚动周期在 SLA 后但硬
+截止前完成时原因码为 `PLAN_FOUND_LATE`。Action 状态或可视化路径单独出现都不足以证明成功。
 
 计时和调用次数的实际输出位置与单位如下；所有耗时均由 `steady_clock` wall duration 产生：
 

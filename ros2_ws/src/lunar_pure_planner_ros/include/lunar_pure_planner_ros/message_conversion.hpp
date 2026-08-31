@@ -34,4 +34,7 @@ struct GoalConversionResult final {
     const lunar::pure_planning::GlobalRoutePreview& preview,
     const std_msgs::msg::Header& header);
 
+[[nodiscard]] nav_msgs::msg::Path ConvertTrajectoryPath(
+    const lunar_planning_msgs::msg::MotionReference& reference);
+
 }  // namespace lunar::pure_planner_ros

@@ -41,7 +41,8 @@ struct LocalGoalSetResult final {
 [[nodiscard]] LocalGoalSetResult ConvertSurfacePortalsToLocalGoals(
     const SurfacePortalSetResult& portals,
     const SurfaceRollingDecision& decision, const Pose3& current_pose_odom,
-    const GridMap& global_map, const GridMap& local_map);
+    const GridMap& global_map, const GridMap& local_map,
+    bool snap_intermediate_to_local_cell = false);
 
 [[nodiscard]] std::optional<GoalRegion> GoalMapToOdomPlanar(
     const PlanningRequest& input, const GoalRegion& goal_map);

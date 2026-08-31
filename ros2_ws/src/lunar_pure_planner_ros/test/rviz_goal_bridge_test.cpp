@@ -383,6 +383,7 @@ TEST(RvizGoalBridge, ClearsLeggedPathsWhenFormalSuccessContractIsNotMet) {
   {
     std::scoped_lock lock{path_mutex};
     EXPECT_TRUE(local_path->poses.empty());
+    EXPECT_EQ(local_path->header.frame_id, "map");
   }
 
   executor.cancel();

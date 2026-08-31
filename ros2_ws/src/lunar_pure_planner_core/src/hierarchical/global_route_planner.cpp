@@ -341,7 +341,8 @@ bool GoalInsideLocalMap(const PlanningRequest& input,
 LocalGoalSetResult ConvertSurfacePortalsToLocalGoals(
     const SurfacePortalSetResult& portals,
     const SurfaceRollingDecision& decision, const Pose3& current_pose_odom,
-    const GridMap& global_map, const GridMap& local_map) {
+    const GridMap& global_map, const GridMap& local_map,
+    const bool snap_intermediate_to_local_cell) {
   constexpr double kNumericalEpsilon = 1.0e-9;
   if (!portals.ok() ||
       decision.kind != SurfaceRollingDecision::Kind::kNextPortalSet ||
@@ -381,11 +382,9 @@ LocalGoalSetResult ConvertSurfacePortalsToLocalGoals(
         !in_bounds(local_map, portal.local_cell)) {
       return {.reason_code = "INVALID_INPUT"};
     }
-    const double minimum_x =
-        local_map.origin_m.x +
+    const double minimum_x = local_map.origin_m.x +
         static_cast<double>(portal.local_cell.x) * local_map.resolution_m;
-    const double minimum_y =
-        local_map.origin_m.y +
+    const double minimum_y = local_map.origin_m.y +
         static_cast<double>(portal.local_cell.y) * local_map.resolution_m;
     const double maximum_x = minimum_x + local_map.resolution_m;
     const double maximum_y = minimum_y + local_map.resolution_m;
@@ -393,20 +392,28 @@ LocalGoalSetResult ConvertSurfacePortalsToLocalGoals(
         {point->position_m.x - minimum_x, maximum_x - point->position_m.x,
          point->position_m.y - minimum_y, maximum_y - point->position_m.y,
          0.5 * local_map.resolution_m});
-    const double tolerance = std::max(
-        0.0, std::min(local_boundary_distance,
-                      0.5 * global_map.resolution_m) -
-                 kNumericalEpsilon);
+    const double tolerance = snap_intermediate_to_local_cell
+        ? std::max(0.0,
+                   0.5 * local_map.resolution_m - kNumericalEpsilon)
+        : std::max(0.0,
+                   std::min(local_boundary_distance,
+                            0.5 * global_map.resolution_m) -
+                       kNumericalEpsilon);
     if (!std::isfinite(tolerance)) {
       return {.reason_code = "INVALID_INPUT"};
     }
-    if (std::hypot(point->position_m.x - current_pose_odom.position_m.x,
-                   point->position_m.y - current_pose_odom.position_m.y) <=
+    GoalRegion goal = portal.goal_odom;
+    auto& snapped = std::get<PointGoal>(goal.target);
+    if (snap_intermediate_to_local_cell) {
+      snapped.position_m.x = minimum_x + 0.5 * local_map.resolution_m;
+      snapped.position_m.y = minimum_y + 0.5 * local_map.resolution_m;
+    }
+    snapped.tolerance_m = tolerance;
+    if (std::hypot(snapped.position_m.x - current_pose_odom.position_m.x,
+                   snapped.position_m.y - current_pose_odom.position_m.y) <=
         tolerance + kNumericalEpsilon) {
       continue;
     }
-    GoalRegion goal = portal.goal_odom;
-    std::get<PointGoal>(goal.target).tolerance_m = tolerance;
     goal.yaw_rad.reset();
     goal.yaw_tolerance_rad = 0.0;
     goals.goals_odom.push_back(std::move(goal));
@@ -446,7 +453,7 @@ LocalGoalSetResult SelectSurfaceLocalGoals(
     return {.reason_code = "INVALID_INPUT"};
   }
   const double horizon_m =
-      std::holds_alternative<LeggedCapability>(input.capability) ? 3.0 : 8.0;
+      std::holds_alternative<LeggedCapability>(input.capability) ? 4.0 : 8.0;
   const SurfaceRollingSession session(
       route, input.goal_map,
       SurfaceRollingConfig{.horizon_m = horizon_m, .max_deviation_m = 2.0});
@@ -467,7 +474,8 @@ LocalGoalSetResult SelectSurfaceLocalGoals(
   }
   return ConvertSurfacePortalsToLocalGoals(
       portals, decision, *start, *input.world.global_map,
-      input.world.local_map);
+      input.world.local_map,
+      std::holds_alternative<LeggedCapability>(input.capability));
 }
 
 }  // namespace lunar::pure_planning::hierarchical
