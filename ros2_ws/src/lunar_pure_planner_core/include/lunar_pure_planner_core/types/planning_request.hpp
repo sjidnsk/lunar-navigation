@@ -144,6 +144,15 @@ struct GridV1Diagnostics final {
   std::chrono::nanoseconds postprocess_elapsed{};
 };
 
+struct LeggedLocalDiagnostics final {
+  bool active{};
+  bool traversal_projection_cache_hit{};
+  std::size_t fast_path_accepts{};
+  std::size_t exact_sweep_fallbacks{};
+  std::size_t exact_sweep_cell_checks{};
+  std::size_t edge_validation_cache_hits{};
+};
+
 struct PlanningResult final {
   PlanningStatus status{PlanningStatus::kInvalidInput};
   std::string reason_code;
@@ -159,6 +168,7 @@ struct PlanningResult final {
   bool local_projection_cache_hit{};
   bool goal_field_cache_hit{};
   std::optional<double> best_cost;
+  LeggedLocalDiagnostics legged_local;
   GridV1Diagnostics grid_v1;
 };
 

@@ -287,14 +287,16 @@ ros2 launch lunar_pure_planner_ros pure_planner.launch.py platform_type:=legged
 ros2 launch lunar_pure_planner_ros pure_planner.launch.py platform_type:=hopper
 ```
 
-轮式月表的全局-局部滚动调度默认关闭。确认全局图、持续局部图与独立轮式控制器均已运行后，才显式启用：
+月表全局-局部滚动调度默认关闭。按平台确认全局图、持续局部图和下游执行器均已运行后，再显式启用：
 
 ```bash
 ros2 launch lunar_pure_planner_ros pure_planner.launch.py \
   platform_type:=wheel rolling_surface_enabled:=true
+ros2 launch lunar_pure_planner_ros pure_planner.launch.py \
+  platform_type:=legged rolling_surface_enabled:=true
 ```
 
-启用后，一条月表 Action 先计算一次按轮式包络膨胀的全局路线；随后以 8 m 路线前瞻重复产生严格局部路径，直到 odometry 进入最终目标容差。每个真正触发的冷启动或滚动规划周期共用一个时钟：`<1 s` 达到目标，`[1 s,2 s)` 记录变慢，`[2 s,3 s)` 记录 SLA 失败但继续搜索，只有 `>=3 s` 才硬停止且不发布新路径；车辆行驶和轮询时间不计入规划周期，也没有 300 s Action 业务截止时间。取消或替换优先于迟到结果，失败会同时发布空 `MotionReference`、空 `Path` 和空 `TimedPath`。控制器只订阅保留正反向速度及角速度的 `MotionReference`；两个 Path Topic 仅用于 RViz、rosbag 和外部观测。该模式不替代外部全局图生产者或独立轮式控制器。
+启用后，一条月表 Action 先计算一次全局路线，再重复产生局部分段，直到 odometry 进入最终目标容差；轮式前瞻为 8 m，足式 Grid V1 前瞻为 4 m。足式在实际路线进度前进 1.5 m 或到达当前门户时规划下一段，新目标从当时的实际路线进度重新计算，正常保留约 2.5 m 已规划尾段；周期内冻结本次可通行性快照，局部图刷新和全局路线偏离量本身不抢占已发布分段。每个真正触发的规划周期共用一个时钟：`<1 s` 达到目标，`[1 s,2 s)` 记录变慢，`[2 s,3 s)` 记录 SLA 失败但继续搜索，只有 `>=3 s` 才硬停止且不发布新路径；行驶和轮询时间不计入规划周期。轮式控制器继续订阅 `MotionReference`；足式滚动段发布到 `legged_path_topic`，全局预览发布到 `legged_global_path_topic`，二者均为 `map` 帧 `Path`。该模式不替代外部地图生产者或平台控制器。
 
 `rolling_transient_retry_limit` 默认是 `2`，合法范围为 `0..10`。它只适用于已经发布过至少一个
 有效滚动段之后的局部 `NO_PATH` 或单周期 `TIMEOUT`：每次恢复先发布空输出，并在诊断中增加

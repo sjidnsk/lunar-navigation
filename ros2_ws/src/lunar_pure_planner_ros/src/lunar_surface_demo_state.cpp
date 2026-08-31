@@ -3,6 +3,8 @@
 #include <cmath>
 #include <utility>
 
+#include "lunar_pure_planner_ros/lunar_surface_demo_motion.hpp"
+
 namespace lunar::pure_planner_ros {
 
 bool LocalMapPublicationReady(const bool local_map_due,
@@ -35,20 +37,13 @@ void LunarSurfaceDemoState::Advance(const double step_m) noexcept {
   if (!std::isfinite(step_m) || step_m <= 0.0) {
     return;
   }
-  while (next_path_pose_ < active_path_.poses.size()) {
-    const auto& target = active_path_.poses[next_path_pose_].pose.position;
-    const double dx = target.x - x_m_;
-    const double dy = target.y - y_m_;
-    const double distance = std::hypot(dx, dy);
-    if (distance <= step_m) {
-      x_m_ = target.x;
-      y_m_ = target.y;
-      ++next_path_pose_;
-      continue;
-    }
-    x_m_ += step_m * dx / distance;
-    y_m_ += step_m * dy / distance;
-    break;
+  const double previous_x_m = x_m_;
+  const double previous_y_m = y_m_;
+  AdvanceAlongDemoPath(active_path_, next_path_pose_, x_m_, y_m_, step_m);
+  const double dx = x_m_ - previous_x_m;
+  const double dy = y_m_ - previous_y_m;
+  if (std::hypot(dx, dy) > 1.0e-9) {
+    yaw_rad_ = std::atan2(dy, dx);
   }
 }
 

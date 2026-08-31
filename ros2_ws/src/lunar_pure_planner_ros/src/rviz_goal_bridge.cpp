@@ -3,6 +3,8 @@
 #include <cmath>
 #include <utility>
 
+#include "lunar_pure_planner_ros/message_conversion.hpp"
+
 namespace lunar::pure_planner_ros {
 namespace {
 
@@ -98,6 +100,8 @@ void RvizGoalBridge::PublishLeggedResultPaths(
     const rclcpp_action::ClientGoalHandle<Action>::WrappedResult& result) {
   nav_msgs::msg::Path global_path;
   nav_msgs::msg::Path local_path;
+  global_path.header.frame_id = "map";
+  local_path.header.frame_id = "map";
   if (result.code == rclcpp_action::ResultCode::SUCCEEDED && result.result &&
       result.result->planning_outcome ==
           result.result->NEW_REFERENCE_AVAILABLE &&
@@ -106,24 +110,7 @@ void RvizGoalBridge::PublishLeggedResultPaths(
       result.result->reference.platform_type ==
           result.result->reference.LEGGED) {
     global_path = result.result->reference.path_preview;
-    const auto& trajectory = result.result->reference.trajectory;
-    local_path.header = trajectory.header;
-    if (local_path.header.frame_id.empty()) {
-      local_path.header = result.result->reference.header;
-    }
-    local_path.poses.reserve(trajectory.points.size());
-    for (const auto& point : trajectory.points) {
-      if (point.transforms.empty()) {
-        continue;
-      }
-      geometry_msgs::msg::PoseStamped pose;
-      pose.header = local_path.header;
-      pose.pose.position.x = point.transforms.front().translation.x;
-      pose.pose.position.y = point.transforms.front().translation.y;
-      pose.pose.position.z = point.transforms.front().translation.z;
-      pose.pose.orientation = point.transforms.front().rotation;
-      local_path.poses.push_back(std::move(pose));
-    }
+    local_path = ConvertTrajectoryPath(result.result->reference);
   }
   if (legged_global_path_publisher_) {
     legged_global_path_publisher_->publish(global_path);

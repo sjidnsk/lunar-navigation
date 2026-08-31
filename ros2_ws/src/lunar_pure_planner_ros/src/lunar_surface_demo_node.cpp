@@ -16,9 +16,9 @@
 #include <std_msgs/msg/float32_multi_array.hpp>
 #include <tf2_msgs/msg/tf_message.hpp>
 
-#include "lunar_pure_planner_ros/lunar_surface_scenario.hpp"
 #include "lunar_pure_planner_ros/lunar_surface_demo_state.hpp"
 #include "lunar_pure_planner_ros/lunar_surface_local_map.hpp"
+#include "lunar_pure_planner_ros/lunar_surface_scenario.hpp"
 #include "lunar_pure_planner_ros/lunar_surface_traversability_viz.hpp"
 
 namespace lunar::pure_planner_ros {

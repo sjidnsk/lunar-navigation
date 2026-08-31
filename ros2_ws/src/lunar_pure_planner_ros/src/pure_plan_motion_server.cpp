@@ -20,6 +20,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -68,6 +69,9 @@ using GoalHandle = rclcpp_action::ServerGoalHandle<Action>;
 using namespace std::chrono_literals;
 
 constexpr std::string_view kPackageName{"lunar_pure_planner_ros"};
+constexpr double kLeggedRollingHorizonM = 4.0;
+constexpr double kLeggedReplanStrideM = 1.5;
+constexpr double kLeggedGoalToleranceEpsilonM = 1.0e-9;
 
 struct RollingSurfaceParameters final {
   bool enabled{};
@@ -93,6 +97,8 @@ struct RuntimeParameters final {
   std::string wheeled_path_topic;
   std::string wheeled_global_path_topic;
   std::string wheeled_timed_path_topic;
+  std::string legged_path_topic;
+  std::string legged_global_path_topic;
   RollingSurfaceParameters rolling_surface;
 };
 
@@ -234,6 +240,10 @@ struct RuntimeParameters final {
           "/Car/T4/planning/wheeled_global_path"),
       .wheeled_timed_path_topic = node.declare_parameter<std::string>(
           "wheeled_timed_path_topic", "/Car/T4/planning/wheeled_path_timing"),
+      .legged_path_topic = node.declare_parameter<std::string>(
+          "legged_path_topic", "/Car/T4/planning/legged_path"),
+      .legged_global_path_topic = node.declare_parameter<std::string>(
+          "legged_global_path_topic", "/Car/T4/planning/legged_global_path"),
       .rolling_surface = rolling_surface,
   };
   if (parameters.planner_config.wheel_planner_mode ==
@@ -249,7 +259,9 @@ struct RuntimeParameters final {
            &parameters.action_name, &parameters.diagnostics_topic,
            &parameters.wheeled_reference_topic, &parameters.wheeled_path_topic,
            &parameters.wheeled_global_path_topic,
-           &parameters.wheeled_timed_path_topic}) {
+           &parameters.wheeled_timed_path_topic,
+           &parameters.legged_path_topic,
+           &parameters.legged_global_path_topic}) {
     if (!AbsoluteTopic(*interface_name)) {
       throw std::runtime_error{"PLANNER_ERROR: interface name must be absolute"};
     }
@@ -265,6 +277,21 @@ struct RuntimeParameters final {
   return value == Action::Goal::LUNAR_SURFACE
              ? lunar::pure_planning::EnvironmentMode::kLunarSurface
              : static_cast<lunar::pure_planning::EnvironmentMode>(value);
+}
+
+[[nodiscard]] const lunar::pure_planning::Pose3* PlatformPose(
+    const lunar::pure_planning::PlatformState& state) noexcept {
+  return std::visit(
+      [](const auto& value) -> const lunar::pure_planning::Pose3* {
+        using State = std::decay_t<decltype(value)>;
+        if constexpr (std::is_same_v<State,
+                                     lunar::pure_planning::LeggedState>) {
+          return &value.body_pose;
+        } else {
+          return &value.pose;
+        }
+      },
+      state);
 }
 
 [[nodiscard]] lunar::pure_planning::PlanningResult Failure(
@@ -425,6 +452,41 @@ void SetFinalizedTiming(
   SetDiagnosticValue(
       diagnostics, "latency_class",
       std::string{lunar::pure_planning::RequestLatencyClassName(latency_class)});
+}
+
+void PopulateGridV1Diagnostics(
+    lunar::pure_planning::PlanningResult& result,
+    const InputSnapshot& input,
+    const std::optional<TraversabilityInputSnapshot>& traversability,
+    const bool publish_check_enabled,
+    const std::optional<std::uint64_t> publish_check_revision = std::nullopt) {
+  auto& diagnostics = result.grid_v1;
+  diagnostics.active = true;
+  diagnostics.global_input_sequence = input.global_sequence;
+  diagnostics.local_input_sequence = input.local_sequence;
+  diagnostics.odometry_input_sequence = input.odometry_sequence;
+  if (!traversability.has_value() || !traversability->snapshot ||
+      !traversability->snapshot->valid()) {
+    return;
+  }
+  const auto& map = *traversability->snapshot;
+  const auto metrics = map.metrics();
+  diagnostics.traversability_revision = map.revision();
+  diagnostics.publish_check_revision = publish_check_enabled
+      ? publish_check_revision.value_or(map.revision())
+      : 0U;
+  diagnostics.profile_hash = map.profile_hash();
+  diagnostics.canonical_resolution_m = map.resolution_m();
+  diagnostics.map_origin_m = map.origin_m();
+  diagnostics.allocated_tiles = metrics.allocated_tiles;
+  diagnostics.estimated_map_bytes = metrics.estimated_bytes;
+  diagnostics.updated_cells = metrics.updated_cells;
+  diagnostics.dirty_tiles = metrics.dirty_tiles;
+  diagnostics.halo_recomputed_cells = metrics.halo_recomputed_cells;
+  diagnostics.free_cells = metrics.free_cells;
+  diagnostics.blocked_cells = metrics.blocked_cells;
+  diagnostics.unknown_cells = metrics.unknown_cells;
+  diagnostics.prior_conflicts = metrics.prior_conflicts;
 }
 
 struct AppliedTrustedBridge final {
@@ -628,6 +690,14 @@ struct PurePlanMotionServer::Impl final {
         parameters.wheeled_global_path_topic, rclcpp::QoS{1}.reliable());
     timed_path_publisher = node.create_publisher<lunar_planning_msgs::msg::TimedPath>(
         parameters.wheeled_timed_path_topic, rclcpp::QoS{1}.reliable());
+    if (parameters.rolling_surface.enabled &&
+        parameters.platform_type ==
+            lunar::pure_planning::PlatformType::kLegged) {
+      legged_path_publisher = node.create_publisher<nav_msgs::msg::Path>(
+          parameters.legged_path_topic, rclcpp::QoS{1}.reliable());
+      legged_global_path_publisher = node.create_publisher<nav_msgs::msg::Path>(
+          parameters.legged_global_path_topic, rclcpp::QoS{1}.reliable());
+    }
     action_server = rclcpp_action::create_server<Action>(
         node.get_node_base_interface(), node.get_node_clock_interface(),
         node.get_node_logging_interface(), node.get_node_waitables_interface(),
@@ -715,11 +785,13 @@ struct PurePlanMotionServer::Impl final {
                     FeedbackPhase(progress.phase));
   }
 
-  [[nodiscard]] static bool SamePlanningIdentity(
-      const InputSnapshot& planned, const InputSnapshot& latest) noexcept {
+  [[nodiscard]] static bool SameRollingPlanningIdentity(
+      const InputSnapshot& planned, const InputSnapshot& latest,
+      const bool legged_rolling) noexcept {
     return planned.global_sequence == latest.global_sequence &&
-           planned.local_sequence == latest.local_sequence &&
-           planned.tf_sequence == latest.tf_sequence;
+           planned.tf_sequence == latest.tf_sequence &&
+           (legged_rolling ||
+            planned.local_sequence == latest.local_sequence);
   }
 
   void PublishCycleDiagnostics(
@@ -879,7 +951,7 @@ struct PurePlanMotionServer::Impl final {
     if (UseRollingSurface(goal_handle->get_goal())) {
       InputSnapshot final_snapshot;
       bool result_diagnostic_published = false;
-      auto result = ExecuteRollingSurfaceWheel(
+      auto result = ExecuteRollingSurface(
           goal_handle, goal_handle->get_goal(), stop_token, &feedback_state,
           &final_snapshot, &result_diagnostic_published);
       try {
@@ -1028,33 +1100,9 @@ struct PurePlanMotionServer::Impl final {
     }
 
     if (uses_traversability_snapshot) {
-      auto& diagnostics = result.grid_v1;
-      diagnostics.active = true;
-      diagnostics.global_input_sequence = snapshot.global_sequence;
-      diagnostics.local_input_sequence = snapshot.local_sequence;
-      diagnostics.odometry_input_sequence = snapshot.odometry_sequence;
-      if (traversability.has_value() && traversability->snapshot &&
-          traversability->snapshot->valid()) {
-        const auto& map = *traversability->snapshot;
-        const auto metrics = map.metrics();
-        diagnostics.traversability_revision = map.revision();
-        diagnostics.publish_check_revision =
-            use_wheel_grid_v1
-                ? publish_check_revision.value_or(map.revision())
-                : 0U;
-        diagnostics.profile_hash = map.profile_hash();
-        diagnostics.canonical_resolution_m = map.resolution_m();
-        diagnostics.map_origin_m = map.origin_m();
-        diagnostics.allocated_tiles = metrics.allocated_tiles;
-        diagnostics.estimated_map_bytes = metrics.estimated_bytes;
-        diagnostics.updated_cells = metrics.updated_cells;
-        diagnostics.dirty_tiles = metrics.dirty_tiles;
-        diagnostics.halo_recomputed_cells = metrics.halo_recomputed_cells;
-        diagnostics.free_cells = metrics.free_cells;
-        diagnostics.blocked_cells = metrics.blocked_cells;
-        diagnostics.unknown_cells = metrics.unknown_cells;
-        diagnostics.prior_conflicts = metrics.prior_conflicts;
-      }
+      PopulateGridV1Diagnostics(result, snapshot, traversability,
+                                use_wheel_grid_v1,
+                                publish_check_revision);
     }
 
     if (result.status == lunar::pure_planning::PlanningStatus::kSuccess &&
@@ -1089,15 +1137,25 @@ struct PurePlanMotionServer::Impl final {
 
   [[nodiscard]] bool UseRollingSurface(
       const std::shared_ptr<const Action::Goal>& goal) const noexcept {
-    return goal && parameters.rolling_surface.enabled &&
-           parameters.planner_config.wheel_planner_mode ==
-               lunar::pure_planning::WheelPlannerMode::kLegacyCertified &&
-           parameters.platform_type == lunar::pure_planning::PlatformType::kWheeled &&
-           EnvironmentMode(goal->environment_mode) ==
-               lunar::pure_planning::EnvironmentMode::kLunarSurface;
+    if (!goal || !parameters.rolling_surface.enabled ||
+        EnvironmentMode(goal->environment_mode) !=
+            lunar::pure_planning::EnvironmentMode::kLunarSurface) {
+      return false;
+    }
+    const bool wheel_legacy =
+        parameters.platform_type ==
+            lunar::pure_planning::PlatformType::kWheeled &&
+        parameters.planner_config.wheel_planner_mode ==
+            lunar::pure_planning::WheelPlannerMode::kLegacyCertified;
+    const bool legged_grid_v1 =
+        parameters.platform_type ==
+            lunar::pure_planning::PlatformType::kLegged &&
+        parameters.planner_config.legged_global_mode ==
+            lunar::pure_planning::LeggedGlobalMode::kGridTraversabilityV1;
+    return wheel_legacy || legged_grid_v1;
   }
 
-  [[nodiscard]] lunar::pure_planning::PlanningResult ExecuteRollingSurfaceWheel(
+  [[nodiscard]] lunar::pure_planning::PlanningResult ExecuteRollingSurface(
       const std::shared_ptr<GoalHandle>& goal_handle,
       const std::shared_ptr<const Action::Goal>& request_goal,
       const std::stop_token stop_token, FeedbackState* const feedback_state,
@@ -1110,9 +1168,11 @@ struct PurePlanMotionServer::Impl final {
     using lunar::pure_planning::PlanningStatus;
     using lunar::pure_planning::Pose3;
     using lunar::pure_planning::SearchControl;
-    using lunar::pure_planning::WheeledState;
     using RollingDecision =
         lunar::pure_planning::hierarchical::SurfaceRollingDecision;
+
+    const bool legged_rolling =
+        parameters.platform_type == lunar::pure_planning::PlatformType::kLegged;
 
     if (result_diagnostic_published != nullptr) {
       *result_diagnostic_published = false;
@@ -1127,6 +1187,7 @@ struct PurePlanMotionServer::Impl final {
     std::uint64_t seen_local_sequence{};
     std::size_t transient_retry_count{};
     double minimum_route_progress_m{};
+    std::optional<double> legged_replan_anchor_progress_m;
     bool force_replan = true;
     auto last_replan = std::chrono::steady_clock::now() -
         std::chrono::milliseconds{
@@ -1151,8 +1212,12 @@ struct PurePlanMotionServer::Impl final {
           if (ContextIsValid()) {
             auto cleared =
                 ConvertResult(failure, request_goal->mission_revision);
-            PublishWheeledPath(failure, cleared,
-                               failure.timing.total_elapsed);
+            if (legged_rolling) {
+              PublishLeggedPath(failure, cleared);
+            } else {
+              PublishWheeledPath(failure, cleared,
+                                 failure.timing.total_elapsed);
+            }
           }
           force_replan = true;
           std::this_thread::sleep_for(std::chrono::milliseconds{
@@ -1178,21 +1243,39 @@ struct PurePlanMotionServer::Impl final {
       const auto converted_goal = transform.value.has_value()
           ? ConvertGoal(*request_goal, *transform.value)
           : GoalConversionResult{};
-      const auto world = AdaptSnapshot(EnvironmentMode::kLunarSurface, snapshot);
-      const auto state = AdaptOdometry(
-          *snapshot.odometry, lunar::pure_planning::PlatformType::kWheeled);
+      auto world = AdaptSnapshot(EnvironmentMode::kLunarSurface, snapshot);
+      const auto state = AdaptOdometry(*snapshot.odometry,
+                                       parameters.platform_type);
       if (!transform.value.has_value() || !converted_goal.ok() ||
           !world.value.has_value() || !state.value.has_value()) {
         return Failure(PlanningStatus::kInvalidInput, "INVALID_INPUT");
       }
-      const auto* wheel_state = std::get_if<WheeledState>(&*state.value);
-      const auto pose_map = wheel_state == nullptr
+      std::optional<TraversabilityInputSnapshot> traversability;
+      if (legged_rolling) {
+        traversability = traversability_input
+            ? std::optional<TraversabilityInputSnapshot>{
+                  traversability_input->Capture()}
+            : std::nullopt;
+        if (!traversability.has_value() || !traversability->snapshot ||
+            !traversability->snapshot->valid() ||
+            !traversability->reason_code.empty()) {
+          return Failure(
+              PlanningStatus::kInvalidInput,
+              traversability.has_value() &&
+                      !traversability->reason_code.empty()
+                  ? traversability->reason_code
+                  : "INVALID_INPUT");
+        }
+        world.value->traversability_snapshot = traversability->snapshot;
+      }
+      const auto* pose_odom = PlatformPose(*state.value);
+      const auto pose_map = pose_odom == nullptr
           ? std::optional<Pose3>{}
           : lunar::pure_planning::hierarchical::TransformPose(
-                wheel_state->pose, *transform.value,
+                *pose_odom, *transform.value,
                 lunar::pure_planning::hierarchical::TransformDirection::
                     kChildToParent);
-      if (wheel_state == nullptr || !pose_map.has_value()) {
+      if (pose_odom == nullptr || !pose_map.has_value()) {
         return Failure(PlanningStatus::kInvalidInput, "INVALID_INPUT");
       }
       const auto* final_point =
@@ -1288,11 +1371,14 @@ struct PurePlanMotionServer::Impl final {
         route_global_sequence = snapshot.global_sequence;
         route_tf_sequence = snapshot.tf_sequence;
         minimum_route_progress_m = 0.0;
+        legged_replan_anchor_progress_m.reset();
         active_goal.reset();
         session.emplace(
             *route, *converted_goal.goal,
             lunar::pure_planning::hierarchical::SurfaceRollingConfig{
-                .horizon_m = parameters.rolling_surface.horizon_m,
+                .horizon_m = legged_rolling
+                    ? kLeggedRollingHorizonM
+                    : parameters.rolling_surface.horizon_m,
                 .max_deviation_m =
                     parameters.rolling_surface.max_deviation_m});
         force_replan = true;
@@ -1315,6 +1401,10 @@ struct PurePlanMotionServer::Impl final {
         }
         return Failure(PlanningStatus::kNoPath, "NO_PATH");
       }
+      if (legged_rolling) {
+        minimum_route_progress_m = std::max(
+            minimum_route_progress_m, decision.projected_route_progress_m);
+      }
 
       const auto* active = active_goal.has_value()
           ? std::get_if<lunar::pure_planning::PointGoal>(&active_goal->target)
@@ -1323,16 +1413,25 @@ struct PurePlanMotionServer::Impl final {
           active != nullptr &&
           std::hypot(pose_map->position_m.x - active->position_m.x,
                      pose_map->position_m.y - active->position_m.y) <=
-              active->tolerance_m;
+              active->tolerance_m +
+                  (legged_rolling ? kLeggedGoalToleranceEpsilonM : 0.0);
       const bool local_changed =
+          !legged_rolling &&
           snapshot.local_sequence != seen_local_sequence &&
           std::chrono::steady_clock::now() - last_replan >=
               std::chrono::milliseconds{
                   parameters.rolling_surface.min_replan_interval_ms};
-      const bool deviated = decision.lateral_deviation_m >
-                            parameters.rolling_surface.max_deviation_m;
+      const bool deviated =
+          !legged_rolling &&
+          decision.lateral_deviation_m >
+              parameters.rolling_surface.max_deviation_m;
+      const bool legged_stride_reached =
+          legged_rolling && legged_replan_anchor_progress_m.has_value() &&
+          decision.projected_route_progress_m +
+                  kLeggedGoalToleranceEpsilonM >=
+              *legged_replan_anchor_progress_m + kLeggedReplanStrideM;
       if (!force_replan && last_segment.has_value() && !target_reached &&
-          !local_changed && !deviated) {
+          !local_changed && !deviated && !legged_stride_reached) {
         std::this_thread::sleep_for(std::chrono::milliseconds{
             parameters.rolling_surface.poll_period_ms});
         continue;
@@ -1372,7 +1471,7 @@ struct PurePlanMotionServer::Impl final {
       if (portals.ok()) {
         local_goals = lunar::pure_planning::hierarchical::
             ConvertSurfacePortalsToLocalGoals(
-                portals, decision, wheel_state->pose, *world.value->global_map,
+                portals, decision, *pose_odom, *world.value->global_map,
                 world.value->local_map);
       } else {
         local_goals.reason_code = portals.reason_code;
@@ -1461,6 +1560,13 @@ struct PurePlanMotionServer::Impl final {
           };
         }
       }
+      segment.expanded_states = local.expanded_states;
+      segment.selected_goal_index = local.selected_goal_index;
+      segment.best_cost = local.best_cost;
+      segment.legged_local = local.legged_local;
+      if (legged_rolling) {
+        PopulateGridV1Diagnostics(segment, snapshot, traversability, false);
+      }
       auto cycle_finalized = std::chrono::steady_clock::now();
       segment.timing = cycle_call_timing;
       segment.timing.total_elapsed =
@@ -1531,7 +1637,7 @@ struct PurePlanMotionServer::Impl final {
         }
         return timeout;
       }
-      if (!SamePlanningIdentity(snapshot, latest)) {
+      if (!SameRollingPlanningIdentity(snapshot, latest, legged_rolling)) {
         PublishCycleDiagnostics(request_goal, segment, true);
         if (result_diagnostic_published != nullptr) {
           *result_diagnostic_published = true;
@@ -1571,7 +1677,8 @@ struct PurePlanMotionServer::Impl final {
       if (final_snapshot != nullptr) {
         *final_snapshot = publish_snapshot;
       }
-      if (!SamePlanningIdentity(snapshot, publish_snapshot)) {
+      if (!SameRollingPlanningIdentity(snapshot, publish_snapshot,
+                                       legged_rolling)) {
         PublishCycleDiagnostics(request_goal, segment, true);
         if (result_diagnostic_published != nullptr) {
           *result_diagnostic_published = true;
@@ -1585,7 +1692,12 @@ struct PurePlanMotionServer::Impl final {
       }
       SetFinalizedTiming(segment.timing.total_elapsed, segment, converted);
       if (ContextIsValid()) {
-        PublishWheeledPath(segment, converted, segment.timing.total_elapsed);
+        if (legged_rolling) {
+          PublishLeggedPath(segment, converted);
+        } else {
+          PublishWheeledPath(segment, converted,
+                             segment.timing.total_elapsed);
+        }
       }
       PublishCycleDiagnostics(request_goal, segment);
       if (result_diagnostic_published != nullptr) {
@@ -1605,13 +1717,19 @@ struct PurePlanMotionServer::Impl final {
             if (candidate != nullptr &&
                 candidate->position_m.x == selected->position_m.x &&
                 candidate->position_m.y == selected->position_m.y) {
-              minimum_route_progress_m =
-                  std::max(minimum_route_progress_m,
-                           portal.route_progress_m);
+              if (!legged_rolling) {
+                minimum_route_progress_m =
+                    std::max(minimum_route_progress_m,
+                             portal.route_progress_m);
+              }
               break;
             }
           }
         }
+      }
+      if (legged_rolling) {
+        legged_replan_anchor_progress_m =
+            decision.projected_route_progress_m;
       }
       last_segment = std::move(segment);
       transient_retry_count = 0U;
@@ -1896,6 +2014,36 @@ struct PurePlanMotionServer::Impl final {
     }
   }
 
+  [[nodiscard]] nav_msgs::msg::Path EmptyMapPath() const {
+    nav_msgs::msg::Path path;
+    path.header.frame_id = "map";
+    path.header.stamp = node.now();
+    return path;
+  }
+
+  void PublishLeggedPath(
+      const lunar::pure_planning::PlanningResult& planning_result,
+      const Action::Result& result) {
+    nav_msgs::msg::Path local_path = EmptyMapPath();
+    nav_msgs::msg::Path global_path = EmptyMapPath();
+    if (result.has_reference &&
+        result.reference.platform_type == result.reference.LEGGED) {
+      local_path = ConvertTrajectoryPath(result.reference);
+      if (!planning_result.global_route_preview.poses_map.empty()) {
+        global_path = ConvertGlobalPath(planning_result.global_route_preview,
+                                        result.reference.header);
+      } else {
+        global_path = result.reference.path_preview;
+      }
+    }
+    if (legged_path_publisher) {
+      legged_path_publisher->publish(local_path);
+    }
+    if (legged_global_path_publisher) {
+      legged_global_path_publisher->publish(global_path);
+    }
+  }
+
   void PublishWheeledPath(
       const lunar::pure_planning::PlanningResult& planning_result,
       const Action::Result& result,
@@ -2051,6 +2199,9 @@ struct PurePlanMotionServer::Impl final {
       wheeled_global_path_publisher;
   rclcpp::Publisher<lunar_planning_msgs::msg::TimedPath>::SharedPtr
       timed_path_publisher;
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr legged_path_publisher;
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr
+      legged_global_path_publisher;
   rclcpp_action::Server<Action>::SharedPtr action_server;
   std::mutex state_mutex;
   std::unique_ptr<std::jthread> worker;

@@ -328,6 +328,35 @@ TEST(GoalDistanceField, StopsWhenControlIsCanceled) {
   EXPECT_FALSE(field.has_value());
 }
 
+TEST(GoalDistanceField, UsesTheProvidedNecessaryFeasibilityMask) {
+  constexpr std::size_t kWidth = 5U;
+  constexpr std::size_t kHeight = 3U;
+  const auto map = Snapshot(
+      kWidth, std::vector<float>(kWidth * kHeight, 0.0F),
+      std::vector<float>(kWidth * kHeight, 0.0F));
+  std::vector<std::uint8_t> feasible(kWidth * kHeight, 1U);
+  for (std::size_t y = 0U; y < kHeight; ++y) {
+    feasible[y * kWidth + 2U] = 0U;
+  }
+  const std::vector<GridCell> goals{
+      GridCell{.x = 4, .y = 1},
+      GridCell{.x = 4, .y = 1},
+  };
+
+  const auto field = BuildGoalDistanceField(
+      *map, std::span<const std::uint8_t>{feasible},
+      std::span<const GridCell>{goals});
+
+  ASSERT_TRUE(field.has_value());
+  const std::size_t left = map->Index(GridCell{.x = 0, .y = 1});
+  const std::size_t goal = map->Index(GridCell{.x = 4, .y = 1});
+  EXPECT_TRUE(std::isinf(field->distance_m[left]));
+  EXPECT_EQ(field->nearest_goal_index[left],
+            std::numeric_limits<std::size_t>::max());
+  EXPECT_DOUBLE_EQ(field->distance_m[goal], 0.0);
+  EXPECT_EQ(field->nearest_goal_index[goal], 0U);
+}
+
 TEST(EdgeValidationCache, EvaluatesEachKeyAtMostOnce) {
   EdgeValidationCache<int, int, std::hash<int>> cache;
   int calls = 0;

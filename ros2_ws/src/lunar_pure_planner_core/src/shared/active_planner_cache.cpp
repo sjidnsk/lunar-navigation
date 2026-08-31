@@ -276,6 +276,19 @@ LocalProjectionCacheKey MakeLocalProjectionCacheKey(
                                   start_patch_identity}};
 }
 
+LeggedLocalProjectionCacheKey MakeLeggedLocalProjectionCacheKey(
+    const std::uint64_t local_map_sequence, const std::size_t width,
+    const std::size_t height, const double resolution_m,
+    const double occupancy_threshold,
+    const std::uint64_t capability_fingerprint) noexcept {
+  return {
+      .source_sequences = {local_map_sequence},
+      .semantic_identities = {width, height, DoubleIdentity(resolution_m),
+                              DoubleIdentity(occupancy_threshold),
+                              capability_fingerprint},
+  };
+}
+
 GoalFieldCacheKey MakeGoalFieldCacheKey(
     const std::uint64_t local_map_sequence,
     const double occupancy_threshold,

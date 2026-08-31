@@ -160,6 +160,38 @@ TEST(RequestDiagnostics, EmitsEveryGridV1DiagnosticFromPlanningResult) {
   EXPECT_EQ(FindDiagnosticValue(diagnostics, "postprocess_elapsed_ms"), "3.5");
 }
 
+TEST(RequestDiagnostics, EmitsLeggedLocalEdgeEvaluationDiagnosticsWhenActive) {
+  const lunar::pure_planning::PlanningResult result{
+      .status = lunar::pure_planning::PlanningStatus::kTimedOut,
+      .expanded_states = 41U,
+      .legged_local = {
+          .active = true,
+          .traversal_projection_cache_hit = true,
+          .fast_path_accepts = 17U,
+          .exact_sweep_fallbacks = 3U,
+          .exact_sweep_cell_checks = 29U,
+          .edge_validation_cache_hits = 5U,
+      },
+  };
+
+  const auto diagnostics = MakeRequestDiagnostics(
+      "legged-edge", lunar::pure_planning::PlatformType::kLegged,
+      lunar::pure_planning::EnvironmentMode::kLunarSurface, result);
+
+  EXPECT_EQ(FindDiagnosticValue(
+                diagnostics, "legged_traversal_projection_cache_hit"),
+            "true");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "legged_fast_path_accepts"),
+            "17");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "legged_exact_sweep_fallbacks"),
+            "3");
+  EXPECT_EQ(FindDiagnosticValue(diagnostics, "legged_exact_sweep_cell_checks"),
+            "29");
+  EXPECT_EQ(FindDiagnosticValue(
+                diagnostics, "legged_edge_validation_cache_hits"),
+            "5");
+}
+
 TEST(RequestDiagnostics, AssignsLevelForEveryTypedStatus) {
   const lunar::pure_planning::PlannerCallTiming timing{
       .global_elapsed = 1ms,

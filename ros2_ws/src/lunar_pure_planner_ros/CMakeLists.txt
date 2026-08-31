@@ -37,6 +37,7 @@ set(LUNAR_PURE_PLANNER_ROS_SOURCES
 if(LUNAR_BUILD_DEMO)
   list(APPEND LUNAR_PURE_PLANNER_ROS_SOURCES
     src/lunar_surface_demo_state.cpp
+    src/lunar_surface_demo_motion.cpp
     src/lunar_surface_scenario.cpp
     src/lunar_surface_local_map.cpp
     src/lunar_surface_reporter.cpp

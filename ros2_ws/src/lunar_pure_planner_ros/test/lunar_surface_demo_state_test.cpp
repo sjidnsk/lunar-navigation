@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <numbers>
+
 #include "lunar_pure_planner_ros/lunar_surface_demo_state.hpp"
 
 namespace lunar::pure_planner_ros {
@@ -70,6 +72,37 @@ TEST(LunarSurfaceDemoState, EmptyPathImmediatelyStopsExistingMotion) {
   EXPECT_FALSE(state.has_active_path());
   state.Advance(0.5);
   EXPECT_DOUBLE_EQ(state.x_m(), 0.5);
+}
+
+TEST(LunarSurfaceDemoState, DenseWaypointsConsumeOnlyOneStepDistance) {
+  LunarSurfaceDemoState state;
+  state.Reset(0.0, 0.0);
+  nav_msgs::msg::Path path;
+  path.header.frame_id = "odom";
+  path.poses.resize(4U);
+  path.poses[1].pose.position.x = 0.2;
+  path.poses[2].pose.position.x = 0.4;
+  path.poses[3].pose.position.x = 1.0;
+  state.AcceptPath(path);
+
+  state.Advance(0.5);
+
+  EXPECT_NEAR(state.x_m(), 0.5, 1.0e-12);
+  EXPECT_DOUBLE_EQ(state.y_m(), 0.0);
+}
+
+TEST(LunarSurfaceDemoState, AdvanceUpdatesYawToActualMotionDirection) {
+  LunarSurfaceDemoState state;
+  state.Reset(0.0, 0.0);
+  nav_msgs::msg::Path path;
+  path.header.frame_id = "odom";
+  path.poses.resize(2U);
+  path.poses[1].pose.position.y = 1.0;
+  state.AcceptPath(path);
+
+  state.Advance(0.5);
+
+  EXPECT_NEAR(state.yaw_rad(), std::numbers::pi / 2.0, 1.0e-12);
 }
 
 }  // namespace

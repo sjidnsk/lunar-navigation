@@ -64,7 +64,7 @@ TEST(HierarchicalTypes, FreezesApprovedMapAndLocalRules) {
   EXPECT_EQ(config.global_map.target_axis_cells, 256U);
   EXPECT_EQ(config.global_search.maximum_preview_points, 4'096U);
   EXPECT_DOUBLE_EQ(config.local_frontier.wheel_horizon_m, 4.0);
-  EXPECT_DOUBLE_EQ(config.local_frontier.legged_horizon_m, 3.0);
+  EXPECT_DOUBLE_EQ(config.local_frontier.legged_horizon_m, 4.0);
   static_assert(!HasMaximumAttempts<LocalFrontierConfig>);
   EXPECT_DOUBLE_EQ(kFixedAdditionalCorridorMarginM, 2.0);
   EXPECT_DOUBLE_EQ(config.local_frontier.additional_corridor_margin_m,

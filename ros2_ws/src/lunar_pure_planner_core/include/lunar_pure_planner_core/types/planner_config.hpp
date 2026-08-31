@@ -75,7 +75,7 @@ struct GlobalSearchConfig final {
 
 struct LocalFrontierConfig final {
   double wheel_horizon_m{4.0};
-  double legged_horizon_m{3.0};
+  double legged_horizon_m{4.0};
   double additional_corridor_margin_m{kFixedAdditionalCorridorMarginM};
 };
 
