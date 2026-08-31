@@ -1245,6 +1245,57 @@ TEST(DualModePlanner,
   EXPECT_FALSE(cold.global_route_cache_hit);
   EXPECT_TRUE(warm.global_projection_cache_hit);
   EXPECT_TRUE(warm.global_route_cache_hit);
+  EXPECT_TRUE(cold.legged_local.active);
+  EXPECT_FALSE(cold.legged_local.traversal_projection_cache_hit);
+  EXPECT_GT(cold.legged_local.fast_path_accepts, 0U);
+  EXPECT_TRUE(warm.legged_local.active);
+  EXPECT_TRUE(warm.legged_local.traversal_projection_cache_hit);
+  EXPECT_GT(warm.legged_local.fast_path_accepts, 0U);
+
+  PlanningRequest changed = input;
+  std::get<LeggedCapability>(changed.capability).maximum_step_height_m = 0.1;
+  const PlanningResult capability_changed = planner.Plan(changed);
+  ASSERT_EQ(capability_changed.status, PlanningStatus::kSuccess)
+      << capability_changed.reason_code;
+  EXPECT_FALSE(
+      capability_changed.legged_local.traversal_projection_cache_hit);
+}
+
+TEST(DualModePlanner, OuterHardDeadlineRetainsLeggedLocalWorkDiagnostics) {
+  ManualClock clock;
+  Planner planner(PlannerBackends{
+      .global = {},
+      .local = [&clock](const PlanningRequest&, const LocalGoalSet&,
+                        SearchControl) {
+        clock.Advance(3000ms);
+        return LocalStageResult{
+            .status = LocalPlanStatus::kTimedOut,
+            .reason_code = "TIMEOUT",
+            .expanded_states = 41U,
+            .legged_local = LeggedLocalDiagnostics{
+                .active = true,
+                .traversal_projection_cache_hit = true,
+                .fast_path_accepts = 17U,
+                .exact_sweep_fallbacks = 3U,
+                .exact_sweep_cell_checks = 29U,
+                .edge_validation_cache_hits = 5U,
+            },
+        };
+      },
+  });
+
+  const PlanningResult output =
+      planner.Plan(Request(EnvironmentMode::kLavaTube, clock));
+
+  EXPECT_EQ(output.status, PlanningStatus::kTimedOut);
+  EXPECT_EQ(output.reason_code, "TIMEOUT");
+  EXPECT_EQ(output.expanded_states, 41U);
+  EXPECT_TRUE(output.legged_local.active);
+  EXPECT_TRUE(output.legged_local.traversal_projection_cache_hit);
+  EXPECT_EQ(output.legged_local.fast_path_accepts, 17U);
+  EXPECT_EQ(output.legged_local.exact_sweep_fallbacks, 3U);
+  EXPECT_EQ(output.legged_local.exact_sweep_cell_checks, 29U);
+  EXPECT_EQ(output.legged_local.edge_validation_cache_hits, 5U);
 }
 
 TEST(DualModePlanner, LeggedGridV1GlobalRouteAvoidsLocalSlopeBarrier) {
@@ -1659,12 +1710,19 @@ TEST(DualModePlanner,
       static_cast<float>(baseline.config.local_occupancy_threshold),
       backend_control);
   ASSERT_TRUE(projection.ok()) << projection.reason_code;
+  const auto terrain =
+      std::make_shared<const shared::LocalTerrainProjection>(
+          std::move(*projection.value));
   const auto& state = std::get<LeggedState>(baseline.current_state);
   const auto& capability = std::get<LeggedCapability>(baseline.capability);
+  const auto traversal = legged::BuildLeggedTraversalProjection(
+      terrain, capability, backend_control);
+  ASSERT_TRUE(traversal.ok()) << traversal.reason_code;
   const legged::LeggedPlanResult backend_result = legged::PlanLegged({
       .start = state,
       .goal_odom = baseline.goal_map,
-      .terrain = &*projection.value,
+      .terrain = terrain.get(),
+      .traversal = traversal.value,
       .capability = &capability,
       .control = backend_control,
       .search = baseline.config.search,
