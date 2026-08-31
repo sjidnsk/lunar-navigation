@@ -27,11 +27,10 @@ using QueueEntry =
 }  // namespace
 
 std::optional<GoalDistanceField> BuildGoalDistanceField(
-    const LocalTerrainProjection& terrain,
+    const MapSnapshot& map, const std::span<const std::uint8_t> feasible,
     const std::span<const GridCell> goals,
     const SearchControl control) {
-  if (terrain.map == nullptr ||
-      terrain.free_with_height.size() != terrain.map->cell_count() ||
+  if (feasible.size() != map.cell_count() ||
       StopReason(control).has_value()) {
     return std::nullopt;
   }
@@ -39,10 +38,10 @@ std::optional<GoalDistanceField> BuildGoalDistanceField(
   const std::size_t invalid_goal_index =
       std::numeric_limits<std::size_t>::max();
   GoalDistanceField result{
-      .distance_m = std::vector<double>(terrain.map->cell_count(),
+      .distance_m = std::vector<double>(map.cell_count(),
                                         std::numeric_limits<double>::infinity()),
       .nearest_goal_index = std::vector<std::size_t>(
-          terrain.map->cell_count(), invalid_goal_index),
+          map.cell_count(), invalid_goal_index),
   };
   std::priority_queue<QueueEntry, std::vector<QueueEntry>, std::greater<>> open;
   std::size_t insertion_sequence = 0U;
@@ -52,11 +51,11 @@ std::optional<GoalDistanceField> BuildGoalDistanceField(
       return std::nullopt;
     }
     const GridCell goal = goals[source_index];
-    if (!terrain.map->InBounds(goal)) {
+    if (!map.InBounds(goal)) {
       continue;
     }
-    const std::size_t goal_index = terrain.map->Index(goal);
-    if (terrain.free_with_height[goal_index] == 0U ||
+    const std::size_t goal_index = map.Index(goal);
+    if (feasible[goal_index] == 0U ||
         result.nearest_goal_index[goal_index] != invalid_goal_index) {
       continue;
     }
@@ -82,15 +81,15 @@ std::optional<GoalDistanceField> BuildGoalDistanceField(
         source_index != result.nearest_goal_index[index]) {
       continue;
     }
-    const GridCell current = CellFromIndex(*terrain.map, index);
+    const GridCell current = CellFromIndex(map, index);
     for (std::size_t neighbor = 0U; neighbor < kDx.size(); ++neighbor) {
       const GridCell next{.x = current.x + kDx[neighbor],
                           .y = current.y + kDy[neighbor]};
-      if (!terrain.map->InBounds(next)) {
+      if (!map.InBounds(next)) {
         continue;
       }
-      const std::size_t next_index = terrain.map->Index(next);
-      if (terrain.free_with_height[next_index] == 0U) {
+      const std::size_t next_index = map.Index(next);
+      if (feasible[next_index] == 0U) {
         continue;
       }
       if (kDx[neighbor] != 0 && kDy[neighbor] != 0) {
@@ -98,12 +97,12 @@ std::optional<GoalDistanceField> BuildGoalDistanceField(
                               .y = current.y};
         const GridCell side_y{.x = current.x,
                               .y = current.y + kDy[neighbor]};
-        if (terrain.free_with_height[terrain.map->Index(side_x)] == 0U ||
-            terrain.free_with_height[terrain.map->Index(side_y)] == 0U) {
+        if (feasible[map.Index(side_x)] == 0U ||
+            feasible[map.Index(side_y)] == 0U) {
           continue;
         }
       }
-      const double step = terrain.map->resolution_m() *
+      const double step = map.resolution_m() *
                           (kDx[neighbor] != 0 && kDy[neighbor] != 0
                                ? std::numbers::sqrt2
                                : 1.0);
@@ -119,6 +118,17 @@ std::optional<GoalDistanceField> BuildGoalDistanceField(
     }
   }
   return result;
+}
+
+std::optional<GoalDistanceField> BuildGoalDistanceField(
+    const LocalTerrainProjection& terrain,
+    const std::span<const GridCell> goals,
+    const SearchControl control) {
+  if (terrain.map == nullptr) {
+    return std::nullopt;
+  }
+  return BuildGoalDistanceField(*terrain.map, terrain.free_with_height, goals,
+                                control);
 }
 
 std::optional<GoalDistanceField> BuildGoalDistanceField(
