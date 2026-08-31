@@ -81,5 +81,21 @@ TEST(LunarSurfaceReporter, WaitsForPathsWhenDiagnosticsArriveFirst) {
   EXPECT_FALSE(state.TakeReadySummary().has_value());
 }
 
+TEST(LunarSurfaceReporter, UsesLatestRollingStartForEachResult) {
+  PlanningReportState state;
+  state.Begin(-10.0, 2.0, 30.0, 40.0);
+  state.SetStart(-6.5, 3.25);
+  state.SetResult(false, "NO_PATH",
+                  std::chrono::duration<double, std::milli>{20.0});
+
+  const auto summary = state.TakeReadySummary();
+
+  ASSERT_TRUE(summary.has_value());
+  EXPECT_DOUBLE_EQ(summary->start_x_m, -6.5);
+  EXPECT_DOUBLE_EQ(summary->start_y_m, 3.25);
+  EXPECT_DOUBLE_EQ(summary->goal_x_m, 30.0);
+  EXPECT_DOUBLE_EQ(summary->goal_y_m, 40.0);
+}
+
 }  // namespace
 }  // namespace lunar::pure_planner_ros

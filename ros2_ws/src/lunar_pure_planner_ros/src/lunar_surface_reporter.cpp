@@ -66,9 +66,7 @@ class LunarSurfaceReporterNode final : public rclcpp::Node {
             active_goal_ = false;
             return;
           }
-          start_x_m_ = latest_start_x_m_;
-          start_y_m_ = latest_start_y_m_;
-          report_state_.Begin(start_x_m_, start_y_m_,
+          report_state_.Begin(latest_start_x_m_, latest_start_y_m_,
                               message->pose.position.x,
                               message->pose.position.y);
           fallback_planning_time_ms_.reset();
@@ -149,6 +147,7 @@ class LunarSurfaceReporterNode final : public rclcpp::Node {
     }
     const bool success = *outcome == "0" && *has_reference == "true" &&
         (*reason == "PLAN_FOUND" || *reason == "PLAN_FOUND_LATE");
+    report_state_.SetStart(latest_start_x_m_, latest_start_y_m_);
     report_state_.SetResult(
         success, *reason,
         std::chrono::duration<double, std::milli>{
@@ -171,8 +170,6 @@ class LunarSurfaceReporterNode final : public rclcpp::Node {
   bool active_goal_{};
   double latest_start_x_m_{};
   double latest_start_y_m_{};
-  double start_x_m_{};
-  double start_y_m_{};
   PlanningReportState report_state_;
   std::optional<double> fallback_planning_time_ms_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odometry_sub_;
@@ -202,6 +199,15 @@ void PlanningReportState::Begin(const double start_x_m,
   global_path_length_m_.reset();
   local_path_length_m_.reset();
   reason_code_.clear();
+}
+
+void PlanningReportState::SetStart(const double start_x_m,
+                                   const double start_y_m) noexcept {
+  if (!active_) {
+    return;
+  }
+  start_x_m_ = start_x_m;
+  start_y_m_ = start_y_m;
 }
 
 void PlanningReportState::SetGlobalPath(
