@@ -11,6 +11,7 @@ import yaml
 PURE_PLANNER_ROOT = Path(__file__).resolve().parents[1]
 PARAMETERS_PATH = PURE_PLANNER_ROOT / "config" / "pure_planner.yaml"
 LAUNCH_PATH = PURE_PLANNER_ROOT / "launch" / "pure_planner.launch.py"
+DEMO_LAUNCH_PATH = PURE_PLANNER_ROOT / "launch" / "lunar_surface_rviz_demo.launch.py"
 README_PATH = PURE_PLANNER_ROOT / "README.md"
 VERIFICATION_PATH = PURE_PLANNER_ROOT / "VERIFICATION.md"
 CMAKE_PATH = (
@@ -65,6 +66,11 @@ EXPECTED_PARAMETERS = {
     "rolling_min_replan_interval_ms",
     "rolling_max_deviation_m",
     "rolling_transient_retry_limit",
+    "rolling_replan_distance_m",
+    "demo_delivery_protocol_enabled",
+    "demo_map_ack_topic",
+    "demo_plan_segment_topic",
+    "demo_map_ack_timeout_ms",
     *EXPECTED_TOPICS,
 }
 FORBIDDEN_PARAMETER_FRAGMENTS = {
@@ -365,6 +371,74 @@ def test_launch_defaults_legged_global_mode_to_grid_v1() -> None:
     assert ast.literal_eval(
         _keyword_value(declarations[0], "default_value")
     ) == "grid_traversability_v1"
+
+
+def _assignment_value(tree: ast.AST, name: str) -> ast.expr:
+    assignments = [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id == name
+    ]
+    assert len(assignments) == 1, name
+    return assignments[0]
+
+
+def _literal_dict(node: ast.expr) -> dict[str, object]:
+    assert isinstance(node, ast.Dict)
+    return {
+        ast.literal_eval(key): (
+            ast.literal_eval(value)
+            if isinstance(value, ast.Constant)
+            else value
+        )
+        for key, value in zip(node.keys, node.values, strict=True)
+    }
+
+
+def test_delivery_protocol_is_explicitly_isolated_to_the_surface_demo_launch() -> None:
+    """Only the isolated demo may authorize delivery-gated motion."""
+    demo_tree = ast.parse(DEMO_LAUNCH_PATH.read_text(encoding="utf-8"))
+    demo_parameters = _literal_dict(_assignment_value(demo_tree, "demo_parameters"))
+    assert demo_parameters["demo_delivery_protocol_enabled"] is True
+    assert demo_parameters["demo_map_ack_topic"] == "/lunar_demo/map_ack"
+    assert demo_parameters["demo_plan_segment_topic"] == "/lunar_demo/plan_segment"
+    assert demo_parameters["rolling_horizon_m"] == 12.0
+    assert demo_parameters["rolling_replan_distance_m"] == 4.0
+
+    nodes = _node_calls(demo_tree)
+    demo_node = next(
+        node for node in nodes
+        if ast.literal_eval(_keyword_value(node, "executable")) == "lunar_surface_demo_node"
+    )
+    demo_node_parameters = _keyword_value(demo_node, "parameters")
+    assert isinstance(demo_node_parameters, ast.List)
+    assert len(demo_node_parameters.elts) == 1
+    demo_node_values = _literal_dict(demo_node_parameters.elts[0])
+    for key in (
+        "demo_delivery_protocol_enabled",
+        "demo_map_ack_topic",
+        "demo_plan_segment_topic",
+    ):
+        assert demo_node_values[key] == demo_parameters[key]
+
+    planner_node = next(
+        node for node in nodes
+        if ast.literal_eval(_keyword_value(node, "executable")) == "lunar_pure_planner_node"
+    )
+    planner_parameters = _keyword_value(planner_node, "parameters")
+    assert isinstance(planner_parameters, ast.List)
+    assert isinstance(planner_parameters.elts[-1], ast.Name)
+    assert planner_parameters.elts[-1].id == "demo_parameters"
+
+    production_launch = LAUNCH_PATH.read_text(encoding="utf-8")
+    production_parameters = load_parameters()
+    server_source = SERVER_SOURCE_PATH.read_text(encoding="utf-8")
+    assert "demo_delivery_protocol_enabled" not in production_launch
+    assert production_parameters["demo_delivery_protocol_enabled"] is False
+    assert 'declare_parameter<bool>("demo_delivery_protocol_enabled", false)' in server_source
 
 
 def test_cmake_installs_the_single_top_level_config_and_launch_sources() -> None:

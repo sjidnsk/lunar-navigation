@@ -3,12 +3,16 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
+#include <builtin_interfaces/msg/time.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <grid_map_msgs/msg/grid_map.hpp>
+#include <lunar_planning_msgs/msg/demo_map_ack.hpp>
+#include <lunar_planning_msgs/msg/demo_plan_segment.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
@@ -60,7 +64,17 @@ class LunarSurfaceDemoNode final : public rclcpp::Node {
         scenario_(BuildLunarSurfaceScenario(
             static_cast<std::uint32_t>(declare_parameter<std::int64_t>("seed", 20260823)))),
         platform_type_(declare_parameter<std::string>("platform_type", "wheel")),
-        auto_goal_(declare_parameter<bool>("auto_goal", false)) {
+        auto_goal_(declare_parameter<bool>("auto_goal", false)),
+        delivery_protocol_enabled_(
+            declare_parameter<bool>("demo_delivery_protocol_enabled", false)),
+        demo_map_ack_topic_(declare_parameter<std::string>(
+            "demo_map_ack_topic", "/lunar_demo/map_ack")),
+        demo_plan_segment_topic_(declare_parameter<std::string>(
+            "demo_plan_segment_topic", "/lunar_demo/plan_segment")),
+        rolling_replan_distance_m_(
+            declare_parameter<double>("rolling_replan_distance_m",
+                                      kLocalMapUpdateDistanceM)) {
+    (void)declare_parameter<double>("rolling_horizon_m", 12.0);
     // RViz and tf2 listeners request reliable delivery by default.  A reliable
     // writer also remains compatible with the planner's best-effort readers.
     const auto input_qos = rclcpp::QoS{10}.reliable();
@@ -88,14 +102,42 @@ class LunarSurfaceDemoNode final : public rclcpp::Node {
                  scenario_.origin_y_m +
                      (static_cast<double>(scenario_.start_cell.y) + 0.5) *
                          scenario_.resolution_m);
-    const auto accept_path = [this](nav_msgs::msg::Path::ConstSharedPtr path) {
-      state_.AcceptPath(*path);
-    };
-    wheeled_path_sub_ = create_subscription<nav_msgs::msg::Path>(
-        "/lunar_demo/wheeled_path", rclcpp::QoS{10}.reliable(),
-        accept_path);
-    legged_path_sub_ = create_subscription<nav_msgs::msg::Path>(
-        "/lunar_demo/legged_path", rclcpp::QoS{10}.reliable(), accept_path);
+    if (delivery_protocol_enabled_) {
+      const auto platform = platform_type_ == "legged"
+          ? lunar_planning_msgs::msg::DemoPlanSegment::LEGGED
+          : lunar_planning_msgs::msg::DemoPlanSegment::WHEELED;
+      state_.EnableDeliveryProtocol(platform);
+      map_ack_sub_ = create_subscription<lunar_planning_msgs::msg::DemoMapAck>(
+          demo_map_ack_topic_, rclcpp::QoS{10}.reliable(),
+          [this](lunar_planning_msgs::msg::DemoMapAck::ConstSharedPtr ack) {
+            if (state_.HandleMapAck(*ack)) {
+              delivery_map_token_.reset();
+            }
+          });
+      plan_segment_sub_ =
+          create_subscription<lunar_planning_msgs::msg::DemoPlanSegment>(
+              demo_plan_segment_topic_, rclcpp::QoS{10}.reliable(),
+              [this](lunar_planning_msgs::msg::DemoPlanSegment::ConstSharedPtr segment) {
+                const bool is_stop =
+                    segment->command == lunar_planning_msgs::msg::DemoPlanSegment::STOP;
+                if (state_.HandleSegment(*segment) && is_stop) {
+                  const auto map_token = static_cast<builtin_interfaces::msg::Time>(now());
+                  state_.BeginMapDelivery(map_token);
+                  if (state_.map_delivery_pending()) {
+                    delivery_map_token_ = map_token;
+                  }
+                }
+              });
+    } else {
+      const auto accept_path = [this](nav_msgs::msg::Path::ConstSharedPtr path) {
+        state_.AcceptPath(*path);
+      };
+      wheeled_path_sub_ = create_subscription<nav_msgs::msg::Path>(
+          "/lunar_demo/wheeled_path", rclcpp::QoS{10}.reliable(),
+          accept_path);
+      legged_path_sub_ = create_subscription<nav_msgs::msg::Path>(
+          "/lunar_demo/legged_path", rclcpp::QoS{10}.reliable(), accept_path);
+    }
     start_sub_ = create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
         "/lunar_demo/start_pose", rclcpp::QoS{10}.reliable(),
         [this](geometry_msgs::msg::PoseWithCovarianceStamped::ConstSharedPtr start) {
@@ -145,6 +187,18 @@ class LunarSurfaceDemoNode final : public rclcpp::Node {
   void Publish() {
     state_.Advance(kRoverStepM);
     const rclcpp::Time stamp = now();
+    if (delivery_protocol_enabled_ &&
+        state_.ShouldBeginMapDelivery(rolling_replan_distance_m_)) {
+      state_.BeginMapDelivery(static_cast<builtin_interfaces::msg::Time>(stamp));
+      if (state_.map_delivery_pending()) {
+        delivery_map_token_ = static_cast<builtin_interfaces::msg::Time>(stamp);
+      }
+    }
+    builtin_interfaces::msg::Time input_stamp = stamp;
+    if (delivery_protocol_enabled_ && state_.map_delivery_pending() &&
+        delivery_map_token_.has_value()) {
+      input_stamp = *delivery_map_token_;
+    }
     const double start_x = state_.x_m();
     const double start_y = state_.y_m();
     nav_msgs::msg::OccupancyGrid global;
@@ -175,14 +229,17 @@ class LunarSurfaceDemoNode final : public rclcpp::Node {
       global_pub_->publish(global);
     }
 
-    if (LocalMapPublicationReady(
-            state_.LocalMapDue(kLocalMapUpdateDistanceM),
-            static_delivery_count_ < 12U,
-            local_pub_->get_subscription_count())) {
+    const bool should_publish_local = delivery_protocol_enabled_
+        ? state_.map_delivery_pending() && local_pub_->get_subscription_count() >= 2U
+        : LocalMapPublicationReady(
+              state_.LocalMapDue(rolling_replan_distance_m_),
+              static_delivery_count_ < 12U,
+              local_pub_->get_subscription_count());
+    if (should_publish_local) {
       const LunarSurfaceLocalRaster raster =
           BuildLunarSurfaceLocalRaster(scenario_, start_x, start_y);
       grid_map_msgs::msg::GridMap local;
-      local.header.stamp = stamp;
+      local.header.stamp = input_stamp;
       local.header.frame_id = "odom";
       local.info.resolution = kLocalResolutionM;
       local.info.length_x = raster.length_x_m();
@@ -214,11 +271,13 @@ class LunarSurfaceDemoNode final : public rclcpp::Node {
         }
       }
       local_viz_pub_->publish(local_viz);
-      state_.MarkLocalMapPublished();
+      if (!state_.map_delivery_pending()) {
+        state_.MarkLocalMapPublished();
+      }
     }
 
     nav_msgs::msg::Odometry odometry;
-    odometry.header.stamp = stamp;
+    odometry.header.stamp = input_stamp;
     odometry.header.frame_id = "odom";
     odometry.child_frame_id = "base_link";
     odometry.pose.pose.position.x = start_x;
@@ -260,6 +319,11 @@ class LunarSurfaceDemoNode final : public rclcpp::Node {
   LunarSurfaceDemoState state_;
   std::string platform_type_;
   bool auto_goal_{};
+  bool delivery_protocol_enabled_{};
+  std::string demo_map_ack_topic_;
+  std::string demo_plan_segment_topic_;
+  double rolling_replan_distance_m_{kLocalMapUpdateDistanceM};
+  std::optional<builtin_interfaces::msg::Time> delivery_map_token_;
   std::size_t static_delivery_count_{};
   bool global_grid_published_{};
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr global_pub_;
@@ -274,6 +338,10 @@ class LunarSurfaceDemoNode final : public rclcpp::Node {
       accepted_start_pub_;
   rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr wheeled_path_sub_;
   rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr legged_path_sub_;
+  rclcpp::Subscription<lunar_planning_msgs::msg::DemoMapAck>::SharedPtr
+      map_ack_sub_;
+  rclcpp::Subscription<lunar_planning_msgs::msg::DemoPlanSegment>::SharedPtr
+      plan_segment_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr
       start_sub_;
   rclcpp::TimerBase::SharedPtr timer_;

@@ -114,6 +114,33 @@ TEST(LunarSurfaceDemoState, PublishesFirstLocalMapThenEveryFourMetres) {
   EXPECT_TRUE(state.LocalMapDue(4.0));
 }
 
+TEST(LunarSurfaceDemoState,
+     DeliveryProtocolStopsAtFourMetresAndClearsTheExecutedSegment) {
+  LunarSurfaceDemoState state;
+  state.Reset(0.0, 0.0);
+  state.EnableDeliveryProtocol(
+      lunar_planning_msgs::msg::DemoPlanSegment::WHEELED);
+  ASSERT_TRUE(state.HandleSegment(StopSegment("rviz-4m")));
+  state.BeginMapDelivery(Stamp(10));
+  ASSERT_TRUE(state.HandleMapAck(Ack("rviz-4m", Stamp(10))));
+  ASSERT_TRUE(state.HandleSegment(
+      ExecuteSegment("rviz-4m", Stamp(10), 1U, StraightPath(12.0))));
+
+  for (int step = 0; step < 7; ++step) {
+    state.Advance(0.5);
+  }
+  EXPECT_DOUBLE_EQ(state.x_m(), 3.5);
+  EXPECT_FALSE(state.ShouldBeginMapDelivery(4.0));
+
+  state.Advance(0.5);
+  ASSERT_TRUE(state.ShouldBeginMapDelivery(4.0));
+  state.BeginMapDelivery(Stamp(11));
+  EXPECT_FALSE(state.can_advance());
+  EXPECT_FALSE(state.has_active_path());
+  state.Advance(0.5);
+  EXPECT_DOUBLE_EQ(state.x_m(), 4.0);
+}
+
 TEST(LunarSurfaceDemoState, WaitsForBothConsumersBeforePublishing) {
   EXPECT_FALSE(LocalMapPublicationReady(true, false, 0U));
   EXPECT_FALSE(LocalMapPublicationReady(true, false, 1U));

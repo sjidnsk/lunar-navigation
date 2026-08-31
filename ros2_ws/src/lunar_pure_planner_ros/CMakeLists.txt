@@ -98,7 +98,7 @@ if(LUNAR_BUILD_DEMO)
   target_compile_features(lunar_surface_demo_node PUBLIC cxx_std_20)
   target_link_libraries(lunar_surface_demo_node ${PROJECT_NAME})
   ament_target_dependencies(lunar_surface_demo_node
-    geometry_msgs grid_map_msgs nav_msgs rclcpp tf2_msgs)
+    geometry_msgs grid_map_msgs lunar_planning_msgs nav_msgs rclcpp tf2_msgs)
 
   add_executable(lunar_surface_visualizer_node
     src/lunar_surface_visualizer_node.cpp)

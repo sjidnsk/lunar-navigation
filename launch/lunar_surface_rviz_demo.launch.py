@@ -32,7 +32,11 @@ def generate_launch_description() -> LaunchDescription:
         "legged_path_topic": "/lunar_demo/legged_path",
         "legged_global_path_topic": "/lunar_demo/legged_global_path",
         "rolling_surface_enabled": True,
+        "demo_delivery_protocol_enabled": True,
+        "demo_map_ack_topic": "/lunar_demo/map_ack",
+        "demo_plan_segment_topic": "/lunar_demo/plan_segment",
         "rolling_horizon_m": 12.0,
+        "rolling_replan_distance_m": 4.0,
     }
     return LaunchDescription(
         [
@@ -48,6 +52,11 @@ def generate_launch_description() -> LaunchDescription:
                     "seed": seed,
                     "auto_goal": ParameterValue(auto_goal, value_type=bool),
                     "platform_type": platform_type,
+                    "demo_delivery_protocol_enabled": True,
+                    "demo_map_ack_topic": "/lunar_demo/map_ack",
+                    "demo_plan_segment_topic": "/lunar_demo/plan_segment",
+                    "rolling_horizon_m": 12.0,
+                    "rolling_replan_distance_m": 4.0,
                 }],
                 output="screen",
             ),
