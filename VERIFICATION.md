@@ -7,6 +7,26 @@
 Action/graph、接口合同和仓库边界。没有真实 rosbag、在线全局图、生产 ROS domain 切换或 Jetson
 AGX Orin 证据，因此不声明真实 `LAVA_TUBE`、`LUNAR_SURFACE` 端到端或设备发布就绪。
 
+## 2026-08-31 轮式滚动 Demo 稳定性变更
+
+本节对应 `fix/wheel-rolling-demo-stability`，不覆盖下方历史 Task 16 Humble 报告。变更保持
+`SamePlanningIdentity` 的全局图、局部图和 TF 序列校验以及单周期 `3 s` 硬截止不变，并增加：
+
+- 12 m 前瞻内从前瞻端回退到投影点前一格的有界 portal 采样，诊断可用
+  `rolling_failure_stage=PORTAL_SET` 区分局部门点失败；
+- 成功段之后最多两次局部 `NO_PATH`/`TIMEOUT` 恢复，恢复前清空参考、局部/全局 Path 和 TimedPath；
+- Demo 局部图按 `4 m` 位移更新，空 Path 停止旧路径，Reporter 使用诊断时的最新 odometry 起点。
+
+当前证据状态：
+
+| 层级 | 状态 | 证据/边界 |
+| --- | --- | --- |
+| source / focused TDD | `PASS` | portal、参数边界、恢复/耗尽/超时、空路径 frame、4 m cadence、空路径停止和 reporter 起点均完成 RED→GREEN；server 55/55 |
+| local ROS 2 Jazzy package/full tests | `PENDING_FINAL_RECHECK` | 将在本变更完整构建后串行执行 core/ROS CTest 与根目录 pytest |
+| local Jazzy headless Demo | `PENDING_RUNTIME` | 将在隔离 `ROS_DOMAIN_ID` 下验证多次局部图刷新和正式成功三元组 |
+| Ubuntu 22.04 / ROS 2 Humble | `NOT_RUN_THIS_CHANGE` | 下方历史证据不覆盖本次改动 |
+| Jetson AGX Orin / DDS / rosbag / controller / vehicle | `NOT_RUN` | 本次范围不包含目标机部署或车辆控制 |
+
 ## 1. 源码与证据目录
 
 生产源码/前置测试基线：
