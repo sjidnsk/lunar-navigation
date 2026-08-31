@@ -343,6 +343,10 @@ void SetDiagnosticValue(diagnostic_msgs::msg::DiagnosticArray& diagnostics,
       return;
     }
   }
+  diagnostic_msgs::msg::KeyValue field;
+  field.key = key;
+  field.value = std::move(value);
+  diagnostics.status.front().values.push_back(std::move(field));
 }
 
 [[nodiscard]] std::vector<lunar::pure_planning::Pose3> ResultPathPoses(
@@ -716,7 +720,8 @@ struct PurePlanMotionServer::Impl final {
   void PublishCycleDiagnostics(
       const std::shared_ptr<const Action::Goal>& request_goal,
       const lunar::pure_planning::PlanningResult& result,
-      const bool stale_input = false) {
+      const bool stale_input = false,
+      const std::string_view rolling_failure_stage = {}) {
     auto diagnostics = MakeRequestDiagnostics(
         request_goal ? std::string_view{request_goal->request_id}
                      : std::string_view{},
@@ -732,6 +737,10 @@ struct PurePlanMotionServer::Impl final {
       SetDiagnosticValue(diagnostics, "planning_outcome",
                          std::to_string(Action::Result::STALE_INPUT));
       SetDiagnosticValue(diagnostics, "reason_code", "STALE_INPUT");
+    }
+    if (!rolling_failure_stage.empty()) {
+      SetDiagnosticValue(diagnostics, "rolling_failure_stage",
+                         std::string{rolling_failure_stage});
     }
     if (!ContextIsValid()) {
       return;
@@ -1350,7 +1359,7 @@ struct PurePlanMotionServer::Impl final {
               std::chrono::duration_cast<std::chrono::nanoseconds>(
                   local_goal_finished - cycle_timing->started_at);
         }
-        PublishCycleDiagnostics(request_goal, failed);
+        PublishCycleDiagnostics(request_goal, failed, false, "PORTAL_SET");
         if (result_diagnostic_published != nullptr) {
           *result_diagnostic_published = true;
         }

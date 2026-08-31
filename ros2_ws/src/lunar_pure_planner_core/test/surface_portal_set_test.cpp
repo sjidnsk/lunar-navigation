@@ -165,6 +165,31 @@ TEST(SurfacePortalSet, BacksOffLongitudinallyWhenHorizonColumnIsBlocked) {
   }));
 }
 
+TEST(SurfacePortalSet, SearchesEveryLongitudinalCellInsideShortHorizon) {
+  PlanningRequest input = Request();
+  std::get<WheeledCapability>(input.capability).footprint_xy_m.clear();
+  auto& global_occupancy = std::get<std::vector<std::int8_t>>(
+      input.world.global_map->layers.at("occupancy").values);
+  std::ranges::fill(global_occupancy, 100);
+  global_occupancy.at(10U * input.world.global_map->width + 5U) = 0;
+  auto& local_occupancy = std::get<std::vector<float>>(
+      input.world.local_map.layers.at("occupancy").values);
+  std::ranges::fill(local_occupancy, 1.0F);
+  local_occupancy.at(10U * input.world.local_map.width + 5U) = 0.0F;
+
+  const GlobalRoute route = StraightRoute();
+  const auto decision = RollingDecision(route, input.goal_map, 1.5, 12.0);
+  ASSERT_DOUBLE_EQ(decision.projected_route_progress_m, 0.0);
+  ASSERT_DOUBLE_EQ(decision.desired_horizon_progress_m, 12.0);
+
+  const auto result = BuildSurfacePortalSet(input, route, decision, 32U, {});
+
+  ASSERT_TRUE(result.ok()) << result.reason_code;
+  ASSERT_FALSE(result.candidates.empty());
+  EXPECT_DOUBLE_EQ(result.candidates.front().route_progress_m, 4.0);
+  EXPECT_EQ(result.candidates.front().global_cell.x, 5);
+}
+
 TEST(SurfacePortalSet, ClipsCandidatesToTheObservedLocalMap) {
   PlanningRequest clipped = Request();
   clipped.world.local_map = LocalMap(50U, 3U, 9.0);

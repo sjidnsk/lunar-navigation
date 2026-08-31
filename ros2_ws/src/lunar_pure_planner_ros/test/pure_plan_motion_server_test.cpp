@@ -2049,6 +2049,31 @@ TEST(PurePlanMotionServer,
   EXPECT_EQ(system.Result(handle).code, rclcpp_action::ResultCode::CANCELED);
 }
 
+TEST(PurePlanMotionServer, RollingPortalFailureIdentifiesPortalSetStage) {
+  RunningSystem system{
+      [](const lunar::pure_planning::PlanningRequest&) {
+        return Failure(lunar::pure_planning::PlanningStatus::kPlannerError,
+                       "PLANNER_ERROR");
+      },
+      "wheel", ConfigPath("wheel.yaml").string(),
+      {rclcpp::Parameter{"rolling_surface_enabled", true}}};
+  system.PublishInputs();
+  system.PublishLocal(BlockedLocalMap());
+  std::this_thread::sleep_for(20ms);
+
+  const auto handle = system.SendGoal(system.Goal("rolling_portal_failure"));
+  ASSERT_NE(handle, nullptr);
+  const auto result = system.Result(handle);
+
+  EXPECT_EQ(result.code, rclcpp_action::ResultCode::ABORTED);
+  ASSERT_NE(result.result, nullptr);
+  EXPECT_EQ(result.result->reason_code, "NO_PATH");
+  ASSERT_TRUE(WaitFor([&] { return system.DiagnosticCount() == 1U; }));
+  EXPECT_EQ(FindDiagnosticValue(system.Diagnostics().front(),
+                                "rolling_failure_stage"),
+            "PORTAL_SET");
+}
+
 TEST(PurePlanMotionServer,
      RollingFirstCycleFinalizedAtTwoPointFiveSecondsIsPlanFoundLate) {
   RunningSystem system{
