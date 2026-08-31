@@ -102,19 +102,21 @@
 
 - 修改：`ros2_ws/src/lunar_pure_planner_core/src/legged/anytime_legged_planner.hpp`
 - 修改：`ros2_ws/src/lunar_pure_planner_core/src/legged/anytime_legged_planner.cpp`
+- 修改：`ros2_ws/src/lunar_pure_planner_core/src/planner.cpp`
 - 修改：`ros2_ws/src/lunar_pure_planner_core/test/anytime_legged_planner_test.cpp`
+- 修改：`ros2_ws/src/lunar_pure_planner_core/test/dual_mode_planner_test.cpp`
 
-- [ ] **3.1 先补足式搜索契约测试**
+- [x] **3.1 先补足式搜索契约测试**
 
   增加以下失败测试：
 
   1. 第一个门户被精确边认证拒绝、第二个门户可达时，一次 `PlanLegged` 成功并返回 `selected_goal_index == 1`；
   2. 起点在足式掩码距离场上与全部目标断开时返回 `LEGGED_NO_PATH`，不展开状态；
   3. 同一局部几何连同起终点平移，及围绕起点整体旋转后，得到相同状态数量、路径动作数和近似相等代价；
-  4. 人工构造超过旧 `131072` 普通状态编号的图增长场景不再返回 `LEGGED_SEARCH_CAPACITY_EXHAUSTED`；
-  5. 模拟/捕获真实 `std::bad_alloc` 时返回 `LEGGED_RESOURCE_EXHAUSTED`，而普通 OPEN 耗尽仍返回 `LEGGED_NO_PATH`。
+  4. 生产尺寸开阔地图回归继续通过，源码删除固定状态槽及 `LEGGED_SEARCH_CAPACITY_EXHAUSTED` 分支；不为测试制造一次 13 万状态搜索；
+  5. 保留顶层 `std::bad_alloc -> LEGGED_RESOURCE_EXHAUSTED` 映射，不增加全局分配器注入。
 
-- [ ] **3.2 运行足式测试并确认 RED**
+- [x] **3.2 运行足式测试并确认 RED**
 
   ```bash
   ctest --test-dir build-jazzy-legged-search/lunar_pure_planner_core \
@@ -123,23 +125,23 @@
 
   预期：`LeggedPlanRequest` 尚不接受完整目标集合/距离场，结果也没有目标索引。
 
-- [ ] **3.3 修改请求与结果契约**
+- [x] **3.3 修改请求与结果契约**
 
   将 `goal_odom` 改为 `goals_odom: LocalGoalSet`，增加只读 `goal_distance_field`，并在 `LeggedPlanResult` 增加 `std::optional<std::size_t> selected_goal_index`。拒绝空集合、超过现有 32 个中间目标、非 PointGoal、距离场尺寸/源索引不匹配等非法输入；精确最终目标仍限定为一个。
 
-- [ ] **3.4 使用请求级状态格**
+- [x] **3.4 使用请求级状态格**
 
   在搜索图构造时冻结起点 `x/y/yaw`。`KeyFor` 按 `(pose.xy - request_start.xy)` 和相对起始 yaw 生成现有 `x/y/yaw/mode/narrow` 键；地图原点只用于 `PositionToCell` 查询。保持实际状态中的世界位姿和所有边几何不变。
 
-- [ ] **3.5 实现单次多目标 ARA***
+- [x] **3.5 实现单次多目标 ARA***
 
   主启发为到全部目标区域的欧氏下界最小值；距离场按当前状态所在栅格提供非约束 `guidance`。每个目标拥有带 `goal_index` 的动态终端节点，状态展开仅尝试一个动作原语范围内的现有缩放连接，并沿用完整 `SweepBody` 认证。重建路径时从终端节点取出实际目标索引。
 
-- [ ] **3.6 删除固定状态槽**
+- [x] **3.6 删除固定状态槽**
 
   删除 `kMaximumSearchStates`、预留的固定 `goal_state_` 和容量耗尽分支。普通状态及终端状态按首次创建顺序连续编号，并让 ARA* 使用动态增长的逻辑状态范围。捕获 `std::bad_alloc` 返回 `LEGGED_RESOURCE_EXHAUSTED`；不得新增状态数/内存预算参数。
 
-- [ ] **3.7 验证并提交 Task 3**
+- [x] **3.7 验证并提交 Task 3**
 
   运行 `anytime_legged_planner`、`legged_fault_matrix`、`legged_planner` 目标和 `git diff --check`，显式暂存三个文件，提交：
 
@@ -153,20 +155,18 @@
 
 **文件：**
 
-- 修改：`ros2_ws/src/lunar_pure_planner_core/src/planner.cpp`
-- 修改：`ros2_ws/src/lunar_pure_planner_core/test/dual_mode_planner_test.cpp`
 - 修改：`ros2_ws/src/lunar_pure_planner_ros/src/pure_plan_motion_server.cpp`
 - 修改：`ros2_ws/src/lunar_pure_planner_ros/test/pure_plan_motion_server_test.cpp`
 
-- [ ] **4.1 先补核心集成测试**
+- [x] **4.1 先补核心集成测试**
 
   在 `dual_mode_planner_test.cpp` 构造两个足式局部目标，断言规划器把完整集合交给足式搜索、返回实际 `selected_goal_index`，相同地图/capability/有序目标集合第二次请求命中现有 goal-field cache；改变目标顺序或 capability 后重建。断言轮式相同场景的结果不变。
 
-- [ ] **4.2 先补 ROS 失败诊断测试**
+- [x] **4.2 先补 ROS 失败诊断测试**
 
   在 `pure_plan_motion_server_test.cpp` 让局部后端返回失败且携带非零 `expanded_states`、`best_cost`、`selected_goal_index` 与 `legged_local` 统计，断言 server 转换后的 segment 保留这些字段，而 status/reason 仍是原失败结果。
 
-- [ ] **4.3 运行集成目标并确认 RED**
+- [x] **4.3 运行集成目标并确认 RED**
 
   ```bash
   ctest --test-dir build-jazzy-legged-search/lunar_pure_planner_core \
@@ -180,15 +180,15 @@
     -R pure_plan_motion_server_test --output-on-failure
   ```
 
-- [ ] **4.4 接入足式距离场和完整目标集合**
+- [x] **4.4 接入足式距离场和完整目标集合**
 
   在 `planner.cpp` 从全部足式目标提取目标格，以 `hard_feasible && step_feasible` 生成掩码，复用现有 ordered-goal cache key 和 cache slot。若起点距离为无穷，返回局部 `NO_PATH`。调用 `PlanLegged` 时传完整 `LocalGoalSet` 和距离场，并原样传播 `selected_goal_index`、缓存命中与现有边认证诊断。轮式分支不改。
 
-- [ ] **4.5 修复 ROS 外层失败证据丢失**
+- [x] **4.5 修复 ROS 外层失败证据丢失**
 
   `LocalFailure(...)` 转换后只回填现有结果字段：`expanded_states`、`best_cost`、`selected_goal_index`、`legged_local`。不增加新的安全检查或诊断类别。
 
-- [ ] **4.6 验证并提交 Task 4**
+- [x] **4.6 验证并提交 Task 4**
 
   分别构建 core 与 ROS 包，运行上述两个目标、`git diff --check`，显式暂存四个文件，提交：
 

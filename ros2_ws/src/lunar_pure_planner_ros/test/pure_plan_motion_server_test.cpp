@@ -2094,6 +2094,59 @@ TEST(PurePlanMotionServer,
 }
 
 TEST(PurePlanMotionServer,
+     LeggedRollingFailureRetainsLocalSearchWorkDiagnostics) {
+  RunningSystem system{
+    [](const lunar::pure_planning::PlanningRequest &) {
+      return Failure(lunar::pure_planning::PlanningStatus::kPlannerError,
+                       "PLANNER_ERROR");
+    },
+    "legged", ConfigPath("legged.yaml").string(),
+    {rclcpp::Parameter{"rolling_surface_enabled", true},
+      rclcpp::Parameter{"rolling_poll_period_ms", 10},
+      rclcpp::Parameter{"rolling_min_replan_interval_ms", 10}},
+    [](const lunar::pure_planning::PlanningRequest &,
+    const lunar::pure_planning::LocalGoalSet &,
+    lunar::pure_planning::SearchControl) {
+      return lunar::pure_planning::LocalStageResult{
+        .status = lunar::pure_planning::LocalPlanStatus::kNoPath,
+        .reason_code = "LEGGED_NO_PATH",
+        .selected_goal_index = 0U,
+        .expanded_states = 41U,
+        .best_cost = 4.25,
+        .legged_local = {
+          .active = true,
+          .traversal_projection_cache_hit = true,
+          .fast_path_accepts = 17U,
+          .exact_sweep_fallbacks = 3U,
+          .exact_sweep_cell_checks = 29U,
+          .edge_validation_cache_hits = 5U,
+        },
+      };
+    }};
+  system.PublishInputs(true, 0.0, 64U, 128U);
+
+  const auto handle = system.SendGoal(system.Goal("legged_failure"));
+  ASSERT_NE(handle, nullptr);
+  const auto result = system.Result(handle);
+
+  EXPECT_EQ(result.code, rclcpp_action::ResultCode::ABORTED);
+  ASSERT_NE(result.result, nullptr);
+  EXPECT_EQ(result.result->reason_code, "NO_PATH");
+  ASSERT_TRUE(WaitFor([&] {return system.DiagnosticCount() == 1U;}));
+  const auto diagnostic = system.Diagnostics().front();
+  EXPECT_EQ(FindDiagnosticValue(diagnostic, "expanded_states"), "41");
+  EXPECT_EQ(FindDiagnosticValue(diagnostic, "has_best_cost"), "true");
+  EXPECT_EQ(FindDiagnosticValue(diagnostic, "best_cost"), "4.25");
+  EXPECT_EQ(FindDiagnosticValue(diagnostic, "legged_fast_path_accepts"),
+            "17");
+  EXPECT_EQ(FindDiagnosticValue(diagnostic, "legged_exact_sweep_fallbacks"),
+            "3");
+  EXPECT_EQ(FindDiagnosticValue(diagnostic,
+                                "legged_exact_sweep_cell_checks"),
+            "29");
+}
+
+TEST(PurePlanMotionServer,
      RollingDiscardsLateLocalIdentityAndPublishesOnlyTheFreshCycle) {
   std::atomic<std::uint64_t> calls{0U};
   std::atomic<bool> first_entered{false};

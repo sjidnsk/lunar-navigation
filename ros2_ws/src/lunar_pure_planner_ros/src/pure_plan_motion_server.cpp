@@ -1489,6 +1489,9 @@ struct PurePlanMotionServer::Impl final {
           };
         }
       }
+      segment.expanded_states = local.expanded_states;
+      segment.selected_goal_index = local.selected_goal_index;
+      segment.best_cost = local.best_cost;
       segment.legged_local = local.legged_local;
       if (legged_rolling) {
         PopulateGridV1Diagnostics(segment, snapshot, traversability, false);
