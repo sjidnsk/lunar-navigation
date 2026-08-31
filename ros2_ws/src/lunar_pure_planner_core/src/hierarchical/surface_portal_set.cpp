@@ -23,6 +23,8 @@ namespace {
 
 constexpr std::size_t kMaximumPortalCandidates = 32U;
 constexpr std::size_t kMaximumLongitudinalSamples = 32U;
+constexpr double kMaximumPortalForwardProgressM = 12.0;
+constexpr double kMinimumPortalForwardProgressM = 1.0;
 constexpr std::array<std::int32_t, 9> kLateralCells{0, -1, 1, -2, 2,
                                                     -3, 3, -4, 4};
 
@@ -101,14 +103,12 @@ struct RouteSample final {
 }
 
 [[nodiscard]] bool CandidateLess(const SurfacePortalCandidate& left,
-                                 const SurfacePortalCandidate& right,
-                                 const bool prefer_route_centerline) noexcept {
+                                 const SurfacePortalCandidate& right) noexcept {
   if (left.route_progress_m != right.route_progress_m) {
     return left.route_progress_m > right.route_progress_m;
   }
-  if (prefer_route_centerline &&
-      std::abs(left.lateral_offset_cells) !=
-          std::abs(right.lateral_offset_cells)) {
+  if (std::abs(left.lateral_offset_cells) !=
+      std::abs(right.lateral_offset_cells)) {
     return std::abs(left.lateral_offset_cells) <
            std::abs(right.lateral_offset_cells);
   }
@@ -118,10 +118,7 @@ struct RouteSample final {
   if (left.local_clearance_m != right.local_clearance_m) {
     return left.local_clearance_m > right.local_clearance_m;
   }
-  return std::tie(left.global_cell.y, left.global_cell.x, left.local_cell.y,
-                  left.local_cell.x, left.stable_rank) <
-         std::tie(right.global_cell.y, right.global_cell.x,
-                  right.local_cell.y, right.local_cell.x, right.stable_rank);
+  return left.stable_rank < right.stable_rank;
 }
 
 [[nodiscard]] bool LocalCellSafe(
@@ -143,25 +140,33 @@ struct RouteSample final {
 [[nodiscard]] std::vector<double> LongitudinalProgresses(
     const SurfaceRollingDecision& decision,
     const double resolution_m) {
-  const double progress_span_m = decision.desired_horizon_progress_m -
-                                 decision.projected_route_progress_m;
-  const auto available_cells = static_cast<std::size_t>(
+  const double maximum_progress_m = std::min(
+      decision.desired_horizon_progress_m,
+      decision.projected_route_progress_m + kMaximumPortalForwardProgressM);
+  const double minimum_progress_m = decision.projected_route_progress_m +
+                                    kMinimumPortalForwardProgressM;
+  if (maximum_progress_m + 1.0e-9 < minimum_progress_m) {
+    return {};
+  }
+  const double progress_span_m = maximum_progress_m - minimum_progress_m;
+  const auto available_backoff_cells = static_cast<std::size_t>(
       std::max(0.0, std::floor(progress_span_m / resolution_m + 1.0e-9)));
   const std::size_t sample_count = std::clamp(
-      available_cells, std::size_t{1U}, kMaximumLongitudinalSamples);
+      available_backoff_cells + 1U, std::size_t{1U},
+      kMaximumLongitudinalSamples);
 
   std::vector<double> progresses;
   progresses.reserve(sample_count);
   for (std::size_t sample = 0U; sample < sample_count; ++sample) {
     std::size_t backoff_cells = sample;
-    if (available_cells > kMaximumLongitudinalSamples &&
+    if (available_backoff_cells + 1U > kMaximumLongitudinalSamples &&
         sample_count > 1U) {
       backoff_cells = static_cast<std::size_t>(std::llround(
           static_cast<double>(sample) *
-          static_cast<double>(available_cells - 1U) /
+          static_cast<double>(available_backoff_cells) /
           static_cast<double>(sample_count - 1U)));
     }
-    progresses.push_back(decision.desired_horizon_progress_m -
+    progresses.push_back(maximum_progress_m -
                          static_cast<double>(backoff_cells) * resolution_m);
   }
   return progresses;
@@ -375,13 +380,7 @@ SurfacePortalSetResult BuildSurfacePortalSet(
   if (candidates.empty()) {
     return Failure("NO_PATH");
   }
-  const bool prefer_route_centerline =
-      std::holds_alternative<LeggedCapability>(input.capability);
-  std::sort(candidates.begin(), candidates.end(),
-            [prefer_route_centerline](const SurfacePortalCandidate& left,
-                                      const SurfacePortalCandidate& right) {
-              return CandidateLess(left, right, prefer_route_centerline);
-            });
+  std::sort(candidates.begin(), candidates.end(), CandidateLess);
   if (candidates.size() > bounded_max) {
     candidates.resize(bounded_max);
   }

@@ -148,6 +148,30 @@ void SetLocalHazardAt(GridMap& map, const double x_m, const double y_m) {
   };
 }
 
+[[nodiscard]] bool UsesUnifiedPortalOrder(
+    const std::vector<SurfacePortalCandidate>& candidates) {
+  return std::is_sorted(
+      candidates.begin(), candidates.end(),
+      [](const SurfacePortalCandidate& left,
+         const SurfacePortalCandidate& right) {
+        if (left.route_progress_m != right.route_progress_m) {
+          return left.route_progress_m > right.route_progress_m;
+        }
+        if (std::abs(left.lateral_offset_cells) !=
+            std::abs(right.lateral_offset_cells)) {
+          return std::abs(left.lateral_offset_cells) <
+                 std::abs(right.lateral_offset_cells);
+        }
+        if (left.global_clearance_m != right.global_clearance_m) {
+          return left.global_clearance_m > right.global_clearance_m;
+        }
+        if (left.local_clearance_m != right.local_clearance_m) {
+          return left.local_clearance_m > right.local_clearance_m;
+        }
+        return left.stable_rank < right.stable_rank;
+      });
+}
+
 TEST(SurfacePortalSet, UsesSafeLateralCellsWhenNominalHorizonIsBlocked) {
   PlanningRequest input = Request();
   SetGlobalHazard(*input.world.global_map, 9U, 10U);
@@ -189,6 +213,73 @@ TEST(SurfacePortalSet,
                    decision.desired_horizon_progress_m);
   EXPECT_EQ(result.candidates.front().global_cell,
             (shared::GridCell{.x = 9, .y = 10}));
+}
+
+TEST(SurfacePortalSet,
+     WheelAndLeggedUseTheSameProgressLateralClearanceAndStableRankOrder) {
+  PlanningRequest wheel = Request();
+  std::get<WheeledCapability>(wheel.capability).footprint_xy_m.clear();
+  SetGlobalHazard(*wheel.world.global_map, 13U, 11U);
+  const GlobalRoute route = StraightRoute();
+  const auto decision = RollingDecision(route, wheel.goal_map, 1.5, 12.0);
+
+  const auto wheel_result =
+      BuildSurfacePortalSet(wheel, route, decision, 32U, {});
+
+  PlanningRequest legged = wheel;
+  legged.current_state = LeggedState{
+      .body_pose = {.position_m = {.x = 1.5, .y = 10.5, .z = 0.0}},
+  };
+  legged.capability = LeggedPortalCapability();
+  const auto legged_result =
+      BuildSurfacePortalSet(legged, route, decision, 32U, {});
+
+  ASSERT_TRUE(wheel_result.ok()) << wheel_result.reason_code;
+  ASSERT_TRUE(legged_result.ok()) << legged_result.reason_code;
+  ASSERT_FALSE(wheel_result.candidates.empty());
+  ASSERT_FALSE(legged_result.candidates.empty());
+  EXPECT_EQ(wheel_result.candidates.front().lateral_offset_cells, 0);
+  EXPECT_EQ(legged_result.candidates.front().lateral_offset_cells, 0);
+  EXPECT_TRUE(UsesUnifiedPortalOrder(wheel_result.candidates));
+  EXPECT_TRUE(UsesUnifiedPortalOrder(legged_result.candidates));
+}
+
+TEST(SurfacePortalSet,
+     WheelAndLeggedPortalProgressesStayWithinOneToTwelveMetresAndCapAtThirtyTwo) {
+  PlanningRequest wheel = Request();
+  wheel.world.global_map = GlobalMap(100U, 21U);
+  wheel.world.local_map = LocalMap(100U, 21U);
+  wheel.goal_map = FinalGoal(90.5, 10.5);
+  std::get<WheeledCapability>(wheel.capability).footprint_xy_m.clear();
+  const GlobalRoute route = StraightRoute(90.5, 10.5);
+  const auto decision = RollingDecision(route, wheel.goal_map, 1.5, 40.0);
+  ASSERT_FALSE(decision.targets_final_goal);
+
+  const auto wheel_result =
+      BuildSurfacePortalSet(wheel, route, decision, 100U, {});
+
+  PlanningRequest legged = wheel;
+  legged.current_state = LeggedState{
+      .body_pose = {.position_m = {.x = 1.5, .y = 10.5, .z = 0.0}},
+  };
+  legged.capability = LeggedPortalCapability();
+  const auto legged_result =
+      BuildSurfacePortalSet(legged, route, decision, 100U, {});
+
+  for (const auto* result : {&wheel_result, &legged_result}) {
+    ASSERT_TRUE(result->ok()) << result->reason_code;
+    ASSERT_FALSE(result->candidates.empty());
+    EXPECT_LE(result->candidates.size(), 32U);
+    EXPECT_DOUBLE_EQ(result->candidates.front().route_progress_m -
+                         decision.projected_route_progress_m,
+                     12.0);
+    for (const auto& candidate : result->candidates) {
+      const double forward_progress_m =
+          candidate.route_progress_m - decision.projected_route_progress_m;
+      EXPECT_LE(forward_progress_m, 12.0);
+      EXPECT_GE(forward_progress_m, 1.0);
+    }
+  }
 }
 
 TEST(SurfacePortalSet,
@@ -289,7 +380,7 @@ TEST(SurfacePortalSet, ClipsCandidatesToTheObservedLocalMap) {
 TEST(SurfacePortalSet, RemovesRepeatedGlobalAndLocalCellPairs) {
   PlanningRequest input = Request();
   const GlobalRoute route = StraightRoute();
-  const auto decision = RollingDecision(route, input.goal_map, 1.5, 0.2);
+  const auto decision = RollingDecision(route, input.goal_map, 1.5, 1.0);
 
   const auto result = BuildSurfacePortalSet(input, route, decision, 32U, {});
 
@@ -321,18 +412,7 @@ TEST(SurfacePortalSet, RepeatsTheSameDocumentedSafetyOrder) {
     EXPECT_EQ(CandidateIdentity(first.candidates[index]),
               CandidateIdentity(repeated.candidates[index]));
   }
-  EXPECT_TRUE(std::is_sorted(
-      first.candidates.begin(), first.candidates.end(),
-      [](const auto& left, const auto& right) {
-        return std::tuple{-left.route_progress_m, -left.global_clearance_m,
-                          -left.local_clearance_m, left.global_cell.y,
-                          left.global_cell.x, left.local_cell.y,
-                          left.local_cell.x, left.stable_rank} <
-               std::tuple{-right.route_progress_m, -right.global_clearance_m,
-                          -right.local_clearance_m, right.global_cell.y,
-                          right.global_cell.x, right.local_cell.y,
-                          right.local_cell.x, right.stable_rank};
-      }));
+  EXPECT_TRUE(UsesUnifiedPortalOrder(first.candidates));
 }
 
 TEST(SurfacePortalSet, EnforcesTheHardThirtyTwoCandidateCap) {
