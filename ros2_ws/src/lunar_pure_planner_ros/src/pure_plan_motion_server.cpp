@@ -30,6 +30,8 @@
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <grid_map_msgs/msg/grid_map.hpp>
 #include <lunar_planning_msgs/action/plan_motion.hpp>
+#include <lunar_planning_msgs/msg/demo_map_ack.hpp>
+#include <lunar_planning_msgs/msg/demo_plan_segment.hpp>
 #include <lunar_planning_msgs/msg/motion_reference.hpp>
 #include <lunar_planning_msgs/msg/timed_path.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
@@ -69,13 +71,16 @@ using GoalHandle = rclcpp_action::ServerGoalHandle<Action>;
 using namespace std::chrono_literals;
 
 constexpr std::string_view kPackageName{"lunar_pure_planner_ros"};
-constexpr double kLeggedRollingHorizonM = 4.0;
-constexpr double kLeggedReplanStrideM = 1.5;
 constexpr double kLeggedGoalToleranceEpsilonM = 1.0e-9;
 
 struct RollingSurfaceParameters final {
   bool enabled{};
-  double horizon_m{8.0};
+  bool demo_delivery_protocol_enabled{};
+  std::string demo_map_ack_topic;
+  std::string demo_plan_segment_topic;
+  std::int64_t demo_map_ack_timeout_ms{1000};
+  double horizon_m{12.0};
+  double replan_distance_m{4.0};
   std::int64_t poll_period_ms{100};
   std::int64_t min_replan_interval_ms{500};
   double max_deviation_m{2.0};
@@ -186,7 +191,17 @@ struct RuntimeParameters final {
 
   const RollingSurfaceParameters rolling_surface{
       .enabled = node.declare_parameter<bool>("rolling_surface_enabled", false),
-      .horizon_m = node.declare_parameter<double>("rolling_horizon_m", 8.0),
+      .demo_delivery_protocol_enabled = node.declare_parameter<bool>(
+          "demo_delivery_protocol_enabled", false),
+      .demo_map_ack_topic = node.declare_parameter<std::string>(
+          "demo_map_ack_topic", "/lunar_demo/map_ack"),
+      .demo_plan_segment_topic = node.declare_parameter<std::string>(
+          "demo_plan_segment_topic", "/lunar_demo/plan_segment"),
+      .demo_map_ack_timeout_ms = node.declare_parameter<std::int64_t>(
+          "demo_map_ack_timeout_ms", 1000),
+      .horizon_m = node.declare_parameter<double>("rolling_horizon_m", 12.0),
+      .replan_distance_m = node.declare_parameter<double>(
+          "rolling_replan_distance_m", 4.0),
       .poll_period_ms =
           node.declare_parameter<std::int64_t>("rolling_poll_period_ms", 100),
       .min_replan_interval_ms = node.declare_parameter<std::int64_t>(
@@ -198,8 +213,12 @@ struct RuntimeParameters final {
   };
   if (!std::isfinite(rolling_surface.horizon_m) ||
       rolling_surface.horizon_m <= 0.0 ||
+      !std::isfinite(rolling_surface.replan_distance_m) ||
+      rolling_surface.replan_distance_m <= 0.0 ||
       !std::isfinite(rolling_surface.max_deviation_m) ||
       rolling_surface.max_deviation_m <= 0.0 ||
+      rolling_surface.demo_map_ack_timeout_ms < 10 ||
+      rolling_surface.demo_map_ack_timeout_ms > 10000 ||
       rolling_surface.poll_period_ms < 10 ||
       rolling_surface.poll_period_ms > 10000 ||
       rolling_surface.min_replan_interval_ms < 10 ||
@@ -261,7 +280,9 @@ struct RuntimeParameters final {
            &parameters.wheeled_global_path_topic,
            &parameters.wheeled_timed_path_topic,
            &parameters.legged_path_topic,
-           &parameters.legged_global_path_topic}) {
+           &parameters.legged_global_path_topic,
+           &parameters.rolling_surface.demo_map_ack_topic,
+           &parameters.rolling_surface.demo_plan_segment_topic}) {
     if (!AbsoluteTopic(*interface_name)) {
       throw std::runtime_error{"PLANNER_ERROR: interface name must be absolute"};
     }
@@ -298,6 +319,24 @@ struct RuntimeParameters final {
     const lunar::pure_planning::PlanningStatus status,
     std::string reason_code) {
   return {.status = status, .reason_code = std::move(reason_code)};
+}
+
+[[nodiscard]] bool PositionInsideLocalMap(
+    const lunar::pure_planning::GridMap& local_map,
+    const lunar::pure_planning::Pose3& pose) noexcept {
+  if (!std::isfinite(pose.position_m.x) || !std::isfinite(pose.position_m.y) ||
+      !std::isfinite(local_map.origin_m.x) ||
+      !std::isfinite(local_map.origin_m.y) ||
+      !std::isfinite(local_map.resolution_m) || local_map.resolution_m <= 0.0) {
+    return false;
+  }
+  const double maximum_x = local_map.origin_m.x +
+      static_cast<double>(local_map.width) * local_map.resolution_m;
+  const double maximum_y = local_map.origin_m.y +
+      static_cast<double>(local_map.height) * local_map.resolution_m;
+  return pose.position_m.x >= local_map.origin_m.x &&
+         pose.position_m.x < maximum_x && pose.position_m.y >= local_map.origin_m.y &&
+         pose.position_m.y < maximum_y;
 }
 
 [[nodiscard]] lunar::pure_planning::PlanningResult LocalFailure(
@@ -579,7 +618,8 @@ struct PurePlanMotionServer::Impl final {
   Impl(PurePlanMotionServer& owner, PlannerFn planner,
        LocalPlannerFn local_planner)
       : node(owner), parameters(ReadRuntimeParameters(owner)),
-        planner(std::move(planner)), local_planner(std::move(local_planner)) {
+        planner(std::move(planner)), local_planner(std::move(local_planner)),
+        input_store(parameters.rolling_surface.demo_delivery_protocol_enabled) {
     if (!this->planner) {
       this->planner = RealPlannerFn();
     }
@@ -618,7 +658,7 @@ struct PurePlanMotionServer::Impl final {
               .maximum_slope_rad = capability->maximum_slope_rad,
               .inflation_radius_m =
                   footprint_radius_m + capability->minimum_clearance_m,
-          });
+          }, parameters.rolling_surface.demo_delivery_protocol_enabled);
     } else if (use_legged_grid_v1) {
       const auto* capability =
           std::get_if<lunar::pure_planning::LeggedCapability>(
@@ -639,7 +679,7 @@ struct PurePlanMotionServer::Impl final {
                              capability->body_extent_m.y) /
                       2.0 +
                   capability->minimum_body_clearance_m,
-          });
+          }, parameters.rolling_surface.demo_delivery_protocol_enabled);
     }
     node.declare_parameter<bool>("trusted_bridge_once", false);
     action_group =
@@ -697,6 +737,16 @@ struct PurePlanMotionServer::Impl final {
           parameters.legged_path_topic, rclcpp::QoS{1}.reliable());
       legged_global_path_publisher = node.create_publisher<nav_msgs::msg::Path>(
           parameters.legged_global_path_topic, rclcpp::QoS{1}.reliable());
+    }
+    if (parameters.rolling_surface.demo_delivery_protocol_enabled) {
+      demo_map_ack_publisher =
+          node.create_publisher<lunar_planning_msgs::msg::DemoMapAck>(
+              parameters.rolling_surface.demo_map_ack_topic,
+              rclcpp::QoS{10}.reliable());
+      demo_plan_segment_publisher =
+          node.create_publisher<lunar_planning_msgs::msg::DemoPlanSegment>(
+              parameters.rolling_surface.demo_plan_segment_topic,
+              rclcpp::QoS{10}.reliable());
     }
     action_server = rclcpp_action::create_server<Action>(
         node.get_node_base_interface(), node.get_node_clock_interface(),
@@ -838,6 +888,54 @@ struct PurePlanMotionServer::Impl final {
     }
   }
 
+  void PublishDemoDeliveryDiagnostics(
+      const std::shared_ptr<const Action::Goal>& request_goal,
+      const lunar::pure_planning::PlanningResult& result,
+      const std::string_view delivery_state, const InputSnapshot& snapshot,
+      const std::uint32_t segment_index,
+      const std::string_view rolling_failure_stage = {},
+      const std::optional<std::size_t> rolling_recovery_attempt =
+          std::nullopt) {
+    auto diagnostics = MakeRequestDiagnostics(
+        request_goal ? std::string_view{request_goal->request_id}
+                     : std::string_view{},
+        parameters.platform_type,
+        request_goal ? EnvironmentMode(request_goal->environment_mode)
+                     : lunar::pure_planning::EnvironmentMode::kLunarSurface,
+        result);
+    SetDiagnosticValue(diagnostics, "demo_delivery_state",
+                       std::string{delivery_state});
+    SetDiagnosticValue(diagnostics, "demo_map_token",
+                       snapshot.local_map
+                           ? std::to_string(snapshot.local_map->header.stamp.sec) +
+                                 "." + std::to_string(
+                                           snapshot.local_map->header.stamp.nanosec)
+                           : std::string{});
+    SetDiagnosticValue(diagnostics, "demo_segment_index",
+                       std::to_string(segment_index));
+    SetDiagnosticValue(diagnostics, "local_input_sequence",
+                       std::to_string(snapshot.local_sequence));
+    if (!rolling_failure_stage.empty()) {
+      SetDiagnosticValue(diagnostics, "rolling_failure_stage",
+                         std::string{rolling_failure_stage});
+    }
+    if (rolling_recovery_attempt.has_value()) {
+      SetDiagnosticValue(diagnostics, "rolling_recovery", "true");
+      SetDiagnosticValue(diagnostics, "rolling_recovery_attempt",
+                         std::to_string(*rolling_recovery_attempt));
+    }
+    if (!ContextIsValid()) {
+      return;
+    }
+    try {
+      diagnostics.header.stamp = node.now();
+      diagnostics_publisher->publish(diagnostics);
+      LogDiagnostics(diagnostics);
+    } catch (...) {
+      SafeLogError("PLANNER_ERROR: failed to publish demo delivery diagnostics");
+    }
+  }
+
   [[nodiscard]] rclcpp_action::GoalResponse HandleGoal(
       const std::shared_ptr<const Action::Goal> goal) {
     std::scoped_lock lock{state_mutex};
@@ -954,6 +1052,10 @@ struct PurePlanMotionServer::Impl final {
       auto result = ExecuteRollingSurface(
           goal_handle, goal_handle->get_goal(), stop_token, &feedback_state,
           &final_snapshot, &result_diagnostic_published);
+      if (stop_token.stop_requested() ||
+          result.status != lunar::pure_planning::PlanningStatus::kSuccess) {
+        StopAndClearDemoDelivery(goal_handle->get_goal());
+      }
       try {
         ExecuteKnownResult(goal_handle, generation, started, final_snapshot,
                            std::move(result), result_diagnostic_published);
@@ -1155,6 +1257,93 @@ struct PurePlanMotionServer::Impl final {
     return wheel_legacy || legged_grid_v1;
   }
 
+  [[nodiscard]] bool UseDemoDeliveryProtocol(
+      const std::shared_ptr<const Action::Goal>& goal) const noexcept {
+    return parameters.rolling_surface.demo_delivery_protocol_enabled &&
+           UseRollingSurface(goal);
+  }
+
+  [[nodiscard]] std::uint8_t DemoPlatformType() const noexcept {
+    return parameters.platform_type == lunar::pure_planning::PlatformType::kLegged
+        ? lunar_planning_msgs::msg::DemoPlanSegment::LEGGED
+        : lunar_planning_msgs::msg::DemoPlanSegment::WHEELED;
+  }
+
+  void PublishDemoStop(const std::string_view request_id) {
+    if (!demo_plan_segment_publisher || !ContextIsValid()) {
+      return;
+    }
+    lunar_planning_msgs::msg::DemoPlanSegment segment;
+    segment.request_id = std::string{request_id};
+    segment.platform_type = DemoPlatformType();
+    segment.command = lunar_planning_msgs::msg::DemoPlanSegment::STOP;
+    demo_plan_segment_publisher->publish(segment);
+  }
+
+  void ClearDeliveredPaths(const std::shared_ptr<const Action::Goal>& request_goal) {
+    if (!request_goal || !ContextIsValid()) {
+      return;
+    }
+    const auto cleared = Failure(lunar::pure_planning::PlanningStatus::kNoPath,
+                                 "NO_PATH");
+    const auto converted = ConvertResult(cleared, request_goal->mission_revision);
+    if (parameters.platform_type == lunar::pure_planning::PlatformType::kLegged) {
+      PublishLeggedPath(cleared, converted);
+    } else {
+      PublishWheeledPath(cleared, converted, 0ns);
+    }
+  }
+
+  void StopAndClearDemoDelivery(
+      const std::shared_ptr<const Action::Goal>& request_goal) {
+    if (!UseDemoDeliveryProtocol(request_goal)) {
+      return;
+    }
+    ClearDeliveredPaths(request_goal);
+    PublishDemoStop(request_goal ? std::string_view{request_goal->request_id}
+                                 : std::string_view{});
+  }
+
+  void PublishDemoMapAck(
+      const std::shared_ptr<const Action::Goal>& request_goal,
+      const InputSnapshot& snapshot,
+      const std::optional<TraversabilityInputSnapshot>& traversability) {
+    if (!demo_map_ack_publisher || !request_goal || !snapshot.local_map ||
+        !ContextIsValid()) {
+      return;
+    }
+    lunar_planning_msgs::msg::DemoMapAck ack;
+    ack.request_id = request_goal->request_id;
+    ack.map_token = snapshot.local_map->header.stamp;
+    ack.local_input_sequence = snapshot.local_sequence;
+    ack.platform_type = DemoPlatformType();
+    if (traversability.has_value() && traversability->snapshot) {
+      ack.projection_revision = traversability->snapshot->revision();
+    }
+    demo_map_ack_publisher->publish(ack);
+  }
+
+  void PublishDemoExecute(
+      const std::shared_ptr<const Action::Goal>& request_goal,
+      const InputSnapshot& snapshot, const std::uint32_t segment_index,
+      const Action::Result& result) {
+    if (!demo_plan_segment_publisher || !request_goal || !snapshot.local_map ||
+        !result.has_reference || !ContextIsValid()) {
+      return;
+    }
+    lunar_planning_msgs::msg::DemoPlanSegment segment;
+    segment.request_id = request_goal->request_id;
+    segment.map_token = snapshot.local_map->header.stamp;
+    segment.segment_index = segment_index;
+    segment.platform_type = DemoPlatformType();
+    segment.command = lunar_planning_msgs::msg::DemoPlanSegment::EXECUTE;
+    segment.executable_path =
+        parameters.platform_type == lunar::pure_planning::PlatformType::kLegged
+            ? ConvertTrajectoryPath(result.reference)
+            : result.reference.path_preview;
+    demo_plan_segment_publisher->publish(segment);
+  }
+
   [[nodiscard]] lunar::pure_planning::PlanningResult ExecuteRollingSurface(
       const std::shared_ptr<GoalHandle>& goal_handle,
       const std::shared_ptr<const Action::Goal>& request_goal,
@@ -1173,6 +1362,7 @@ struct PurePlanMotionServer::Impl final {
 
     const bool legged_rolling =
         parameters.platform_type == lunar::pure_planning::PlatformType::kLegged;
+    const bool demo_delivery_protocol = UseDemoDeliveryProtocol(request_goal);
 
     if (result_diagnostic_published != nullptr) {
       *result_diagnostic_published = false;
@@ -1187,7 +1377,18 @@ struct PurePlanMotionServer::Impl final {
     std::uint64_t seen_local_sequence{};
     std::size_t transient_retry_count{};
     double minimum_route_progress_m{};
-    std::optional<double> legged_replan_anchor_progress_m;
+    std::optional<double> rolling_replan_anchor_progress_m;
+    const InputSnapshot delivery_baseline = input_store.Capture();
+    if (demo_delivery_protocol) {
+      StopAndClearDemoDelivery(request_goal);
+    }
+    std::uint64_t required_delivery_local_sequence =
+        delivery_baseline.local_sequence;
+    std::uint64_t acknowledged_delivery_arrival_sequence{};
+    bool awaiting_demo_delivery = demo_delivery_protocol;
+    std::optional<std::chrono::steady_clock::time_point>
+        demo_delivery_deadline;
+    std::uint32_t demo_segment_index{};
     bool force_replan = true;
     auto last_replan = std::chrono::steady_clock::now() -
         std::chrono::milliseconds{
@@ -1197,19 +1398,33 @@ struct PurePlanMotionServer::Impl final {
             const std::string_view failure_stage) {
           const bool transient = failure.status == PlanningStatus::kNoPath ||
                                  failure.status == PlanningStatus::kTimedOut;
-          if (!transient || !last_segment.has_value() ||
+          if (!transient ||
+              (!demo_delivery_protocol && !last_segment.has_value()) ||
               transient_retry_count >= static_cast<std::size_t>(
                                            parameters.rolling_surface
                                                .transient_retry_limit)) {
             return false;
           }
           ++transient_retry_count;
-          PublishCycleDiagnostics(request_goal, failure, false, failure_stage,
-                                  transient_retry_count);
+          if (demo_delivery_protocol) {
+            PublishDemoDeliveryDiagnostics(
+                request_goal, failure, "PREPARING_LOCAL_MAP",
+                input_store.Capture(), demo_segment_index, failure_stage,
+                transient_retry_count);
+          } else {
+            PublishCycleDiagnostics(request_goal, failure, false,
+                                    failure_stage, transient_retry_count);
+          }
           if (result_diagnostic_published != nullptr) {
             *result_diagnostic_published = true;
           }
-          if (ContextIsValid()) {
+          if (demo_delivery_protocol) {
+            const auto recovery_baseline = input_store.Capture();
+            required_delivery_local_sequence = recovery_baseline.local_sequence;
+            StopAndClearDemoDelivery(request_goal);
+            awaiting_demo_delivery = true;
+            demo_delivery_deadline.reset();
+          } else if (ContextIsValid()) {
             auto cleared =
                 ConvertResult(failure, request_goal->mission_revision);
             if (legged_rolling) {
@@ -1226,7 +1441,79 @@ struct PurePlanMotionServer::Impl final {
         };
 
     while (!stop_token.stop_requested()) {
-      InputSnapshot snapshot = input_store.Capture();
+      InputSnapshot snapshot;
+      bool fresh_demo_delivery = false;
+      const InputSnapshot latest_input = input_store.Capture();
+      if (demo_delivery_protocol && last_segment.has_value() && request_goal &&
+          latest_input.map_from_odom.has_value() && latest_input.odometry) {
+        const auto transform =
+            AdaptDirectMapFromOdom(*latest_input.map_from_odom);
+        const auto converted_goal = transform.value.has_value()
+            ? ConvertGoal(*request_goal, *transform.value)
+            : GoalConversionResult{};
+        const auto state = AdaptOdometry(*latest_input.odometry,
+                                         parameters.platform_type);
+        const auto* pose_odom = state.value.has_value()
+            ? PlatformPose(*state.value)
+            : nullptr;
+        const auto pose_map = pose_odom != nullptr && transform.value.has_value()
+            ? lunar::pure_planning::hierarchical::TransformPose(
+                  *pose_odom, *transform.value,
+                  lunar::pure_planning::hierarchical::TransformDirection::
+                      kChildToParent)
+            : std::optional<Pose3>{};
+        const auto* final_point = converted_goal.goal.has_value()
+            ? std::get_if<lunar::pure_planning::PointGoal>(
+                  &converted_goal.goal->target)
+            : nullptr;
+        if (pose_map.has_value() && final_point != nullptr &&
+            std::hypot(pose_map->position_m.x - final_point->position_m.x,
+                       pose_map->position_m.y - final_point->position_m.y) <=
+                final_point->tolerance_m) {
+          return std::move(*last_segment);
+        }
+      }
+      if (demo_delivery_protocol && awaiting_demo_delivery) {
+        if (latest_input.local_sequence > required_delivery_local_sequence &&
+            !demo_delivery_deadline.has_value()) {
+          demo_delivery_deadline = std::chrono::steady_clock::now() +
+              std::chrono::milliseconds{
+                  parameters.rolling_surface.demo_map_ack_timeout_ms};
+        }
+        const auto synchronized = input_store.CaptureSynchronized();
+        if (synchronized.has_value() &&
+            acknowledged_delivery_arrival_sequence != 0U &&
+            synchronized->local_sequence == required_delivery_local_sequence &&
+            synchronized->local_arrival_sequence >
+                acknowledged_delivery_arrival_sequence) {
+          std::optional<TraversabilityInputSnapshot> traversability;
+          if (legged_rolling && traversability_input) {
+            traversability = traversability_input->Capture();
+          }
+          PublishDemoMapAck(request_goal, *synchronized, traversability);
+          acknowledged_delivery_arrival_sequence =
+              synchronized->local_arrival_sequence;
+        }
+        if (!synchronized.has_value() ||
+            synchronized->local_sequence <= required_delivery_local_sequence) {
+          if (demo_delivery_deadline.has_value() &&
+              std::chrono::steady_clock::now() >= *demo_delivery_deadline) {
+            auto timeout = Failure(PlanningStatus::kTimedOut,
+                                   "MAP_ACK_TIMEOUT");
+            if (recover_transient_local_failure(timeout, "MAP_ACK")) {
+              continue;
+            }
+            return timeout;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds{
+              parameters.rolling_surface.poll_period_ms});
+          continue;
+        }
+        snapshot = *synchronized;
+        fresh_demo_delivery = true;
+      } else {
+        snapshot = latest_input;
+      }
       if (final_snapshot != nullptr) {
         *final_snapshot = snapshot;
       }
@@ -1259,12 +1546,45 @@ struct PurePlanMotionServer::Impl final {
         if (!traversability.has_value() || !traversability->snapshot ||
             !traversability->snapshot->valid() ||
             !traversability->reason_code.empty()) {
+          if (demo_delivery_protocol && fresh_demo_delivery) {
+            if (demo_delivery_deadline.has_value() &&
+                std::chrono::steady_clock::now() >= *demo_delivery_deadline) {
+              auto timeout = Failure(PlanningStatus::kTimedOut,
+                                     "MAP_ACK_TIMEOUT");
+              if (recover_transient_local_failure(timeout, "MAP_ACK")) {
+                continue;
+              }
+              return timeout;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{
+                parameters.rolling_surface.poll_period_ms});
+            continue;
+          }
           return Failure(
               PlanningStatus::kInvalidInput,
               traversability.has_value() &&
                       !traversability->reason_code.empty()
                   ? traversability->reason_code
                   : "INVALID_INPUT");
+        }
+        if (demo_delivery_protocol && fresh_demo_delivery &&
+            (traversability->local_sequence != snapshot.local_sequence ||
+             traversability->local_map_stamp.sec !=
+                 snapshot.local_map->header.stamp.sec ||
+             traversability->local_map_stamp.nanosec !=
+                 snapshot.local_map->header.stamp.nanosec)) {
+          if (demo_delivery_deadline.has_value() &&
+              std::chrono::steady_clock::now() >= *demo_delivery_deadline) {
+            auto timeout = Failure(PlanningStatus::kTimedOut,
+                                   "MAP_ACK_TIMEOUT");
+            if (recover_transient_local_failure(timeout, "MAP_ACK")) {
+              continue;
+            }
+            return timeout;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds{
+              parameters.rolling_surface.poll_period_ms});
+          continue;
         }
         world.value->traversability_snapshot = traversability->snapshot;
       }
@@ -1277,6 +1597,26 @@ struct PurePlanMotionServer::Impl final {
                     kChildToParent);
       if (pose_odom == nullptr || !pose_map.has_value()) {
         return Failure(PlanningStatus::kInvalidInput, "INVALID_INPUT");
+      }
+      if (demo_delivery_protocol && fresh_demo_delivery) {
+        if (!PositionInsideLocalMap(world.value->local_map, *pose_odom)) {
+          if (demo_delivery_deadline.has_value() &&
+              std::chrono::steady_clock::now() >= *demo_delivery_deadline) {
+            auto timeout = Failure(PlanningStatus::kTimedOut,
+                                   "MAP_ACK_TIMEOUT");
+            if (recover_transient_local_failure(timeout, "MAP_ACK")) {
+              continue;
+            }
+            return timeout;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds{
+              parameters.rolling_surface.poll_period_ms});
+          continue;
+        }
+        PublishDemoMapAck(request_goal, snapshot, traversability);
+        required_delivery_local_sequence = snapshot.local_sequence;
+        acknowledged_delivery_arrival_sequence = snapshot.local_arrival_sequence;
+        awaiting_demo_delivery = false;
       }
       const auto* final_point =
           std::get_if<lunar::pure_planning::PointGoal>(
@@ -1371,14 +1711,12 @@ struct PurePlanMotionServer::Impl final {
         route_global_sequence = snapshot.global_sequence;
         route_tf_sequence = snapshot.tf_sequence;
         minimum_route_progress_m = 0.0;
-        legged_replan_anchor_progress_m.reset();
+        rolling_replan_anchor_progress_m.reset();
         active_goal.reset();
         session.emplace(
             *route, *converted_goal.goal,
             lunar::pure_planning::hierarchical::SurfaceRollingConfig{
-                .horizon_m = legged_rolling
-                    ? kLeggedRollingHorizonM
-                    : parameters.rolling_surface.horizon_m,
+                .horizon_m = parameters.rolling_surface.horizon_m,
                 .max_deviation_m =
                     parameters.rolling_surface.max_deviation_m});
         force_replan = true;
@@ -1425,13 +1763,14 @@ struct PurePlanMotionServer::Impl final {
           !legged_rolling &&
           decision.lateral_deviation_m >
               parameters.rolling_surface.max_deviation_m;
-      const bool legged_stride_reached =
-          legged_rolling && legged_replan_anchor_progress_m.has_value() &&
+      const bool stride_reached =
+          rolling_replan_anchor_progress_m.has_value() &&
           decision.projected_route_progress_m +
                   kLeggedGoalToleranceEpsilonM >=
-              *legged_replan_anchor_progress_m + kLeggedReplanStrideM;
+              *rolling_replan_anchor_progress_m +
+                  parameters.rolling_surface.replan_distance_m;
       if (!force_replan && last_segment.has_value() && !target_reached &&
-          !local_changed && !deviated && !legged_stride_reached) {
+          !local_changed && !deviated && !stride_reached) {
         std::this_thread::sleep_for(std::chrono::milliseconds{
             parameters.rolling_surface.poll_period_ms});
         continue;
@@ -1637,7 +1976,9 @@ struct PurePlanMotionServer::Impl final {
         }
         return timeout;
       }
-      if (!SameRollingPlanningIdentity(snapshot, latest, legged_rolling)) {
+      if (!SameRollingPlanningIdentity(snapshot, latest,
+                                       legged_rolling &&
+                                           !demo_delivery_protocol)) {
         PublishCycleDiagnostics(request_goal, segment, true);
         if (result_diagnostic_published != nullptr) {
           *result_diagnostic_published = true;
@@ -1678,7 +2019,8 @@ struct PurePlanMotionServer::Impl final {
         *final_snapshot = publish_snapshot;
       }
       if (!SameRollingPlanningIdentity(snapshot, publish_snapshot,
-                                       legged_rolling)) {
+                                       legged_rolling &&
+                                           !demo_delivery_protocol)) {
         PublishCycleDiagnostics(request_goal, segment, true);
         if (result_diagnostic_published != nullptr) {
           *result_diagnostic_published = true;
@@ -1699,7 +2041,16 @@ struct PurePlanMotionServer::Impl final {
                              segment.timing.total_elapsed);
         }
       }
-      PublishCycleDiagnostics(request_goal, segment);
+      if (demo_delivery_protocol) {
+        PublishDemoExecute(request_goal, snapshot, ++demo_segment_index,
+                           converted);
+        PublishDemoDeliveryDiagnostics(request_goal, segment, "EXECUTING",
+                                       snapshot, demo_segment_index);
+        awaiting_demo_delivery = true;
+        demo_delivery_deadline.reset();
+      } else {
+        PublishCycleDiagnostics(request_goal, segment);
+      }
       if (result_diagnostic_published != nullptr) {
         *result_diagnostic_published = true;
       }
@@ -1727,10 +2078,7 @@ struct PurePlanMotionServer::Impl final {
           }
         }
       }
-      if (legged_rolling) {
-        legged_replan_anchor_progress_m =
-            decision.projected_route_progress_m;
-      }
+      rolling_replan_anchor_progress_m = decision.projected_route_progress_m;
       last_segment = std::move(segment);
       transient_retry_count = 0U;
       seen_local_sequence = snapshot.local_sequence;
@@ -2202,6 +2550,10 @@ struct PurePlanMotionServer::Impl final {
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr legged_path_publisher;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr
       legged_global_path_publisher;
+  rclcpp::Publisher<lunar_planning_msgs::msg::DemoMapAck>::SharedPtr
+      demo_map_ack_publisher;
+  rclcpp::Publisher<lunar_planning_msgs::msg::DemoPlanSegment>::SharedPtr
+      demo_plan_segment_publisher;
   rclcpp_action::Server<Action>::SharedPtr action_server;
   std::mutex state_mutex;
   std::unique_ptr<std::jthread> worker;
