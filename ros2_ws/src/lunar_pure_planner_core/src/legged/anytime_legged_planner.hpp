@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -11,6 +12,7 @@
 #include "legged/legged_traversal_projection.hpp"
 #include "lunar_pure_planner_core/search_control.hpp"
 #include "lunar_pure_planner_core/types/planning_request.hpp"
+#include "shared/goal_distance_field.hpp"
 #include "shared/local_terrain_projection.hpp"
 #include "wheel/anytime_wheel_planner.hpp"
 
@@ -18,9 +20,10 @@ namespace lunar::pure_planning::legged {
 
 struct LeggedPlanRequest final {
   LeggedState start;
-  GoalRegion goal_odom;
+  LocalGoalSet goals_odom;
   const shared::LocalTerrainProjection* terrain{};
   std::shared_ptr<const LeggedTraversalProjection> traversal;
+  std::shared_ptr<const shared::GoalDistanceField> goal_distance_field;
   const LeggedCapability* capability{};
   SearchControl control;
   AnytimeSearchConfig search;
@@ -31,6 +34,7 @@ struct LeggedPlanResult final {
   std::string reason_code;
   std::vector<LeggedTransition> trajectory;
   double cost{std::numeric_limits<double>::infinity()};
+  std::optional<std::size_t> selected_goal_index;
   LocalPlanMetrics metrics;
   std::size_t edge_validation_cache_hits{};
   std::size_t maximum_edge_sweep_evaluations{};

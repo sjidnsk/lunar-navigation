@@ -322,8 +322,6 @@ using namespace std::chrono_literals;
     };
   }
 
-  const GoalRegion& goal_odom = goals_odom.goals_odom.front();
-
   if (const auto* capability =
           std::get_if<LeggedCapability>(&input.capability)) {
     const auto* state = std::get_if<LeggedState>(&input.current_state);
@@ -359,11 +357,69 @@ using namespace std::chrono_literals;
       failure.legged_local.active = true;
       return failure;
     }
+    std::vector<shared::GridCell> goal_cells;
+    goal_cells.reserve(goals_odom.goals_odom.size());
+    for (const GoalRegion& goal : goals_odom.goals_odom) {
+      const auto* point = std::get_if<PointGoal>(&goal.target);
+      if (point == nullptr) {
+        return {.status = LocalPlanStatus::kInvalidInput,
+                .reason_code = "INVALID_INPUT",
+                .snapshot_cache_hit = snapshot.cache_hit,
+                .projection_cache_hit = projection.cache_hit};
+      }
+      const auto cell = terrain.map->PositionToCell(
+          {.x = point->position_m.x, .y = point->position_m.y});
+      if (!cell.has_value()) {
+        return {.status = LocalPlanStatus::kNoPath,
+                .reason_code = "LEGGED_GOAL_OUTSIDE_LOCAL_MAP",
+                .snapshot_cache_hit = snapshot.cache_hit,
+                .projection_cache_hit = projection.cache_hit};
+      }
+      goal_cells.push_back(*cell);
+    }
+    std::vector<std::uint8_t> necessary_feasible(
+        terrain.map->cell_count(), 0U);
+    for (std::size_t index = 0U; index < necessary_feasible.size(); ++index) {
+      necessary_feasible[index] = static_cast<std::uint8_t>(
+          legged_projection.value->hard_feasible[index] != 0U &&
+          legged_projection.value->step_feasible[index] != 0U);
+    }
+    const auto goal_field = cache.goal_field().GetOrBuild(
+        shared::MakeGoalFieldCacheKey(
+            input.world.local_map_sequence,
+            input.config.local_occupancy_threshold, capability_fingerprint,
+            goals_odom, input.config.search, start_patch.identity),
+        control, [&](const SearchControl& build_control) {
+          auto built = shared::BuildGoalDistanceField(
+              *terrain.map, necessary_feasible, goal_cells, build_control);
+          return shared::ImmutableCacheBuildResult<shared::GoalDistanceField>{
+              .value = !built.has_value()
+                  ? nullptr
+                  : std::make_shared<const shared::GoalDistanceField>(
+                        std::move(*built)),
+              .reason_code = !built.has_value()
+                  ? std::string{shared::StopReason(build_control)
+                                    .value_or("LEGGED_NO_PATH")}
+                  : std::string{},
+          };
+        });
+    if (!goal_field.ok()) {
+      LocalStageResult failure =
+          goal_field.reason_code == "LEGGED_NO_PATH"
+              ? LocalStageResult{.status = LocalPlanStatus::kNoPath,
+                                 .reason_code = "LEGGED_NO_PATH"}
+              : LocalControlledFailure(goal_field.reason_code);
+      failure.snapshot_cache_hit = snapshot.cache_hit;
+      failure.projection_cache_hit = projection.cache_hit;
+      failure.legged_local.active = true;
+      return failure;
+    }
     legged::LeggedPlanResult result = legged::PlanLegged({
         .start = *state,
-        .goal_odom = goal_odom,
+        .goals_odom = goals_odom,
         .terrain = &terrain,
         .traversal = legged_projection.value,
+        .goal_distance_field = goal_field.value,
         .capability = capability,
         .control = control,
         .search = input.config.search,
@@ -423,11 +479,10 @@ using namespace std::chrono_literals;
         .status = result.status,
         .data = std::move(data),
         .reason_code = std::move(result.reason_code),
-        .selected_goal_index = result.ok()
-                                   ? std::optional<std::size_t>{0U}
-                                   : std::nullopt,
+        .selected_goal_index = result.selected_goal_index,
         .snapshot_cache_hit = snapshot.cache_hit,
         .projection_cache_hit = projection.cache_hit,
+        .goal_field_cache_hit = goal_field.cache_hit,
         .expanded_states = result.metrics.expanded_states,
         .best_cost = result.ok() ? std::optional<double>{result.cost}
                                  : std::nullopt,
@@ -435,6 +490,7 @@ using namespace std::chrono_literals;
     };
   }
 
+  const GoalRegion& goal_odom = goals_odom.goals_odom.front();
   const auto* capability = std::get_if<HopperCapability>(&input.capability);
   const auto* state = std::get_if<HopperState>(&input.current_state);
   if (capability == nullptr || state == nullptr) {

@@ -27,7 +27,6 @@ namespace {
 constexpr double kTolerance = 1.0e-9;
 constexpr double kPhysicalMatchTolerance = 1.0e-6;
 constexpr double kMinimumEdgeCost = 1.0e-6;
-constexpr std::size_t kMaximumSearchStates = 131072U;
 constexpr std::array<double, 5U> kCostWeights{1.0, 1.0, 1.0, 1.0, 1.0};
 
 enum class LeggedMotionMode : std::uint8_t {
@@ -103,6 +102,18 @@ struct SearchState final {
   LeggedPose pose;
   LeggedMotionMode mode{LeggedMotionMode::kStart};
   bool narrow{};
+  std::optional<std::size_t> goal_index;
+};
+
+struct LeggedGoal final {
+  PointGoal point;
+  std::optional<double> yaw_rad;
+  double yaw_tolerance_rad{};
+};
+
+struct GoalMatches final {
+  std::array<std::size_t, 32U> indices{};
+  std::size_t size{};
 };
 
 struct EvaluatedEdge final {
@@ -266,13 +277,20 @@ struct TransitionRecord final {
 
 [[nodiscard]] StateKey KeyFor(
     const LeggedPose& pose, const LeggedMotionMode mode, const bool narrow,
-    const shared::LocalTerrainProjection& terrain) noexcept {
+    const shared::LocalTerrainProjection& terrain, const Vec2 origin,
+    const double origin_yaw) noexcept {
   const double resolution = terrain.map->resolution_m() *
       (narrow ? 0.5 : 1.0);
+  const double delta_x = pose.position_m.x - origin.x;
+  const double delta_y = pose.position_m.y - origin.y;
+  const double cosine = std::cos(origin_yaw);
+  const double sine = std::sin(origin_yaw);
+  const double local_x = cosine * delta_x + sine * delta_y;
+  const double local_y = -sine * delta_x + cosine * delta_y;
   return StateKey{
-      .x = Quantize(pose.position_m.x, terrain.map->origin_m().x, resolution),
-      .y = Quantize(pose.position_m.y, terrain.map->origin_m().y, resolution),
-      .yaw = YawBin(pose.yaw_rad, narrow ? 128U : 64U),
+      .x = Quantize(local_x, 0.0, resolution),
+      .y = Quantize(local_y, 0.0, resolution),
+      .yaw = YawBin(pose.yaw_rad - origin_yaw, narrow ? 128U : 64U),
       .mode = mode,
       .narrow = narrow,
   };
@@ -723,22 +741,21 @@ void AppendUnique(std::vector<shared::GridCell>& cells,
 class LeggedSearchGraph final {
  public:
   LeggedSearchGraph(const LeggedPlanRequest& request, const LeggedPose start,
-                    const PointGoal goal_region,
-                    const std::optional<double> goal_yaw)
+                    std::vector<LeggedGoal> goals)
       : request_(request), terrain_(*request.terrain),
         traversal_(*request.traversal),
-        capability_(*request.capability), goal_region_(goal_region),
-        goal_yaw_(goal_yaw), cost_scales_(CostScales(capability_)) {
+        capability_(*request.capability), goals_(std::move(goals)),
+        lattice_origin_{.x = start.position_m.x, .y = start.position_m.y},
+        lattice_origin_yaw_(start.yaw_rad),
+        cost_scales_(CostScales(capability_)) {
     const std::size_t cell_count = terrain_.map->cell_count();
-    assignable_state_limit_ = kMaximumSearchStates;
-    goal_state_ = assignable_state_limit_;
-    state_count_ = assignable_state_limit_ + 1U;
-    const std::size_t reserve_hint =
-        cell_count > assignable_state_limit_ / 2U
-            ? assignable_state_limit_
-            : cell_count * 2U + 1U;
-    states_.reserve(std::min(assignable_state_limit_, reserve_hint));
+    const std::size_t reserve_hint = cell_count >
+            (std::numeric_limits<std::size_t>::max() - goals_.size()) / 2U
+        ? cell_count
+        : cell_count * 2U + goals_.size();
+    states_.reserve(reserve_hint);
     state_ids_.reserve(states_.capacity());
+    goal_states_.resize(goals_.size());
     ordered_primitives_.resize(capability_.motion_primitives.size());
     for (std::size_t index = 0U; index < ordered_primitives_.size(); ++index) {
       ordered_primitives_[index] = index;
@@ -760,11 +777,7 @@ class LeggedSearchGraph final {
   }
 
   [[nodiscard]] std::size_t state_count() const noexcept {
-    return state_count_;
-  }
-
-  [[nodiscard]] bool resource_exhausted() const noexcept {
-    return resource_exhausted_;
+    return std::numeric_limits<std::size_t>::max();
   }
 
   [[nodiscard]] bool used_narrow_resolution() const noexcept {
@@ -826,9 +839,14 @@ class LeggedSearchGraph final {
     return &found->second;
   }
 
+  [[nodiscard]] std::optional<std::size_t> GoalIndexForState(
+      const std::size_t state) const noexcept {
+    return state < states_.size() ? states_[state].goal_index : std::nullopt;
+  }
+
   void Expand(const std::size_t state,
               std::vector<shared::GraphEdge>& edges) {
-    if (state >= states_.size() || state == goal_state_ ||
+    if (state >= states_.size() || states_[state].goal_index.has_value() ||
         request_.control.canceled() || request_.control.expired()) {
       return;
     }
@@ -844,7 +862,8 @@ class LeggedSearchGraph final {
       if (!target_pose.has_value()) {
         continue;
       }
-      if (PoseSatisfiesGoal(*target_pose)) {
+      const GoalMatches reached_goals = MatchingGoalIndices(*target_pose);
+      if (reached_goals.size != 0U) {
         const EdgeKey key{.source = state, .primitive = primitive_index};
         const EvaluatedEdge& evaluated = CachedEvaluation(
             key, [&] {
@@ -859,19 +878,11 @@ class LeggedSearchGraph final {
         if (!evaluated.valid) {
           continue;
         }
-        const std::size_t stable_index =
-            StableEdgeIndex(state, primitive_index);
-        transitions_[stable_index] = TransitionRecord{
-            .key = key,
-            .transition = evaluated.transition,
-            .mode_changed = evaluated.mode_changed,
-            .cost_components = evaluated.cost_components,
-        };
-        edges.push_back(shared::GraphEdge{
-            .target_state = goal_state_,
-            .cost = evaluated.cost,
-            .stable_index = stable_index,
-        });
+        for (std::size_t match = 0U; match < reached_goals.size; ++match) {
+          const std::size_t goal_index = reached_goals.indices[match];
+          AppendTerminalEdge(state, primitive_index, goal_index, key,
+                             evaluated, edges);
+        }
         continue;
       }
       const StateKey target_key = QuantizeState(*target_pose, target_mode);
@@ -894,43 +905,71 @@ class LeggedSearchGraph final {
       if (!evaluated.valid) {
         continue;
       }
-      const std::size_t stable_index =
-          StableEdgeIndex(state, primitive_index);
-      const std::size_t edge_target = PoseSatisfiesGoal(canonical_target)
-          ? goal_state_
-          : *target_state;
-      transitions_[stable_index] = TransitionRecord{
-          .key = key,
-          .transition = evaluated.transition,
-          .mode_changed = evaluated.mode_changed,
-          .cost_components = evaluated.cost_components,
-      };
-      edges.push_back(shared::GraphEdge{
-          .target_state = edge_target,
-          .cost = evaluated.cost,
-          .stable_index = stable_index,
-      });
+      const GoalMatches canonical_goals =
+          MatchingGoalIndices(canonical_target);
+      if (canonical_goals.size != 0U) {
+        for (std::size_t match = 0U; match < canonical_goals.size; ++match) {
+          const std::size_t goal_index = canonical_goals.indices[match];
+          AppendTerminalEdge(state, primitive_index, goal_index, key,
+                             evaluated, edges);
+        }
+      } else {
+        const std::size_t stable_index =
+            StableEdgeIndex(state, primitive_index);
+        transitions_[stable_index] = TransitionRecord{
+            .key = key,
+            .transition = evaluated.transition,
+            .mode_changed = evaluated.mode_changed,
+            .cost_components = evaluated.cost_components,
+        };
+        edges.push_back(shared::GraphEdge{
+            .target_state = *target_state,
+            .cost = evaluated.cost,
+            .stable_index = stable_index,
+        });
+      }
     }
-    AppendExactGoalEdge(state, source, edges);
+    AppendExactGoalEdges(state, source, edges);
   }
 
   [[nodiscard]] double Heuristic(const std::size_t state) const noexcept {
-    if (state == goal_state_) {
+    if (state < states_.size() && states_[state].goal_index.has_value()) {
       return 0.0;
     }
     if (state >= states_.size()) {
       return 0.0;
     }
-    return std::max(
-        0.0,
-        std::hypot(
-            goal_region_.position_m.x - states_[state].pose.position_m.x,
-            goal_region_.position_m.y - states_[state].pose.position_m.y) -
-            goal_region_.tolerance_m);
+    double best = std::numeric_limits<double>::infinity();
+    for (const LeggedGoal& goal : goals_) {
+      best = std::min(
+          best,
+          std::max(0.0,
+                   std::hypot(goal.point.position_m.x -
+                                  states_[state].pose.position_m.x,
+                              goal.point.position_m.y -
+                                  states_[state].pose.position_m.y) -
+                       goal.point.tolerance_m));
+    }
+    return best;
+  }
+
+  [[nodiscard]] double Guidance(const std::size_t state) const noexcept {
+    if (state >= states_.size() || states_[state].goal_index.has_value()) {
+      return 0.0;
+    }
+    const auto cell = terrain_.map->PositionToCell(
+        {.x = states_[state].pose.position_m.x,
+         .y = states_[state].pose.position_m.y});
+    if (!cell.has_value()) {
+      return 0.0;
+    }
+    const double distance = request_.goal_distance_field->distance_m[
+        terrain_.map->Index(*cell)];
+    return std::isfinite(distance) ? distance : 0.0;
   }
 
   [[nodiscard]] bool IsGoal(const std::size_t state) const noexcept {
-    return state == goal_state_;
+    return state < states_.size() && states_[state].goal_index.has_value();
   }
 
  private:
@@ -959,7 +998,8 @@ class LeggedSearchGraph final {
         {.x = pose.position_m.x, .y = pose.position_m.y},
         terrain_, capability_);
     used_narrow_resolution_ = used_narrow_resolution_ || narrow;
-    return KeyFor(pose, mode, narrow, terrain_);
+    return KeyFor(pose, mode, narrow, terrain_, lattice_origin_,
+                  lattice_origin_yaw_);
   }
 
   [[nodiscard]] std::optional<std::size_t> Intern(
@@ -976,10 +1016,6 @@ class LeggedSearchGraph final {
         return std::nullopt;
       }
       return found->second;
-    }
-    if (states_.size() >= assignable_state_limit_) {
-      resource_exhausted_ = true;
-      return std::nullopt;
     }
     const std::size_t state = states_.size();
     states_.push_back(SearchState{
@@ -1020,79 +1056,139 @@ class LeggedSearchGraph final {
   }
 
   [[nodiscard]] bool PoseSatisfiesGoal(
-      const LeggedPose& pose) const noexcept {
+      const LeggedPose& pose, const std::size_t goal_index) const noexcept {
+    const LeggedGoal& goal = goals_[goal_index];
     return std::hypot(
-               pose.position_m.x - goal_region_.position_m.x,
-               pose.position_m.y - goal_region_.position_m.y) <=
-            goal_region_.tolerance_m + kTolerance &&
-        (!goal_yaw_.has_value() ||
-         std::abs(ShortestYawDelta(pose.yaw_rad, *goal_yaw_)) <=
-             request_.goal_odom.yaw_tolerance_rad + kTolerance);
+               pose.position_m.x - goal.point.position_m.x,
+               pose.position_m.y - goal.point.position_m.y) <=
+            goal.point.tolerance_m + kTolerance &&
+        (!goal.yaw_rad.has_value() ||
+         std::abs(ShortestYawDelta(pose.yaw_rad, *goal.yaw_rad)) <=
+             goal.yaw_tolerance_rad + kTolerance);
   }
 
-  void AppendExactGoalEdge(const std::size_t state,
-                           const SearchState& source,
-                           std::vector<shared::GraphEdge>& edges) {
-    for (const std::size_t primitive_index : ordered_primitives_) {
-      const LeggedBodyPrimitive& primitive =
-          capability_.motion_primitives[primitive_index];
-      const auto scale = ConnectorScale(
-          source.pose, primitive, goal_region_, goal_yaw_,
-          request_.goal_odom.yaw_tolerance_rad);
-      if (!scale.has_value()) {
-        continue;
+  [[nodiscard]] GoalMatches MatchingGoalIndices(
+      const LeggedPose& pose) const {
+    GoalMatches result;
+    for (std::size_t goal_index = 0U; goal_index < goals_.size();
+         ++goal_index) {
+      if (PoseSatisfiesGoal(pose, goal_index)) {
+        result.indices[result.size++] = goal_index;
       }
-      const double cosine = std::cos(source.pose.yaw_rad);
-      const double sine = std::sin(source.pose.yaw_rad);
-      LeggedPose target{
-          .position_m = {
-              .x = source.pose.position_m.x + *scale *
-                  (cosine * primitive.body_frame_displacement_m.x -
-                   sine * primitive.body_frame_displacement_m.y),
-              .y = source.pose.position_m.y + *scale *
-                  (sine * primitive.body_frame_displacement_m.x +
-                   cosine * primitive.body_frame_displacement_m.y),
-              .z = source.pose.position_m.z,
-          },
-          .yaw_rad = NormalizeYaw(
-              source.pose.yaw_rad + *scale * primitive.yaw_change_rad),
-      };
-      target.position_m.z = BodyHeightAt(
-          {.x = target.position_m.x, .y = target.position_m.y},
-          terrain_, capability_);
-      if (!PoseSatisfiesGoal(target)) {
-        continue;
+    }
+    return result;
+  }
+
+  [[nodiscard]] std::size_t TerminalState(
+      const std::size_t goal_index, const LeggedPose pose,
+      const LeggedMotionMode mode) {
+    if (goal_states_[goal_index].has_value()) {
+      return *goal_states_[goal_index];
+    }
+    const std::size_t state = states_.size();
+    states_.push_back(SearchState{
+        .pose = pose,
+        .mode = mode,
+        .narrow = false,
+        .goal_index = goal_index,
+    });
+    goal_states_[goal_index] = state;
+    return state;
+  }
+
+  void AppendTerminalEdge(
+      const std::size_t source_state, const std::size_t primitive_index,
+      const std::size_t goal_index, const EdgeKey key,
+      const EvaluatedEdge& evaluated, std::vector<shared::GraphEdge>& edges) {
+    const std::size_t terminal_slot =
+        capability_.motion_primitives.size() * (1U + goal_index) +
+        primitive_index;
+    const std::size_t stable_index =
+        StableEdgeIndex(source_state, terminal_slot);
+    transitions_[stable_index] = TransitionRecord{
+        .key = key,
+        .transition = evaluated.transition,
+        .mode_changed = evaluated.mode_changed,
+        .cost_components = evaluated.cost_components,
+    };
+    edges.push_back(shared::GraphEdge{
+        .target_state = TerminalState(
+            goal_index, evaluated.transition.target_pose,
+            ModeFor(evaluated.transition.primitive_kind)),
+        .cost = evaluated.cost,
+        .stable_index = stable_index,
+    });
+  }
+
+  void AppendExactGoalEdges(const std::size_t state,
+                            const SearchState& source,
+                            std::vector<shared::GraphEdge>& edges) {
+    for (std::size_t goal_index = 0U; goal_index < goals_.size();
+         ++goal_index) {
+      const LeggedGoal& goal = goals_[goal_index];
+      for (const std::size_t primitive_index : ordered_primitives_) {
+        const LeggedBodyPrimitive& primitive =
+            capability_.motion_primitives[primitive_index];
+        const auto scale = ConnectorScale(
+            source.pose, primitive, goal.point, goal.yaw_rad,
+            goal.yaw_tolerance_rad);
+        if (!scale.has_value()) {
+          continue;
+        }
+        const double cosine = std::cos(source.pose.yaw_rad);
+        const double sine = std::sin(source.pose.yaw_rad);
+        LeggedPose target{
+            .position_m = {
+                .x = source.pose.position_m.x + *scale *
+                    (cosine * primitive.body_frame_displacement_m.x -
+                     sine * primitive.body_frame_displacement_m.y),
+                .y = source.pose.position_m.y + *scale *
+                    (sine * primitive.body_frame_displacement_m.x +
+                     cosine * primitive.body_frame_displacement_m.y),
+                .z = source.pose.position_m.z,
+            },
+            .yaw_rad = NormalizeYaw(
+                source.pose.yaw_rad + *scale * primitive.yaw_change_rad),
+        };
+        target.position_m.z = BodyHeightAt(
+            {.x = target.position_m.x, .y = target.position_m.y},
+            terrain_, capability_);
+        if (!PoseSatisfiesGoal(target, goal_index)) {
+          continue;
+        }
+        const std::size_t connector_slot =
+            capability_.motion_primitives.size() *
+                (1U + goals_.size() + goal_index) +
+            primitive_index;
+        const LeggedMotionMode target_mode = ModeFor(primitive.kind);
+        const EdgeKey key{.source = state, .primitive = connector_slot};
+        const EvaluatedEdge& evaluated = CachedEvaluation(
+            key, [&] {
+              EvaluatedEdge value = SweepBody(
+                  primitive_index, primitive.kind, source.pose, target,
+                  source.mode, target_mode, terrain_, traversal_, capability_,
+                  cost_scales_, request_.control);
+              maximum_sweep_step_ = std::max(
+                  maximum_sweep_step_, value.maximum_translation_step_m);
+              return value;
+            });
+        if (!evaluated.valid) {
+          continue;
+        }
+        const std::size_t stable_index =
+            StableEdgeIndex(state, connector_slot);
+        transitions_[stable_index] = TransitionRecord{
+            .key = key,
+            .transition = evaluated.transition,
+            .mode_changed = evaluated.mode_changed,
+            .cost_components = evaluated.cost_components,
+        };
+        edges.push_back(shared::GraphEdge{
+            .target_state = TerminalState(goal_index, target, target_mode),
+            .cost = evaluated.cost,
+            .stable_index = stable_index,
+        });
       }
-      const std::size_t connector_slot =
-          capability_.motion_primitives.size() + primitive_index;
-      const LeggedMotionMode target_mode = ModeFor(primitive.kind);
-      const EdgeKey key{.source = state, .primitive = connector_slot};
-      const EvaluatedEdge& evaluated = CachedEvaluation(
-          key, [&] {
-            EvaluatedEdge value = SweepBody(
-                primitive_index, primitive.kind, source.pose, target,
-                source.mode, target_mode, terrain_, traversal_, capability_,
-                cost_scales_, request_.control);
-            maximum_sweep_step_ = std::max(
-                maximum_sweep_step_, value.maximum_translation_step_m);
-            return value;
-          });
-      if (!evaluated.valid) {
-        continue;
-      }
-      const std::size_t stable_index =
-          StableEdgeIndex(state, connector_slot);
-      transitions_[stable_index] = TransitionRecord{
-          .key = key,
-          .transition = evaluated.transition,
-          .mode_changed = evaluated.mode_changed,
-          .cost_components = evaluated.cost_components,
-      };
-      edges.push_back(shared::GraphEdge{
-          .target_state = goal_state_,
-          .cost = evaluated.cost,
-          .stable_index = stable_index,
-      });
     }
   }
 
@@ -1115,13 +1211,10 @@ class LeggedSearchGraph final {
   const shared::LocalTerrainProjection& terrain_;
   const LeggedTraversalProjection& traversal_;
   const LeggedCapability& capability_;
-  PointGoal goal_region_;
-  std::optional<double> goal_yaw_;
+  std::vector<LeggedGoal> goals_;
+  Vec2 lattice_origin_;
+  double lattice_origin_yaw_{};
   std::array<double, 5U> cost_scales_;
-  std::size_t assignable_state_limit_{};
-  std::size_t goal_state_{};
-  std::size_t state_count_{};
-  bool resource_exhausted_{};
   bool used_narrow_resolution_{};
   std::size_t validation_requests_{};
   std::size_t maximum_edge_sweep_evaluations_{};
@@ -1133,6 +1226,7 @@ class LeggedSearchGraph final {
   double maximum_sweep_step_{};
   std::vector<std::size_t> ordered_primitives_;
   std::vector<SearchState> states_;
+  std::vector<std::optional<std::size_t>> goal_states_;
   std::unordered_map<StateKey, std::size_t, StateKeyHash> state_ids_;
   shared::EdgeValidationCache<EdgeKey, EvaluatedEdge, EdgeKeyHash>
       validation_cache_;
@@ -1150,38 +1244,73 @@ LeggedPlanResult PlanLegged(const LeggedPlanRequest& request) try {
   if (request.control.expired()) {
     return Failure(LocalPlanStatus::kTimedOut, "TIMEOUT");
   }
-  const auto* point = std::get_if<PointGoal>(&request.goal_odom.target);
   const auto start_yaw = YawFromQuaternion(request.start.body_pose.orientation);
-  const std::optional<double> goal_yaw =
-      request.goal_odom.yaw_rad.has_value() &&
-              std::isfinite(*request.goal_odom.yaw_rad)
-          ? std::optional<double>{NormalizeYaw(*request.goal_odom.yaw_rad)}
-          : std::nullopt;
   if (request.terrain == nullptr || request.traversal == nullptr ||
+      request.goal_distance_field == nullptr ||
       request.capability == nullptr ||
       request.traversal->terrain.get() != request.terrain ||
       !ValidTerrain(*request.terrain) ||
-      !ValidCapability(*request.capability) || point == nullptr ||
+      !ValidCapability(*request.capability) ||
       !Finite(request.start.body_pose) ||
-      !std::isfinite(point->position_m.x) ||
-      !std::isfinite(point->position_m.y) ||
-      !std::isfinite(point->tolerance_m) || point->tolerance_m < 0.0 ||
-      (request.goal_odom.yaw_rad.has_value() &&
-       !std::isfinite(*request.goal_odom.yaw_rad)) ||
-      !std::isfinite(request.goal_odom.yaw_tolerance_rad) ||
-      request.goal_odom.yaw_tolerance_rad < 0.0 ||
+      request.goals_odom.goals_odom.empty() ||
+      request.goals_odom.goals_odom.size() > 32U ||
+      (request.goals_odom.exact_final_goal &&
+       request.goals_odom.goals_odom.size() != 1U) ||
       !start_yaw.has_value()) {
     return Failure(LocalPlanStatus::kInvalidInput, "LEGGED_REQUEST_INVALID");
   }
   const shared::LocalTerrainProjection& terrain = *request.terrain;
   const LeggedCapability& capability = *request.capability;
-  const auto goal_cell = terrain.map->PositionToCell(
-      {.x = point->position_m.x, .y = point->position_m.y});
+  const std::size_t cell_count = terrain.map->cell_count();
+  if (request.goal_distance_field->distance_m.size() != cell_count ||
+      request.goal_distance_field->nearest_goal_index.size() != cell_count) {
+    return Failure(LocalPlanStatus::kInvalidInput, "LEGGED_REQUEST_INVALID");
+  }
+  std::vector<LeggedGoal> goals;
+  goals.reserve(request.goals_odom.goals_odom.size());
+  for (const GoalRegion& region : request.goals_odom.goals_odom) {
+    const auto* point = std::get_if<PointGoal>(&region.target);
+    if (point == nullptr || !std::isfinite(point->position_m.x) ||
+        !std::isfinite(point->position_m.y) ||
+        !std::isfinite(point->tolerance_m) || point->tolerance_m < 0.0 ||
+        (region.yaw_rad.has_value() && !std::isfinite(*region.yaw_rad)) ||
+        !std::isfinite(region.yaw_tolerance_rad) ||
+        region.yaw_tolerance_rad < 0.0 ||
+        (!request.goals_odom.exact_final_goal &&
+         region.yaw_rad.has_value()) ||
+        !terrain.map
+             ->PositionToCell(
+                 {.x = point->position_m.x, .y = point->position_m.y})
+             .has_value()) {
+      return Failure(LocalPlanStatus::kInvalidInput,
+                     "LEGGED_REQUEST_INVALID");
+    }
+    goals.push_back(LeggedGoal{
+        .point = *point,
+        .yaw_rad = region.yaw_rad.has_value()
+            ? std::optional<double>{NormalizeYaw(*region.yaw_rad)}
+            : std::nullopt,
+        .yaw_tolerance_rad = region.yaw_tolerance_rad,
+    });
+  }
+  const std::size_t invalid_goal_index =
+      std::numeric_limits<std::size_t>::max();
+  if (std::ranges::any_of(
+          request.goal_distance_field->nearest_goal_index,
+          [&](const std::size_t index) {
+            return index != invalid_goal_index && index >= goals.size();
+          })) {
+    return Failure(LocalPlanStatus::kInvalidInput, "LEGGED_REQUEST_INVALID");
+  }
   const auto start_cell = terrain.map->PositionToCell(
       {.x = request.start.body_pose.position_m.x,
        .y = request.start.body_pose.position_m.y});
-  if (!goal_cell.has_value() || !start_cell.has_value()) {
+  if (!start_cell.has_value()) {
     return Failure(LocalPlanStatus::kNoPath, "LEGGED_GOAL_OUTSIDE_LOCAL_MAP");
+  }
+  if (!std::isfinite(request.goal_distance_field->distance_m[
+          terrain.map->Index(*start_cell)])) {
+    return Failure(LocalPlanStatus::kNoPath, "LEGGED_NO_PATH");
   }
 
   LeggedPose start{
@@ -1189,14 +1318,22 @@ LeggedPlanResult PlanLegged(const LeggedPlanRequest& request) try {
       .yaw_rad = *start_yaw,
   };
 
-  const bool position_satisfied = std::hypot(
-      start.position_m.x - point->position_m.x,
-      start.position_m.y - point->position_m.y) <=
-      point->tolerance_m + kTolerance;
-  const bool yaw_satisfied = !request.goal_odom.yaw_rad.has_value() ||
-      std::abs(ShortestYawDelta(start.yaw_rad, *goal_yaw)) <=
-          request.goal_odom.yaw_tolerance_rad + kTolerance;
-  if (position_satisfied && yaw_satisfied) {
+  std::optional<std::size_t> satisfied_goal;
+  for (std::size_t goal_index = 0U; goal_index < goals.size(); ++goal_index) {
+    const LeggedGoal& goal = goals[goal_index];
+    const bool position_satisfied = std::hypot(
+        start.position_m.x - goal.point.position_m.x,
+        start.position_m.y - goal.point.position_m.y) <=
+        goal.point.tolerance_m + kTolerance;
+    const bool yaw_satisfied = !goal.yaw_rad.has_value() ||
+        std::abs(ShortestYawDelta(start.yaw_rad, *goal.yaw_rad)) <=
+            goal.yaw_tolerance_rad + kTolerance;
+    if (position_satisfied && yaw_satisfied) {
+      satisfied_goal = goal_index;
+      break;
+    }
+  }
+  if (satisfied_goal.has_value()) {
     const EvaluatedEdge pose = SweepBody(
         capability.motion_primitives.size() + 1U,
         LeggedPrimitiveKind::kForward, start, start,
@@ -1220,6 +1357,7 @@ LeggedPlanResult PlanLegged(const LeggedPlanRequest& request) try {
         .reason_code = "LEGGED_PLAN_SOLVED",
         .trajectory = {},
         .cost = 0.0,
+        .selected_goal_index = satisfied_goal,
         .metrics = LocalPlanMetrics{
             .expanded_states = 0U,
             .edge_validation_evaluations = 1U,
@@ -1236,7 +1374,7 @@ LeggedPlanResult PlanLegged(const LeggedPlanRequest& request) try {
     };
   }
 
-  LeggedSearchGraph graph{request, start, *point, goal_yaw};
+  LeggedSearchGraph graph{request, start, std::move(goals)};
   shared::anytime::AraStarProblem problem{
       .state_count = graph.state_count(),
       .start_state = 0U,
@@ -1247,6 +1385,9 @@ LeggedPlanResult PlanLegged(const LeggedPlanRequest& request) try {
       },
       .heuristic = [&](const std::size_t state) {
         return graph.Heuristic(state);
+      },
+      .guidance = [&](const std::size_t state) {
+        return graph.Guidance(state);
       },
       .is_goal = [&](const std::size_t state) {
         return graph.IsGoal(state);
@@ -1288,11 +1429,7 @@ LeggedPlanResult PlanLegged(const LeggedPlanRequest& request) try {
     case shared::anytime::AraStarStatus::kTimedOut:
       return make_result(LocalPlanStatus::kTimedOut, "TIMEOUT");
     case shared::anytime::AraStarStatus::kNoPath:
-      return make_result(
-          graph.resource_exhausted() ? LocalPlanStatus::kPlannerError
-                                     : LocalPlanStatus::kNoPath,
-          graph.resource_exhausted() ? "LEGGED_SEARCH_CAPACITY_EXHAUSTED"
-                                     : "LEGGED_NO_PATH");
+      return make_result(LocalPlanStatus::kNoPath, "LEGGED_NO_PATH");
     case shared::anytime::AraStarStatus::kInvalidProblem:
       return make_result(LocalPlanStatus::kInvalidInput, search.reason_code);
     case shared::anytime::AraStarStatus::kResourceExhausted:
@@ -1322,6 +1459,11 @@ LeggedPlanResult PlanLegged(const LeggedPlanRequest& request) try {
   }
   LeggedPlanResult result = make_result(
       LocalPlanStatus::kSolved, "LEGGED_PLAN_SOLVED");
+  result.selected_goal_index = graph.GoalIndexForState(best.states.back());
+  if (!result.selected_goal_index.has_value()) {
+    return make_result(LocalPlanStatus::kPlannerError,
+                       "LEGGED_SEARCH_RESULT_INVALID");
+  }
   result.cost = best.cost;
   result.trajectory.reserve(best.stable_edge_indices.size());
   if (const auto stopped = control_failure(); stopped.has_value()) {

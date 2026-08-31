@@ -4,7 +4,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <numbers>
+#include <span>
 #include <stdexcept>
 #include <stop_token>
 #include <utility>
@@ -19,6 +21,7 @@
 #include "legged/anytime_legged_planner.hpp"
 #include "lunar_pure_planner_core/planner.hpp"
 #include "shared/active_planner_cache.hpp"
+#include "shared/goal_distance_field.hpp"
 #include "shared/local_terrain_projection.hpp"
 #include "shared/map_snapshot.hpp"
 
@@ -1247,9 +1250,12 @@ TEST(DualModePlanner,
   EXPECT_TRUE(warm.global_route_cache_hit);
   EXPECT_TRUE(cold.legged_local.active);
   EXPECT_FALSE(cold.legged_local.traversal_projection_cache_hit);
+  EXPECT_FALSE(cold.goal_field_cache_hit);
   EXPECT_GT(cold.legged_local.fast_path_accepts, 0U);
   EXPECT_TRUE(warm.legged_local.active);
   EXPECT_TRUE(warm.legged_local.traversal_projection_cache_hit);
+  EXPECT_TRUE(warm.goal_field_cache_hit);
+  EXPECT_TRUE(warm.selected_goal_index.has_value());
   EXPECT_GT(warm.legged_local.fast_path_accepts, 0U);
 
   PlanningRequest changed = input;
@@ -1259,6 +1265,7 @@ TEST(DualModePlanner,
       << capability_changed.reason_code;
   EXPECT_FALSE(
       capability_changed.legged_local.traversal_projection_cache_hit);
+  EXPECT_FALSE(capability_changed.goal_field_cache_hit);
 }
 
 TEST(DualModePlanner, OuterHardDeadlineRetainsLeggedLocalWorkDiagnostics) {
@@ -1718,11 +1725,31 @@ TEST(DualModePlanner,
   const auto traversal = legged::BuildLeggedTraversalProjection(
       terrain, capability, backend_control);
   ASSERT_TRUE(traversal.ok()) << traversal.reason_code;
+  std::vector<std::uint8_t> feasible(terrain->map->cell_count(), 0U);
+  for (std::size_t index = 0U; index < feasible.size(); ++index) {
+    feasible[index] = static_cast<std::uint8_t>(
+      traversal.value->hard_feasible[index] != 0U &&
+      traversal.value->step_feasible[index] != 0U);
+  }
+  const auto * goal = std::get_if<PointGoal>(&baseline.goal_map.target);
+  ASSERT_NE(goal, nullptr);
+  const auto goal_cell = terrain->map->PositionToCell(
+    {.x = goal->position_m.x, .y = goal->position_m.y});
+  ASSERT_TRUE(goal_cell.has_value());
+  const auto goal_field = shared::BuildGoalDistanceField(
+      *terrain->map, feasible,
+      std::span<const shared::GridCell>{&*goal_cell, 1U}, backend_control);
+  ASSERT_TRUE(goal_field.has_value());
   const legged::LeggedPlanResult backend_result = legged::PlanLegged({
       .start = state,
-      .goal_odom = baseline.goal_map,
+      .goals_odom = LocalGoalSet{
+          .goals_odom = {baseline.goal_map},
+          .exact_final_goal = true,
+      },
       .terrain = terrain.get(),
       .traversal = traversal.value,
+      .goal_distance_field =
+          std::make_shared<const shared::GoalDistanceField>(*goal_field),
       .capability = &capability,
       .control = backend_control,
       .search = baseline.config.search,
