@@ -472,3 +472,47 @@ legged_global_mode = grid_traversability_v1 | legacy_occupancy
 - 首版动作原语完整扫掠掩码；
 - 状态键、启发函数、航向格数或动作原语集合调整；
 - 自动 legacy fallback。
+
+## 2026-08-31 足式局部边认证实施证据
+
+本次实现位于独立分支 `feat/legged-local-edge-evaluation`，对应提交：
+
+- `a2dcb03`：从现有局部 occupancy/elevation 投影构建并缓存
+  `LeggedTraversalProjection`；
+- `ab66b4d`：在生产 `PlanLegged` 中加入保守 swept AABB 快速接受与现有定向矩形
+  精确回退；
+- `733ea71`：向规划结果和 ROS 请求诊断传播投影缓存、快/慢分支与超时工作量统计。
+
+本机 ROS 2 Jazzy、Release 构建的生产形态局部场景为：`320 x 320` 栅格、`0.2 m`
+分辨率（`64 m`）、`3.0 m` 局部目标、`1.03242 rad` 起点 yaw、冻结的
+`0.68 x 0.33 m` 机身、`0.3 m` 净空、`0.5 m` 台阶、`0.3 m` 沟宽和六个
+`0.2 m` 动作原语。单次结果为：
+
+```text
+local_status                   kSolved
+reason_code                    LEGGED_PLAN_SOLVED
+local_search_elapsed_ms        23.460992
+expanded_states                6227
+fast_path_accepts              14925
+exact_sweep_fallbacks          0
+exact_sweep_cell_checks        0
+whole_gtest_elapsed_ms         50
+```
+
+这组数据证明开阔地形已跳过密集定向机身扫掠，并在本机达到 `local_search < 1 s`；
+它不代表障碍场景总是走快速分支。单元测试另覆盖 swept AABB 含危险格时进入精确
+回退且定向矩形不相交仍可通过，以及坡度、台阶、狭窄通道、取消和超时语义。
+
+同一 Release 构建下的验证结果：
+
+```text
+lunar_pure_planner_core CTest   22/22 passed, 48.42 s, serial
+lunar_pure_planner_ros CTest    18/18 passed, 48.05 s, serial
+repository contract pytest      6/6 passed, 0.02 s
+git diff --check                passed
+```
+
+证据边界：本次未重新运行交互 RViz 场景，`RViz = NOT_RUN`；
+`Humble = NOT_RUN`、`Orin = NOT_RUN`、`DDS = NOT_RUN`、`rosbag = NOT_RUN`、
+`vehicle = NOT_RUN`。本机未安装 `clang-format`，自动格式化检查为 `NOT_RUN`，但
+源码已通过 Release 编译、全部受影响包测试和差异空白检查。

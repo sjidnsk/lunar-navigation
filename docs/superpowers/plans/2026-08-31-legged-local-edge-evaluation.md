@@ -140,7 +140,7 @@
 
 **Interfaces:**
 - Consumes: `LeggedTraversalProjection::AllCellsTraversable(...)` and its precomputed arrays.
-- Produces: `LeggedPlanRequest::traversal`, plus `LeggedPlanResult::fast_path_accepts`, `exact_sweep_fallbacks`, and `exact_sweep_cell_checks`.
+- Produces: shared `LeggedPlanRequest::traversal`, plus `LeggedPlanResult::fast_path_accepts`, `exact_sweep_fallbacks`, and `exact_sweep_cell_checks`.
 - Preserves: existing `sweep_cell_checks` as the exact oriented-cell intersection counter for compatibility with current tests.
 
 - [ ] **Step 1: Write fast-path and fallback RED tests**

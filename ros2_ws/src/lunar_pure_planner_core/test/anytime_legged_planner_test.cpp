@@ -523,6 +523,18 @@ TEST(AnytimeLeggedPlanner,
   const LeggedPlanResult result = PlanLegged(request);
 
   const auto elapsed = std::chrono::steady_clock::now() - started;
+  RecordProperty(
+      "local_search_elapsed_ms",
+      std::to_string(
+          std::chrono::duration<double, std::milli>(elapsed).count()));
+  RecordProperty("expanded_states",
+                 std::to_string(result.metrics.expanded_states));
+  RecordProperty("fast_path_accepts",
+                 std::to_string(result.fast_path_accepts));
+  RecordProperty("exact_sweep_fallbacks",
+                 std::to_string(result.exact_sweep_fallbacks));
+  RecordProperty("exact_sweep_cell_checks",
+                 std::to_string(result.exact_sweep_cell_checks));
   ASSERT_TRUE(result.ok()) << result.reason_code;
   EXPECT_GT(result.metrics.expanded_states, 0U);
   EXPECT_GT(result.fast_path_accepts, 0U);
