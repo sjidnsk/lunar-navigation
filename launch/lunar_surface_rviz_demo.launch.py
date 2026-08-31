@@ -35,6 +35,7 @@ def generate_launch_description() -> LaunchDescription:
         "demo_delivery_protocol_enabled": True,
         "demo_map_ack_topic": "/lunar_demo/map_ack",
         "demo_plan_segment_topic": "/lunar_demo/plan_segment",
+        "demo_map_ack_timeout_ms": 10000,
         "rolling_horizon_m": 12.0,
         "rolling_replan_distance_m": 4.0,
     }

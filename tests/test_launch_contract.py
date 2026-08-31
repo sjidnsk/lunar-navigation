@@ -41,6 +41,7 @@ SERVER_SEAM_PATH = SERVER_SOURCE_PATH.with_name(
     "pure_plan_motion_server_test_seam.hpp"
 )
 DEMO_SOURCE_PATH = SERVER_SOURCE_PATH.with_name("lunar_surface_demo_node.cpp")
+REPORTER_SOURCE_PATH = SERVER_SOURCE_PATH.with_name("lunar_surface_reporter.cpp")
 
 EXPECTED_TOPICS = {
     "global_map_topic": "/Car/T3/mapping/global_overview",
@@ -408,6 +409,7 @@ def test_delivery_protocol_is_explicitly_isolated_to_the_surface_demo_launch() -
     assert demo_parameters["demo_plan_segment_topic"] == "/lunar_demo/plan_segment"
     assert demo_parameters["rolling_horizon_m"] == 12.0
     assert demo_parameters["rolling_replan_distance_m"] == 4.0
+    assert demo_parameters["demo_map_ack_timeout_ms"] == 10000
 
     nodes = _node_calls(demo_tree)
     demo_node = next(
@@ -455,6 +457,16 @@ def test_demo_republishes_tokenized_static_inputs_until_first_map_ack() -> None:
     assert "!static_inputs_acknowledged_" in source
     assert "!delivery_protocol_enabled_ && static_delivery_count_ < 12U" in source
     assert source.count("protocol_static_delivery") >= 3
+
+
+def test_demo_reporter_measures_the_authorized_executable_segment() -> None:
+    """The wheel preview is global and must not be reported as local execution."""
+    source = REPORTER_SOURCE_PATH.read_text(encoding="utf-8")
+    assert "DemoPlanSegment::EXECUTE" in source
+    assert "message->executable_path" in source
+    assert '"/lunar_demo/plan_segment"' in source
+    assert '"/lunar_demo/wheeled_path"' not in source
+    assert '"/lunar_demo/legged_path"' not in source
 
 
 def test_cmake_installs_the_single_top_level_config_and_launch_sources() -> None:

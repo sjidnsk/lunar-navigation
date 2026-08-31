@@ -10,6 +10,7 @@
 
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <lunar_planning_msgs/msg/demo_plan_segment.hpp>
 #include <lunar_planning_msgs/msg/timed_path.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -90,21 +91,16 @@ class LunarSurfaceReporterNode final : public rclcpp::Node {
             EmitReadySummary();
           }
         });
-    local_path_sub_ = create_subscription<nav_msgs::msg::Path>(
-        "/lunar_demo/wheeled_path", rclcpp::QoS{10}.reliable(),
-        [this](nav_msgs::msg::Path::ConstSharedPtr message) {
+    demo_plan_segment_sub_ = create_subscription<
+        lunar_planning_msgs::msg::DemoPlanSegment>(
+        "/lunar_demo/plan_segment", rclcpp::QoS{10}.reliable(),
+        [this](lunar_planning_msgs::msg::DemoPlanSegment::ConstSharedPtr message) {
           std::scoped_lock lock{mutex_};
-          if (active_goal_ && !message->poses.empty()) {
-            report_state_.SetLocalPath(*message);
-            EmitReadySummary();
-          }
-        });
-    legged_local_path_sub_ = create_subscription<nav_msgs::msg::Path>(
-        "/lunar_demo/legged_path", rclcpp::QoS{10}.reliable(),
-        [this](nav_msgs::msg::Path::ConstSharedPtr message) {
-          std::scoped_lock lock{mutex_};
-          if (active_goal_ && !message->poses.empty()) {
-            report_state_.SetLocalPath(*message);
+          if (active_goal_ &&
+              message->command ==
+                  lunar_planning_msgs::msg::DemoPlanSegment::EXECUTE &&
+              !message->executable_path.poses.empty()) {
+            report_state_.SetLocalPath(message->executable_path);
             EmitReadySummary();
           }
         });
@@ -176,8 +172,8 @@ class LunarSurfaceReporterNode final : public rclcpp::Node {
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_;
   rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr global_path_sub_;
   rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr legged_global_path_sub_;
-  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr local_path_sub_;
-  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr legged_local_path_sub_;
+  rclcpp::Subscription<lunar_planning_msgs::msg::DemoPlanSegment>::SharedPtr
+      demo_plan_segment_sub_;
   rclcpp::Subscription<lunar_planning_msgs::msg::TimedPath>::SharedPtr
       timed_path_sub_;
   rclcpp::Subscription<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr
