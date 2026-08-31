@@ -2020,6 +2020,14 @@ TEST(PurePlanMotionServer,
             request.current_state));
         EXPECT_TRUE(request.world.traversability_snapshot != nullptr);
         auto local = LocalSuccess(request, goals);
+        if (local_calls.load() == 1U && !goals.exact_final_goal) {
+          const auto& selected = std::get<lunar::pure_planning::PointGoal>(
+              goals.goals_odom[*local.selected_goal_index].target);
+          auto& trajectory =
+              std::get<lunar::pure_planning::TrajectoryReference>(*local.data);
+          trajectory.points.back().pose.position_m.x =
+              selected.position_m.x - (selected.tolerance_m + 0.5e-9);
+        }
         local.legged_local = {
             .active = true,
             .traversal_projection_cache_hit = local_calls.load() > 1U,

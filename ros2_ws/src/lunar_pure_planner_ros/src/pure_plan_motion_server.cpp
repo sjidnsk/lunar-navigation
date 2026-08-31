@@ -70,6 +70,7 @@ using namespace std::chrono_literals;
 
 constexpr std::string_view kPackageName{"lunar_pure_planner_ros"};
 constexpr double kLeggedRollingHorizonM = 3.0;
+constexpr double kLeggedGoalToleranceEpsilonM = 1.0e-9;
 
 struct RollingSurfaceParameters final {
   bool enabled{};
@@ -1351,7 +1352,8 @@ struct PurePlanMotionServer::Impl final {
           active != nullptr &&
           std::hypot(pose_map->position_m.x - active->position_m.x,
                      pose_map->position_m.y - active->position_m.y) <=
-              active->tolerance_m;
+              active->tolerance_m +
+                  (legged_rolling ? kLeggedGoalToleranceEpsilonM : 0.0);
       const bool local_changed =
           !legged_rolling &&
           snapshot.local_sequence != seen_local_sequence &&
