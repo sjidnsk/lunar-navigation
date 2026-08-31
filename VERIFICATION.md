@@ -15,15 +15,16 @@ AGX Orin 证据，因此不声明真实 `LAVA_TUBE`、`LUNAR_SURFACE` 端到端�
 - 12 m 前瞻内从前瞻端回退到投影点前一格的有界 portal 采样，诊断可用
   `rolling_failure_stage=PORTAL_SET` 区分局部门点失败；
 - 成功段之后最多两次局部 `NO_PATH`/`TIMEOUT` 恢复，恢复前清空参考、局部/全局 Path 和 TimedPath；
-- Demo 局部图按 `4 m` 位移更新，空 Path 停止旧路径，Reporter 使用诊断时的最新 odometry 起点。
+- Demo 在所需消费者发现后短暂重发启动局部图，稳定阶段按 `4 m` 位移更新；空 Path 停止旧路径，
+  Reporter 使用诊断时的最新 odometry 起点。
 
 当前证据状态：
 
 | 层级 | 状态 | 证据/边界 |
 | --- | --- | --- |
 | source / focused TDD | `PASS` | portal、参数边界、恢复/耗尽/超时、空路径 frame、4 m cadence、空路径停止和 reporter 起点均完成 RED→GREEN；server 55/55 |
-| local ROS 2 Jazzy package/full tests | `PENDING_FINAL_RECHECK` | 将在本变更完整构建后串行执行 core/ROS CTest 与根目录 pytest |
-| local Jazzy headless Demo | `PENDING_RUNTIME` | 将在隔离 `ROS_DOMAIN_ID` 下验证多次局部图刷新和正式成功三元组 |
+| local ROS 2 Jazzy package/full tests | `PASS_WITH_BASELINE_LIMITATION` | 根目录 pytest `350 passed, 1 skipped`；ROS 包 CTest `19/19`；core CTest `20/21`，唯一 750 m 随机场景在 segment 107 约 3003 ms 超时，修改前 detached baseline 在同一段以相同量级复现；受影响 portal 与 server 测试分别通过，server `55/55` |
+| local Jazzy headless Demo | `PASS_JAZZY_DEMO` | 隔离 domain 201、`start_rviz:=false auto_goal:=true`：连续获得至少 9 次正式成功三元组，Reporter 起点随 odometry 推进；发布空 `/lunar_demo/wheeled_path` 后 3 s 内 odometry 保持 `(-146.24224793079367, -9.426541380124155)` |
 | Ubuntu 22.04 / ROS 2 Humble | `NOT_RUN_THIS_CHANGE` | 下方历史证据不覆盖本次改动 |
 | Jetson AGX Orin / DDS / rosbag / controller / vehicle | `NOT_RUN` | 本次范围不包含目标机部署或车辆控制 |
 

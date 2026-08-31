@@ -21,8 +21,8 @@ Demo 输入节奏。
 - 已有成功滚动段之后，允许瞬时 `NO_PATH` 或 `TIMEOUT` 在严格上限内重新尝试；重试期间发布空轮式
   参考和空路径，禁止继续执行旧段。
 - 保留当前严格地图版本合同：输入版本变化后不直接发布基于旧局部图计算的路径。
-- Demo 只在车辆相对上一张局部图中心移动达到 4 m 时发布新局部 GridMap；odometry 和可视化仍按
-  现有 2 Hz 更新。
+- Demo 在所需消费者被发现后短暂发送 12 组启动局部图；稳定运行时只在车辆相对上一张局部图中心
+  移动达到 4 m 时发布新局部 GridMap。odometry 和车辆可视化仍按现有 2 Hz 更新。
 - 失败时输出带合法 frame 的空 Path；Reporter 的每个滚动周期显示该周期诊断到达时的最新车辆位置。
 - 保持 `/lunar_demo/*` 隔离，不启动控制器，不发布 `/Car/T5/Car_Cmd_Vel`。
 
@@ -51,7 +51,8 @@ RViz goal
 
 Demo vehicle
   -> odometry 2 Hz
-  -> 相对上一局部图中心移动 >= 4 m 时才重建并发布 local GridMap
+  -> 消费者发现后短暂发送启动 local GridMap
+  -> 启动交付结束后，相对上一局部图中心移动 >= 4 m 时才重建并发布 local GridMap
   -> 空 Path 立即清空 active_path 并停止推进
 ```
 
@@ -117,8 +118,9 @@ rolling_transient_retry_limit: 2
 
 - global map：保留当前启动阶段有限重发；
 - odometry、默认目标和显示数据：每个 timer 周期发布；
-- local GridMap 与 local OccupancyGrid 可视化：首次发布，之后仅当车辆相对上一局部图中心的平面距离
-  不小于 `4.0 m` 时成对发布；
+- local GridMap 与 local OccupancyGrid 可视化：等待规划器和局部可通行性消费者被发现后，以
+  2 Hz 短暂发送 12 组启动样本；启动交付完成后，仅当车辆相对上一局部图中心的平面距离不小于
+  `4.0 m` 时成对发布；
 - 设置新起点后清除上一局部图中心，使新起点下一周期必定发布新局部图；
 - 收到非空轮式/足式路径时替换 active path；收到空路径时清空 active path，车辆立即停止推进。
 
@@ -156,6 +158,7 @@ rolling_transient_retry_limit: 2
 ### 9.3 Demo 与报告测试
 
 - 小于 4 m 的连续运动不重发局部图；累计达到 4 m 时恰好重发一次。
+- 启动交付只有在规划器与局部可通行性两个消费者均被发现后才开始，交付窗口内允许重发局部图。
 - 新起点强制下一周期重发局部图。
 - 空路径清空 active path，后续 timer 不再改变车辆位置。
 - 空失败 Path 的 frame 分别为 `odom` 和 `map`。

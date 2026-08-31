@@ -197,9 +197,10 @@ source install/setup.bash
 ros2 launch lunar_pure_planner_ros lunar_surface_rviz_demo.launch.py
 ```
 
-Demo 的 timer、里程计和车辆显示保持 `2 Hz`；局部 GridMap 及其 OccupancyGrid 显示首次发布后，
-仅在车辆相对上一局部图中心移动至少 `4 m` 时成对更新。规划失败或恢复重试会发布带合法 frame 的
-空路径，Demo 收到空轮式/足式路径后立即停止沿旧路径移动。
+Demo 的 timer、里程计和车辆显示保持 `2 Hz`。启动时先等待规划器、局部可通行性显示和 Reporter
+消费者被发现，再以 `2 Hz` 短暂发送 12 组局部 GridMap/OccupancyGrid 启动样本；启动交付完成后，
+两张局部图仅在车辆相对上一局部图中心移动至少 `4 m` 时成对更新。规划失败或恢复重试会发布带合法
+frame 的空路径，Demo 收到空轮式/足式路径后立即停止沿旧路径移动。
 
 RViz 固定坐标系为 `map`，初始顶视范围约为整张 1 km 地图。为规避部分 Mesa/RViz 组合中
 `Map` 与 GridMap 插件同时启用的 GLSL sampler 冲突，默认关闭原始占据图；**Wheel traversability**
