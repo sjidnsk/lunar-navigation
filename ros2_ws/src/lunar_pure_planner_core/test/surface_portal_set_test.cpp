@@ -348,7 +348,7 @@ TEST(SurfacePortalSet, SnapsIntermediatePortalToItsLocalSafeCellCenter) {
   const auto converted = ConvertSurfacePortalsToLocalGoals(
       portals, decision,
       Pose3{.position_m = {.x = 0.5, .y = 0.5, .z = 0.0}}, global_map,
-      local_map);
+      local_map, true);
 
   ASSERT_TRUE(converted.ok()) << converted.reason_code;
   ASSERT_EQ(converted.goals->goals_odom.size(), 1U);
