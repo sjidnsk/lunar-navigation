@@ -641,4 +641,23 @@ RViz Message Filter 因空 frame 丢弃清空消息。demo 每个 0.5 s 周期�
 
 本次设计修订只处理这些直接原因：完整多目标接口、足式目标距离场、请求级状态格、
 动态状态编号以及失败工作量传播。它不引入路线走廊、多标签状态、优选模板或新的
-发布安全流程。修订内容尚未实施；上述 RViz 失败是设计输入，不是修订后验证结果。
+发布安全流程。
+
+## 2026-08-31 局部搜索对齐实施结果
+
+修订已在 `feat/legged-local-edge-evaluation` 实施：足式一次搜索接收完整有序门户集合，
+以 `hard_feasible && step_feasible` 构建多源距离场，状态键改为请求起点与起始航向的
+相对量化，终端和普通状态改为动态编号，并保留 `std::bad_alloc ->
+LEGGED_RESOURCE_EXHAUSTED`。轮式继续使用原距离场入口和原门户转换行为。
+
+RViz demo 首次复核还发现：足式搜索允许 `tolerance + 1e-9 m` 的数值边界，而滚动
+调度器只检查裸 `tolerance`，导致路径停在半格边界后不触发下一段。实现仅对足式
+滚动到达判定补齐同一 `1e-9 m` 数值容差，并增加边界回归测试，没有增加新参数或
+安全流程。
+
+本机 Jazzy 最终证据为 core CTest `22/22`、ROS CTest `18/18`、对应契约测试
+`64 passed`。实际 RViz 足式 demo 记录 `18` 个连续滚动成功分段，前两轮总耗时分别
+为 `214.4 ms` 和 `110.1 ms`；各轮均满足 `planning_outcome=0`、
+`reason_code=PLAN_FOUND`、`has_reference=true`，未出现
+`LEGGED_SEARCH_CAPACITY_EXHAUSTED` 或空 frame Message Filter 警告。
+`Humble`、`Orin`、`DDS`、`rosbag` 和实车均为 `NOT_RUN`。

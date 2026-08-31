@@ -200,7 +200,7 @@
 
 ## Task 5：必要回归与 RViz 演示复核
 
-- [ ] **5.1 运行 core 包串行测试**
+- [x] **5.1 运行 core 包串行测试**
 
   ```bash
   source /opt/ros/jazzy/setup.bash
@@ -211,7 +211,7 @@
     --output-on-failure -j1
   ```
 
-- [ ] **5.2 运行 ROS 受影响包测试**
+- [x] **5.2 运行 ROS 受影响包测试**
 
   ```bash
   source /opt/ros/jazzy/setup.bash
@@ -226,10 +226,23 @@
 
   若仓库不存在 `tests/contract`，记录为不适用并运行仓库现有与 pure planner 对应的契约测试路径，不扩展到无关历史失败。
 
-- [ ] **5.3 运行已有 RViz demo**
+- [x] **5.3 运行已有 RViz demo**
 
   使用仓库现有足式月面 demo 启动方式，不新增 launch 或控制接口。记录至少两轮滚动规划，正式成功条件为 `planning_outcome: 0`、`reason_code: PLAN_FOUND`、`has_reference: true`；同时确认局部路径不再因首门户排序形成稳定平行偏移，后续请求不再出现 `LEGGED_SEARCH_CAPACITY_EXHAUSTED`。
 
-- [ ] **5.4 最终审查与记录边界**
+- [x] **5.4 最终审查与记录边界**
 
   仅检查本计划文件清单、`git diff --check`、目标测试与 demo 日志。更新本计划复选框和设计文档中的实际 Jazzy 证据；Humble、Orin、DDS、rosbag、实车保持 `NOT_RUN`。不合并、不推送、不创建 PR。
+
+### 执行结果
+
+- `lunar_pure_planner_core` 串行 CTest：`22/22 passed`，`48.66 s`。
+- `lunar_pure_planner_ros` 串行 CTest：`18/18 passed`，`48.48 s`。
+- pure-planner 对应仓库契约测试：`64 passed`。
+- 实际启动现有 RViz 足式 demo；等待全局与局部 traversability 发布后发送目标，共记录
+  `18` 个连续滚动成功分段。前两轮为 `214.4 ms` 和 `110.1 ms`，均满足
+  `planning_outcome=0`、`reason_code=PLAN_FOUND`、`has_reference=true`。
+- demo 中发现并修正足式搜索与滚动调度对门户容差边界的 `1e-9 m` 数值语义差异；
+  回归测试先失败后通过。连续运行未出现 `LEGGED_SEARCH_CAPACITY_EXHAUSTED` 或 RViz
+  空 frame Message Filter 警告。
+- `Humble`、`Orin`、`DDS`、`rosbag`、`vehicle`：`NOT_RUN`。
