@@ -17,7 +17,12 @@
     wheeled_global_path_topic: /Car/T4/planning/wheeled_global_path
     wheeled_timed_path_topic: /Car/T4/planning/wheeled_path_timing
     rolling_surface_enabled: false
-    rolling_horizon_m: 8.0
+    demo_delivery_protocol_enabled: false
+    demo_map_ack_topic: /lunar_demo/map_ack
+    demo_plan_segment_topic: /lunar_demo/plan_segment
+    demo_map_ack_timeout_ms: 1000
+    rolling_horizon_m: 12.0
+    rolling_replan_distance_m: 4.0
     rolling_poll_period_ms: 100
     rolling_min_replan_interval_ms: 500
     rolling_max_deviation_m: 2.0

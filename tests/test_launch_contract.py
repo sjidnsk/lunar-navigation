@@ -438,7 +438,10 @@ def test_delivery_protocol_is_explicitly_isolated_to_the_surface_demo_launch() -
     server_source = SERVER_SOURCE_PATH.read_text(encoding="utf-8")
     assert "demo_delivery_protocol_enabled" not in production_launch
     assert production_parameters["demo_delivery_protocol_enabled"] is False
-    assert 'declare_parameter<bool>("demo_delivery_protocol_enabled", false)' in server_source
+    assert re.search(
+        r'declare_parameter<bool>\(\s*"demo_delivery_protocol_enabled",\s*false\s*\)',
+        server_source,
+    )
 
 
 def test_cmake_installs_the_single_top_level_config_and_launch_sources() -> None:
