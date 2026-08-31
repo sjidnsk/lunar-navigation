@@ -34,6 +34,10 @@ void TraversabilityInput::UpdateGlobal(
     reason_code_ = kInvalidInput;
     return;
   }
+  if (token_idempotent_ && latest_global_map_stamp_.has_value() &&
+      SameStamp(message->header.stamp, *latest_global_map_stamp_)) {
+    return;
+  }
   auto adapted = AdaptGlobal(*message);
   if (!adapted.value.has_value()) {
     direct_tf_error_ = false;
@@ -41,6 +45,7 @@ void TraversabilityInput::UpdateGlobal(
     return;
   }
   latest_global_ = std::move(*adapted.value);
+  latest_global_map_stamp_ = message->header.stamp;
   ++global_sequence_;
   const auto update = map_.UpdateGlobal(*latest_global_);
   reason_code_ = update.accepted ? std::string{} : ReasonOrInvalid(update.reason_code);
@@ -83,6 +88,10 @@ void TraversabilityInput::UpdateTf(const tf2_msgs::msg::TFMessage& message) {
       continue;
     }
     received_direct_transform = true;
+    if (token_idempotent_ && latest_map_from_odom_stamp_.has_value() &&
+        SameStamp(transform.header.stamp, *latest_map_from_odom_stamp_)) {
+      continue;
+    }
     const auto adapted = AdaptDirectMapFromOdom(transform);
     if (!adapted.value.has_value()) {
       direct_tf_error_ = true;
@@ -94,6 +103,7 @@ void TraversabilityInput::UpdateTf(const tf2_msgs::msg::TFMessage& message) {
         latest_local_.has_value() && applied_local_sequence_ != local_sequence_;
     direct_tf_error_ = false;
     latest_map_from_odom_ = *adapted.value;
+    latest_map_from_odom_stamp_ = transform.header.stamp;
     ++tf_sequence_;
     ApplyPendingLocalLocked();
     if (clear_direct_tf_error && !local_was_pending &&

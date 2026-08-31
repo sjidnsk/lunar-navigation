@@ -2205,6 +2205,121 @@ TEST(PurePlanMotionServer,
   EXPECT_EQ(system.Result(handle).code, rclcpp_action::ResultCode::CANCELED);
 }
 
+TEST(PurePlanMotionServer,
+     DemoDeliveryWaitsForGlobalAndTfBeforeAckAndExecute) {
+  std::atomic<std::uint64_t> local_calls{0U};
+  RunningSystem system{
+      [](const lunar::pure_planning::PlanningRequest&) {
+        return Failure(lunar::pure_planning::PlanningStatus::kPlannerError,
+                       "PLANNER_ERROR");
+      },
+      "wheel", ConfigPath("wheel.yaml").string(),
+      {rclcpp::Parameter{"rolling_surface_enabled", true},
+       rclcpp::Parameter{"rolling_poll_period_ms", 10},
+       rclcpp::Parameter{"demo_delivery_protocol_enabled", true},
+       rclcpp::Parameter{"demo_map_ack_topic", "/lunar_demo/map_ack"},
+       rclcpp::Parameter{"demo_plan_segment_topic",
+                         "/lunar_demo/plan_segment"},
+       rclcpp::Parameter{"demo_map_ack_timeout_ms", 1000}},
+      [&](const lunar::pure_planning::PlanningRequest& request,
+          const lunar::pure_planning::LocalGoalSet& goals,
+          lunar::pure_planning::SearchControl) {
+        ++local_calls;
+        return LocalSuccess(request, goals);
+      }};
+
+  auto goal = system.Goal("delivery-complete-input");
+  goal.goal.point.x = 20.5;
+  const auto handle = system.SendGoal(goal);
+  ASSERT_NE(handle, nullptr);
+  ASSERT_TRUE(WaitFor([&] {
+    const auto segments = system.PlanSegments();
+    return segments.size() == 1U &&
+           segments.front().command ==
+               lunar_planning_msgs::msg::DemoPlanSegment::STOP;
+  }));
+
+  system.PublishStampedLocalAndOdometry(15, 15);
+  std::this_thread::sleep_for(100ms);
+  EXPECT_TRUE(system.MapAcks().empty());
+  EXPECT_EQ(local_calls.load(), 0U);
+
+  auto global = GlobalMap(128U);
+  global.header.stamp = MapToken(15);
+  auto transforms = Transforms();
+  transforms.transforms.front().header.stamp = MapToken(15);
+  system.global_publisher->publish(std::move(global));
+  system.tf_publisher->publish(std::move(transforms));
+
+  ASSERT_TRUE(WaitFor([&] {
+    return system.MapAcks().size() == 1U &&
+           system.ExecuteSegments().size() == 1U;
+  }));
+  EXPECT_EQ(system.MapAcks().front().map_token, MapToken(15));
+  EXPECT_EQ(local_calls.load(), 1U);
+
+  auto cancel = system.action_client->async_cancel_goal(handle);
+  ASSERT_EQ(cancel.wait_for(3s), std::future_status::ready);
+  EXPECT_EQ(cancel.get()->return_code,
+            action_msgs::srv::CancelGoal::Response::ERROR_NONE);
+  EXPECT_EQ(system.Result(handle).code, rclcpp_action::ResultCode::CANCELED);
+}
+
+TEST(PurePlanMotionServer,
+     LeggedDemoDeliveryReplansEveryAcceptedTokenBeforePortalProgress) {
+  std::atomic<std::uint64_t> local_calls{0U};
+  RunningSystem system{
+      [](const lunar::pure_planning::PlanningRequest&) {
+        return Failure(lunar::pure_planning::PlanningStatus::kPlannerError,
+                       "PLANNER_ERROR");
+      },
+      "legged", ConfigPath("legged.yaml").string(),
+      {rclcpp::Parameter{"rolling_surface_enabled", true},
+       rclcpp::Parameter{"rolling_poll_period_ms", 10},
+       rclcpp::Parameter{"rolling_min_replan_interval_ms", 10},
+       rclcpp::Parameter{"demo_delivery_protocol_enabled", true},
+       rclcpp::Parameter{"demo_map_ack_topic", "/lunar_demo/map_ack"},
+       rclcpp::Parameter{"demo_plan_segment_topic",
+                         "/lunar_demo/plan_segment"},
+       rclcpp::Parameter{"demo_map_ack_timeout_ms", 1000}},
+      [&](const lunar::pure_planning::PlanningRequest& request,
+          const lunar::pure_planning::LocalGoalSet& goals,
+          lunar::pure_planning::SearchControl) {
+        ++local_calls;
+        return LocalSuccess(request, goals);
+      }};
+  system.PublishInputs(true, 0.0, 128U, 128U, 1U);
+
+  auto goal = system.Goal("delivery-legged-token");
+  goal.goal.point.x = 20.5;
+  const auto handle = system.SendGoal(goal);
+  ASSERT_NE(handle, nullptr);
+  ASSERT_TRUE(WaitFor([&] { return system.PlanSegments().size() == 1U; }));
+
+  system.PublishStampedLocalAndOdometry(41, 41, 0.0, 128U);
+  ASSERT_TRUE(WaitFor([&] {
+    return system.MapAcks().size() == 1U &&
+           system.ExecuteSegments().size() == 1U;
+  }));
+  EXPECT_EQ(local_calls.load(), 1U);
+
+  // A segment may end before reaching its nominal portal.  A new accepted
+  // Demo token is therefore an explicit request for another executable
+  // segment, even when route-progress stride has not yet been reached.
+  system.PublishStampedLocalAndOdometry(42, 42, 1.0, 128U);
+  ASSERT_TRUE(WaitFor([&] {
+    return system.MapAcks().size() == 2U &&
+           system.ExecuteSegments().size() == 2U;
+  }));
+  EXPECT_EQ(local_calls.load(), 2U);
+
+  auto cancel = system.action_client->async_cancel_goal(handle);
+  ASSERT_EQ(cancel.wait_for(3s), std::future_status::ready);
+  EXPECT_EQ(cancel.get()->return_code,
+            action_msgs::srv::CancelGoal::Response::ERROR_NONE);
+  EXPECT_EQ(system.Result(handle).code, rclcpp_action::ResultCode::CANCELED);
+}
+
 TEST(PurePlanMotionServer, DemoDeliveryReplacementRejectsOldRequestOutputs) {
   std::atomic<std::uint64_t> local_calls{0U};
   RunningSystem system{

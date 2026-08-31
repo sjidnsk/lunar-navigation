@@ -22,6 +22,13 @@ geometry_msgs::msg::TransformStamped DirectMapFromOdom(const double x) {
   return transform;
 }
 
+nav_msgs::msg::OccupancyGrid::ConstSharedPtr GlobalMap(
+    const std::int32_t sec) {
+  auto message = std::make_shared<nav_msgs::msg::OccupancyGrid>();
+  message->header.stamp.sec = sec;
+  return message;
+}
+
 grid_map_msgs::msg::GridMap::ConstSharedPtr LocalMap(const std::int32_t sec) {
   auto message = std::make_shared<grid_map_msgs::msg::GridMap>();
   message->header.stamp.sec = sec;
@@ -68,6 +75,59 @@ TEST(InputStore, CapturesOnlyMatchingTokenAndKeepsDuplicateTokenSequence) {
   ASSERT_TRUE(duplicate.has_value());
   EXPECT_EQ(duplicate->local_sequence, first->local_sequence);
   EXPECT_GT(duplicate->local_arrival_sequence, first->local_arrival_sequence);
+}
+
+TEST(InputStore, TokenIdempotenceKeepsDuplicateGlobalAndTfSequences) {
+  InputStore store{true};
+  store.UpdateGlobal(GlobalMap(10));
+  tf2_msgs::msg::TFMessage first_tf;
+  auto first_transform = DirectMapFromOdom(1.0);
+  first_transform.header.stamp.sec = 10;
+  first_tf.transforms.push_back(first_transform);
+  store.UpdateTf(first_tf);
+  const auto first = store.Capture();
+
+  store.UpdateGlobal(GlobalMap(10));
+  tf2_msgs::msg::TFMessage duplicate_tf;
+  auto duplicate_transform = DirectMapFromOdom(2.0);
+  duplicate_transform.header.stamp.sec = 10;
+  duplicate_tf.transforms.push_back(duplicate_transform);
+  store.UpdateTf(duplicate_tf);
+  const auto duplicate = store.Capture();
+
+  EXPECT_EQ(duplicate.global_sequence, first.global_sequence);
+  EXPECT_EQ(duplicate.tf_sequence, first.tf_sequence);
+  ASSERT_TRUE(duplicate.map_from_odom.has_value());
+  EXPECT_DOUBLE_EQ(duplicate.map_from_odom->transform.translation.x, 2.0);
+
+  store.UpdateGlobal(GlobalMap(11));
+  tf2_msgs::msg::TFMessage next_tf;
+  auto next_transform = DirectMapFromOdom(3.0);
+  next_transform.header.stamp.sec = 11;
+  next_tf.transforms.push_back(next_transform);
+  store.UpdateTf(next_tf);
+  const auto next = store.Capture();
+
+  EXPECT_EQ(next.global_sequence, first.global_sequence + 1U);
+  EXPECT_EQ(next.tf_sequence, first.tf_sequence + 1U);
+}
+
+TEST(InputStore, DefaultModeCountsDuplicateGlobalAndTfArrivals) {
+  InputStore store;
+  store.UpdateGlobal(GlobalMap(10));
+  tf2_msgs::msg::TFMessage transform;
+  auto map_from_odom = DirectMapFromOdom(1.0);
+  map_from_odom.header.stamp.sec = 10;
+  transform.transforms.push_back(map_from_odom);
+  store.UpdateTf(transform);
+  const auto first = store.Capture();
+
+  store.UpdateGlobal(GlobalMap(10));
+  store.UpdateTf(transform);
+  const auto duplicate = store.Capture();
+
+  EXPECT_EQ(duplicate.global_sequence, first.global_sequence + 1U);
+  EXPECT_EQ(duplicate.tf_sequence, first.tf_sequence + 1U);
 }
 
 TEST(InputStore, KeepsOnlyDirectMapFromOdomFromTfMessages) {

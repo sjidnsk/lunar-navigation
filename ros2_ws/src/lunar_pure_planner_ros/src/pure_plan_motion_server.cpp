@@ -1514,8 +1514,25 @@ struct PurePlanMotionServer::Impl final {
       if (final_snapshot != nullptr) {
         *final_snapshot = snapshot;
       }
-      if (!request_goal || !snapshot.map_from_odom.has_value() ||
-          !snapshot.odometry || !snapshot.local_map || !snapshot.global_map) {
+      if (!request_goal) {
+        return Failure(PlanningStatus::kInvalidInput, "INVALID_INPUT");
+      }
+      if (!snapshot.map_from_odom.has_value() || !snapshot.odometry ||
+          !snapshot.local_map || !snapshot.global_map) {
+        if (demo_delivery_protocol && fresh_demo_delivery) {
+          if (demo_delivery_deadline.has_value() &&
+              std::chrono::steady_clock::now() >= *demo_delivery_deadline) {
+            auto timeout = Failure(PlanningStatus::kTimedOut,
+                                   "MAP_ACK_TIMEOUT");
+            if (recover_transient_local_failure(timeout, "MAP_ACK")) {
+              continue;
+            }
+            return timeout;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds{
+              parameters.rolling_surface.poll_period_ms});
+          continue;
+        }
         return Failure(PlanningStatus::kInvalidInput, "INVALID_INPUT");
       }
       const bool route_identity_changed =
@@ -1751,7 +1768,7 @@ struct PurePlanMotionServer::Impl final {
               active->tolerance_m +
                   (legged_rolling ? kLeggedGoalToleranceEpsilonM : 0.0);
       const bool local_changed =
-          !legged_rolling &&
+          (!legged_rolling || demo_delivery_protocol) &&
           snapshot.local_sequence != seen_local_sequence &&
           std::chrono::steady_clock::now() - last_replan >=
               std::chrono::milliseconds{

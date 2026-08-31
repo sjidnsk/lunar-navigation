@@ -40,6 +40,7 @@ SERVER_SOURCE_PATH = (
 SERVER_SEAM_PATH = SERVER_SOURCE_PATH.with_name(
     "pure_plan_motion_server_test_seam.hpp"
 )
+DEMO_SOURCE_PATH = SERVER_SOURCE_PATH.with_name("lunar_surface_demo_node.cpp")
 
 EXPECTED_TOPICS = {
     "global_map_topic": "/Car/T3/mapping/global_overview",
@@ -442,6 +443,18 @@ def test_delivery_protocol_is_explicitly_isolated_to_the_surface_demo_launch() -
         r'declare_parameter<bool>\(\s*"demo_delivery_protocol_enabled",\s*false\s*\)',
         server_source,
     )
+
+
+def test_demo_republishes_tokenized_static_inputs_until_first_map_ack() -> None:
+    """A synchronized local delivery is not complete without global map and TF."""
+    source = DEMO_SOURCE_PATH.read_text(encoding="utf-8")
+    assert "global.header.stamp = input_stamp;" in source
+    assert "transform.header.stamp = input_stamp;" in source
+    assert "static_inputs_acknowledged_ = false;" in source
+    assert "static_inputs_acknowledged_ = true;" in source
+    assert "!static_inputs_acknowledged_" in source
+    assert "!delivery_protocol_enabled_ && static_delivery_count_ < 12U" in source
+    assert source.count("protocol_static_delivery") >= 3
 
 
 def test_cmake_installs_the_single_top_level_config_and_launch_sources() -> None:

@@ -40,9 +40,11 @@ class TraversabilityInput final {
   mutable std::mutex mutex_;
   lunar::pure_planning::PersistentTraversabilityMap map_;
   std::optional<lunar::pure_planning::GridMap> latest_global_;
+  std::optional<builtin_interfaces::msg::Time> latest_global_map_stamp_;
   std::optional<lunar::pure_planning::GridMap> latest_local_;
   std::optional<builtin_interfaces::msg::Time> latest_local_map_stamp_;
   std::optional<lunar::pure_planning::RigidTransform> latest_map_from_odom_;
+  std::optional<builtin_interfaces::msg::Time> latest_map_from_odom_stamp_;
   std::uint64_t global_sequence_{};
   std::uint64_t local_sequence_{};
   std::uint64_t tf_sequence_{};

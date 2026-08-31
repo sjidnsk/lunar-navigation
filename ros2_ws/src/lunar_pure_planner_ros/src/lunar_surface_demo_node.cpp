@@ -111,6 +111,7 @@ class LunarSurfaceDemoNode final : public rclcpp::Node {
           demo_map_ack_topic_, rclcpp::QoS{10}.reliable(),
           [this](lunar_planning_msgs::msg::DemoMapAck::ConstSharedPtr ack) {
             if (state_.HandleMapAck(*ack)) {
+              static_inputs_acknowledged_ = true;
               delivery_map_token_.reset();
             }
           });
@@ -121,6 +122,7 @@ class LunarSurfaceDemoNode final : public rclcpp::Node {
                 const bool is_stop =
                     segment->command == lunar_planning_msgs::msg::DemoPlanSegment::STOP;
                 if (state_.HandleSegment(*segment) && is_stop) {
+                  static_inputs_acknowledged_ = false;
                   const auto map_token = static_cast<builtin_interfaces::msg::Time>(now());
                   state_.BeginMapDelivery(map_token);
                   if (state_.map_delivery_pending()) {
@@ -202,7 +204,7 @@ class LunarSurfaceDemoNode final : public rclcpp::Node {
     const double start_x = state_.x_m();
     const double start_y = state_.y_m();
     nav_msgs::msg::OccupancyGrid global;
-    global.header.stamp = stamp;
+    global.header.stamp = input_stamp;
     global.header.frame_id = "map";
     global.info.resolution = scenario_.resolution_m;
     global.info.width = scenario_.width;
@@ -225,7 +227,13 @@ class LunarSurfaceDemoNode final : public rclcpp::Node {
         local_pub_->get_subscription_count() >= 2U &&
         odom_pub_->get_subscription_count() >= 2U &&
         tf_pub_->get_subscription_count() > 0U;
-    if (static_delivery_count_ < 12U) {
+    const bool protocol_static_delivery =
+        delivery_protocol_enabled_ && state_.map_delivery_pending() &&
+        !static_inputs_acknowledged_;
+    const bool deliver_global_input =
+        (!delivery_protocol_enabled_ && static_delivery_count_ < 12U) ||
+        protocol_static_delivery;
+    if (deliver_global_input) {
       global_pub_->publish(global);
     }
 
@@ -290,11 +298,13 @@ class LunarSurfaceDemoNode final : public rclcpp::Node {
     odometry.pose.pose.orientation.w = std::cos(0.5 * state_.yaw_rad());
     odom_pub_->publish(odometry);
 
-    if (static_delivery_count_ < 12U) {
+    const bool deliver_tf_input =
+        static_delivery_count_ < 12U || protocol_static_delivery;
+    if (deliver_tf_input) {
       tf2_msgs::msg::TFMessage transforms;
       transforms.transforms.resize(1U);
       auto& transform = transforms.transforms.front();
-      transform.header.stamp = stamp;
+      transform.header.stamp = input_stamp;
       transform.header.frame_id = "map";
       transform.child_frame_id = "odom";
       transform.transform.rotation.w = 1.0;
@@ -325,6 +335,7 @@ class LunarSurfaceDemoNode final : public rclcpp::Node {
   double rolling_replan_distance_m_{kLocalMapUpdateDistanceM};
   std::optional<builtin_interfaces::msg::Time> delivery_map_token_;
   std::size_t static_delivery_count_{};
+  bool static_inputs_acknowledged_{};
   bool global_grid_published_{};
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr global_pub_;
   rclcpp::Publisher<grid_map_msgs::msg::GridMap>::SharedPtr global_grid_pub_;

@@ -24,9 +24,11 @@ std_msgs::msg::Float32MultiArray Layer(std::vector<float> values) {
   return layer;
 }
 
-nav_msgs::msg::OccupancyGrid::ConstSharedPtr GlobalMap() {
+nav_msgs::msg::OccupancyGrid::ConstSharedPtr GlobalMap(
+    const std::int32_t sec = 0) {
   auto map = std::make_shared<nav_msgs::msg::OccupancyGrid>();
   map->header.frame_id = "map";
+  map->header.stamp.sec = sec;
   map->info.width = 4U;
   map->info.height = 4U;
   map->info.resolution = 0.5F;
@@ -50,10 +52,11 @@ grid_map_msgs::msg::GridMap::ConstSharedPtr LocalMap(const std::int32_t sec = 0,
   return map;
 }
 
-tf2_msgs::msg::TFMessage MapFromOdom() {
+tf2_msgs::msg::TFMessage MapFromOdom(const std::int32_t sec = 0) {
   tf2_msgs::msg::TFMessage message;
   geometry_msgs::msg::TransformStamped transform;
   transform.header.frame_id = "map";
+  transform.header.stamp.sec = sec;
   transform.child_frame_id = "odom";
   transform.transform.rotation.w = 1.0;
   message.transforms.push_back(std::move(transform));
@@ -200,6 +203,31 @@ TEST(TraversabilityInput,
   ASSERT_TRUE(next.snapshot);
   EXPECT_GT(next.local_sequence, first.local_sequence);
   EXPECT_EQ(next.local_map_stamp.sec, 11);
+  EXPECT_GT(next.snapshot->revision(), first_revision);
+}
+
+TEST(TraversabilityInput,
+     TokenIdempotenceDoesNotReapplyDuplicateStaticInputs) {
+  TraversabilityInput input{Profile(), true};
+  input.UpdateGlobal(GlobalMap(10));
+  input.UpdateTf(MapFromOdom(10));
+  input.UpdateLocal(LocalMap(10));
+  const auto first = input.Capture();
+  ASSERT_TRUE(first.snapshot);
+  const std::uint64_t first_revision = first.snapshot->revision();
+
+  input.UpdateGlobal(GlobalMap(10));
+  input.UpdateTf(MapFromOdom(10));
+  const auto duplicate = input.Capture();
+  ASSERT_TRUE(duplicate.snapshot);
+  EXPECT_EQ(duplicate.snapshot->revision(), first_revision);
+
+  auto changed_global =
+      std::make_shared<nav_msgs::msg::OccupancyGrid>(*GlobalMap(11));
+  changed_global->data.front() = 100;
+  input.UpdateGlobal(std::move(changed_global));
+  const auto next = input.Capture();
+  ASSERT_TRUE(next.snapshot);
   EXPECT_GT(next.snapshot->revision(), first_revision);
 }
 
