@@ -169,6 +169,7 @@ source "$INCREMENTAL_BUILD_DIR/install/setup.bash"
 # wheel + 0.2 m；改为 0.1 或 legged 时必须重启。
 ros2 launch lunar_incremental_navigation_ros incremental_exploration_navigation_rviz.launch.py \
   platform_type:=wheel fine_resolution_m:=0.2 task_size_m:=24.0 \
+  sensor_range_m:=10.0 sensor_fov_deg:=120.0 angular_speed_radps:=1.0 \
   start_rviz:=true show_ground_truth:=false
 
 # 只用于隔离演示/自动回归：首个 ACTIVE 段后注入一次短时局部障碍，
@@ -176,18 +177,22 @@ ros2 launch lunar_incremental_navigation_ros incremental_exploration_navigation_
 LUNAR_DEMO_REQUIRE_NO_PATH_RECOVERY=1 \
   ros2 launch lunar_incremental_navigation_ros incremental_exploration_navigation_rviz.launch.py \
   platform_type:=wheel fine_resolution_m:=0.2 task_size_m:=24.0 \
+  sensor_range_m:=10.0 sensor_fov_deg:=120.0 angular_speed_radps:=1.0 \
   start_rviz:=true show_ground_truth:=false
 ```
 
-RViz Fixed Frame 为 `map`。显示布局包括任务边界、三态任务图、16 m 局部观测窗口、frontier、唯一洋红
-current goal、fine traversability、细蓝 global route、粗橙 active path、机器人/轨迹和 HUD；可选
-ground truth 只供显示。不要显示或解释 A* OPEN/CLOSED 集合。必演场景为 wheel + `0.2 m`、wheel +
-`0.1 m`、legged + `0.2 m`、当前候选被局部障碍阻断后的 `NO_PATH` 换候选，以及无
-global overview 的启动。无图形环境可使用 `start_rviz:=false` 做闭环检查，但不能把它写成 RViz
-人工视觉验收。
+RViz Fixed Frame 为 `map`。`Local observation window` 与当前 `/planning_demo/grid_map` 严格表示以车体
+yaw 为中心的 `10 m / 120°` 扇形：扇形外高程为 `NaN`，不会作为当前帧输入。显示布局还包括任务边界、三态
+任务图、frontier、唯一洋红 current goal、fine traversability、细蓝 global route、粗橙 active path、机器人/
+轨迹和 HUD；可选 ground truth 只供显示。`fine traversability` 和三态任务图是增量历史，不应被误读为当前
+传感器扇形。不要显示或解释 A* OPEN/CLOSED 集合。必演场景为 wheel + `0.2 m`、wheel + `0.1 m`、legged +
+`0.2 m`、当前候选被局部障碍阻断后的 `NO_PATH` 换候选，以及无 global overview 的启动。无图形环境可使用
+`start_rviz:=false` 做闭环检查，但不能把它写成 RViz 人工视觉验收。
 
-其中演示的 `16 m` 局部观测是 scenario 发布给地图管线的输入范围，不是
-`navigation.local_window_size_m` 的规划窗口，也不能用作 `64 m` 规划窗口的容量或性能证据。
+该 `20 m × 20 m` demo 地图仅容纳半径 `10 m` 的当前观测扇形，不是
+`navigation.local_window_size_m` 的规划窗口，也不能用作 `64 m` 规划窗口的容量或性能证据。演示动作模拟器以
+`angular_speed_radps` 有限角速度完成路径末端同位姿转向；只有 yaw 到位后才继续越过该终点。启动时 demo 先以相同
+角速度原地完成一圈扫描，再发布任务；每一帧仍是严格的 `120°` 扇形，生产栈不包含此演示动作。
 
 最小图检查命令：
 

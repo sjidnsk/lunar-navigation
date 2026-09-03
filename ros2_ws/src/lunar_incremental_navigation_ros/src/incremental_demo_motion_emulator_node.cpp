@@ -1,32 +1,60 @@
-#include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <cstddef>
 #include <memory>
 #include <mutex>
+#include <numbers>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 
+#include <geometry_msgs/msg/quaternion.hpp>
 #include <lunar_planning_msgs/msg/path_reference.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
+
+#include "lunar_incremental_navigation_ros/demo_motion_follower.hpp"
 
 namespace lunar::incremental_navigation_ros {
 namespace {
 
 using namespace std::chrono_literals;
 
+[[nodiscard]] double YawFromQuaternion(
+    const geometry_msgs::msg::Quaternion& orientation) {
+  return std::atan2(2.0 * orientation.w * orientation.z,
+                    1.0 - 2.0 * orientation.z * orientation.z);
+}
+
+[[nodiscard]] std::vector<DemoMotionPose> InitialScanPath() {
+  constexpr double kStepRad = std::numbers::pi / 3.0;
+  return {
+      {.x_m = 0.0, .y_m = 0.0, .yaw_rad = 0.0},
+      {.x_m = 0.0, .y_m = 0.0, .yaw_rad = kStepRad},
+      {.x_m = 0.0, .y_m = 0.0, .yaw_rad = 2.0 * kStepRad},
+      {.x_m = 0.0, .y_m = 0.0, .yaw_rad = std::numbers::pi},
+      {.x_m = 0.0, .y_m = 0.0, .yaw_rad = -2.0 * kStepRad},
+      {.x_m = 0.0, .y_m = 0.0, .yaw_rad = -kStepRad},
+      {.x_m = 0.0, .y_m = 0.0, .yaw_rad = 0.0},
+  };
+}
+
 class IncrementalDemoMotionEmulator final : public rclcpp::Node {
  public:
   IncrementalDemoMotionEmulator()
       : Node("incremental_demo_motion_emulator"),
         platform_type_(declare_parameter<std::string>("platform_type", "wheel")),
-        speed_mps_(declare_parameter<double>("speed_mps", 1.2)) {
+        speed_mps_(declare_parameter<double>("speed_mps", 1.2)),
+        angular_speed_radps_(
+            declare_parameter<double>("angular_speed_radps", 1.0)),
+        follower_(speed_mps_, angular_speed_radps_) {
     if ((platform_type_ != "wheel" && platform_type_ != "legged") ||
-        !std::isfinite(speed_mps_) || speed_mps_ <= 0.0) {
+        !std::isfinite(speed_mps_) || speed_mps_ <= 0.0 ||
+        !std::isfinite(angular_speed_radps_) || angular_speed_radps_ <= 0.0) {
       throw std::invalid_argument{"invalid motion-emulator parameters"};
     }
+    follower_.SetPath(InitialScanPath());
     odometry_publisher_ = create_publisher<nav_msgs::msg::Odometry>(
         "/planning_demo/odometry", rclcpp::QoS{10}.reliable());
     path_subscription_ =
@@ -44,38 +72,18 @@ class IncrementalDemoMotionEmulator final : public rclcpp::Node {
     std::scoped_lock lock{mutex_};
     if (message.state == lunar_planning_msgs::msg::PathReference::ACTIVE &&
         !message.path.poses.empty()) {
-      active_path_ = message.path;
-      active_path_.header.frame_id = "map";
-      next_pose_ = 0U;
+      std::vector<DemoMotionPose> path;
+      path.reserve(message.path.poses.size());
+      for (const auto& stamped_pose : message.path.poses) {
+        path.push_back({.x_m = stamped_pose.pose.position.x,
+                        .y_m = stamped_pose.pose.position.y,
+                        .yaw_rad = YawFromQuaternion(
+                            stamped_pose.pose.orientation)});
+      }
+      follower_.SetPath(std::move(path));
       return;
     }
-    active_path_.poses.clear();
-    next_pose_ = 0U;
-  }
-
-  void Advance(const double distance_m) {
-    double remaining = distance_m;
-    while (remaining > 0.0 && next_pose_ < active_path_.poses.size()) {
-      const auto& target = active_path_.poses[next_pose_].pose;
-      const double dx = target.position.x - x_m_;
-      const double dy = target.position.y - y_m_;
-      const double distance = std::hypot(dx, dy);
-      if (distance <= 1.0e-6) {
-        yaw_rad_ = std::atan2(2.0 * target.orientation.w * target.orientation.z,
-                             1.0 - 2.0 * target.orientation.z *
-                                       target.orientation.z);
-        ++next_pose_;
-        continue;
-      }
-      const double step = std::min(distance, remaining);
-      x_m_ += step * dx / distance;
-      y_m_ += step * dy / distance;
-      yaw_rad_ = std::atan2(dy, dx);
-      remaining -= step;
-      if (step >= distance - 1.0e-9) {
-        ++next_pose_;
-      }
-    }
+    follower_.SetPath({});
   }
 
   void Tick() {
@@ -83,29 +91,27 @@ class IncrementalDemoMotionEmulator final : public rclcpp::Node {
     nav_msgs::msg::Odometry odometry;
     {
       std::scoped_lock lock{mutex_};
-      Advance(speed_mps_ * 0.05);
+      follower_.Advance(0.05);
+      const DemoMotionPose pose = follower_.pose();
       odometry.header.stamp = stamp;
       odometry.header.frame_id = "odom";
       // The shared incremental explorer resolves odometry strictly as
       // odom -> base_link; the navigator accepts this frame for both profiles.
       odometry.child_frame_id = "base_link";
-      odometry.pose.pose.position.x = x_m_;
-      odometry.pose.pose.position.y = y_m_;
+      odometry.pose.pose.position.x = pose.x_m;
+      odometry.pose.pose.position.y = pose.y_m;
       odometry.pose.pose.position.z = platform_type_ == "legged" ? 0.33 : 0.0;
-      odometry.pose.pose.orientation.z = std::sin(0.5 * yaw_rad_);
-      odometry.pose.pose.orientation.w = std::cos(0.5 * yaw_rad_);
+      odometry.pose.pose.orientation.z = std::sin(0.5 * pose.yaw_rad);
+      odometry.pose.pose.orientation.w = std::cos(0.5 * pose.yaw_rad);
     }
     odometry_publisher_->publish(odometry);
   }
 
   std::string platform_type_;
   double speed_mps_{};
+  double angular_speed_radps_{};
+  DemoMotionFollower follower_;
   std::mutex mutex_;
-  nav_msgs::msg::Path active_path_;
-  std::size_t next_pose_{};
-  double x_m_{};
-  double y_m_{};
-  double yaw_rad_{};
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odometry_publisher_;
   rclcpp::Subscription<lunar_planning_msgs::msg::PathReference>::SharedPtr
       path_subscription_;

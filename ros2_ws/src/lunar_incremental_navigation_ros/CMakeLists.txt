@@ -22,6 +22,7 @@ find_package(yaml-cpp REQUIRED)
 set(LUNAR_INCREMENTAL_NAVIGATION_ROS_SOURCES
   src/elevation_pipeline.cpp
   src/exploration_map_projector.cpp
+  src/demo_motion_follower.cpp
   src/incremental_demo_scenario.cpp
   src/incremental_map_publisher.cpp
   src/incremental_navigation_node.cpp
@@ -77,6 +78,7 @@ ament_target_dependencies(incremental_demo_scenario_node
 add_executable(incremental_demo_motion_emulator_node
   src/incremental_demo_motion_emulator_node.cpp)
 target_compile_features(incremental_demo_motion_emulator_node PUBLIC cxx_std_20)
+target_link_libraries(incremental_demo_motion_emulator_node ${PROJECT_NAME})
 ament_target_dependencies(incremental_demo_motion_emulator_node
   geometry_msgs lunar_planning_msgs nav_msgs rclcpp visualization_msgs)
 
@@ -138,6 +140,10 @@ if(BUILD_TESTING)
     test/exploration_map_projector_test.cpp)
   lunar_add_ros_gtest(incremental_map_publisher_test
     test/incremental_map_publisher_test.cpp)
+  lunar_add_ros_gtest(incremental_demo_scenario_test
+    test/incremental_demo_scenario_test.cpp)
+  lunar_add_ros_gtest(demo_motion_follower_test
+    test/demo_motion_follower_test.cpp)
   lunar_add_ros_gtest(map_adapters_test test/map_adapters_test.cpp)
   lunar_add_ros_gtest(message_conversion_test
     test/message_conversion_test.cpp)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction, TimerAction
@@ -14,6 +16,11 @@ def _compose(context):
     platform_type = LaunchConfiguration("platform_type").perform(context)
     fine_resolution = float(LaunchConfiguration("fine_resolution_m").perform(context))
     task_size = float(LaunchConfiguration("task_size_m").perform(context))
+    sensor_range = float(LaunchConfiguration("sensor_range_m").perform(context))
+    sensor_fov_deg = float(LaunchConfiguration("sensor_fov_deg").perform(context))
+    angular_speed = float(
+        LaunchConfiguration("angular_speed_radps").perform(context)
+    )
     start_rviz = LaunchConfiguration("start_rviz").perform(context)
     show_ground_truth = LaunchConfiguration("show_ground_truth").perform(context)
     show_ground_truth_enabled = show_ground_truth.lower() in {"true", "1", "yes"}
@@ -21,8 +28,12 @@ def _compose(context):
         raise RuntimeError("platform_type must be wheel or legged")
     if fine_resolution not in {0.2, 0.1}:
         raise RuntimeError("fine_resolution_m must be 0.2 or 0.1; restart to change it")
-    if task_size <= 16.0:
-        raise RuntimeError("task_size_m must exceed the 16 m local observation window")
+    if sensor_range <= 0.0 or sensor_fov_deg <= 0.0 or sensor_fov_deg > 360.0:
+        raise RuntimeError("sensor_range_m and sensor_fov_deg must define a sector")
+    if angular_speed <= 0.0:
+        raise RuntimeError("angular_speed_radps must be positive")
+    if task_size <= 2.0 * sensor_range:
+        raise RuntimeError("task_size_m must exceed the sensor diameter")
 
     navigation_share = get_package_share_directory("lunar_incremental_navigation_ros")
     platform_config = f"{navigation_share}/config/{platform_type}.yaml"
@@ -53,7 +64,7 @@ def _compose(context):
         "exploration_map_topic": "/planning_demo/mapping/exploration_map",
         "enable_debug_visualization": True,
         "debug_topic_prefix": "/planning_demo/planning",
-        "debug_fine_window_m": 16.0,
+        "debug_fine_window_m": 2.0 * sensor_range,
     }
     explorer_parameters = {
         "platform_selector": platform_type,
@@ -69,13 +80,20 @@ def _compose(context):
         "current_goal_topic": "/planning_demo/exploration/current_goal",
         "frontiers_topic": "/planning_demo/exploration/frontiers",
         "diagnostics_topic": "/planning_demo/exploration/diagnostics",
+        "sensor_range_m": sensor_range,
+        "sensor_fov_deg": sensor_fov_deg,
     }
     return [
         Node(
             package="lunar_incremental_navigation_ros",
             executable="incremental_demo_motion_emulator_node",
             name="incremental_demo_motion_emulator",
-            parameters=[{"platform_type": platform_type}],
+            parameters=[
+                {
+                    "platform_type": platform_type,
+                    "angular_speed_radps": angular_speed,
+                }
+            ],
             output="screen",
         ),
         Node(
@@ -87,6 +105,8 @@ def _compose(context):
                     "platform_type": platform_type,
                     "fine_resolution_m": fine_resolution,
                     "task_size_m": task_size,
+                    "sensor_range_m": sensor_range,
+                    "sensor_fov_deg": sensor_fov_deg,
                     "show_ground_truth": show_ground_truth_enabled,
                 }
             ],
@@ -113,7 +133,7 @@ def _compose(context):
             output="screen",
         ),
         TimerAction(
-            period=3.0,
+            period=2.0 * math.pi / angular_speed + 0.5,
             actions=[
                 ExecuteProcess(
                     cmd=[
@@ -151,6 +171,9 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("platform_type", default_value="wheel"),
             DeclareLaunchArgument("fine_resolution_m", default_value="0.2"),
             DeclareLaunchArgument("task_size_m", default_value="300.0"),
+            DeclareLaunchArgument("sensor_range_m", default_value="10.0"),
+            DeclareLaunchArgument("sensor_fov_deg", default_value="120.0"),
+            DeclareLaunchArgument("angular_speed_radps", default_value="1.0"),
             DeclareLaunchArgument("start_rviz", default_value="true"),
             DeclareLaunchArgument("show_ground_truth", default_value="false"),
             OpaqueFunction(function=_compose),

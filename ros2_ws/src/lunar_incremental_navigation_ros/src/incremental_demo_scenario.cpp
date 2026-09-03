@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstddef>
 #include <limits>
+#include <numbers>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -29,6 +30,24 @@ namespace {
     throw std::invalid_argument{"demo extent must be an integral cell count"};
   }
   return static_cast<std::size_t>(std::llround(cells));
+}
+
+[[nodiscard]] double NormalizeAngle(const double angle_rad) {
+  return std::remainder(angle_rad, 2.0 * std::numbers::pi);
+}
+
+[[nodiscard]] bool IsObserved(const IncrementalDemoScenarioConfig& config,
+                              const IncrementalDemoPose pose,
+                              const double world_x, const double world_y) {
+  const double dx = world_x - pose.x_m;
+  const double dy = world_y - pose.y_m;
+  if (std::hypot(dx, dy) > config.sensor_range_m) {
+    return false;
+  }
+  const double half_fov_rad =
+      0.5 * config.sensor_fov_deg * std::numbers::pi / 180.0;
+  return std::abs(NormalizeAngle(std::atan2(dy, dx) - pose.yaw_rad)) <=
+         half_fov_rad;
 }
 
 [[nodiscard]] std_msgs::msg::Float32MultiArray MakeLayer(
@@ -78,6 +97,11 @@ IncrementalDemoScenario::IncrementalDemoScenario(
       !std::isfinite(config_.task_size_m) || config_.task_size_m <= 0.0) {
     throw std::invalid_argument{"demo extents must be finite and positive"};
   }
+  if (!std::isfinite(config_.sensor_range_m) || config_.sensor_range_m <= 0.0 ||
+      !std::isfinite(config_.sensor_fov_deg) || config_.sensor_fov_deg <= 0.0 ||
+      config_.sensor_fov_deg > 360.0) {
+    throw std::invalid_argument{"demo sensor parameters are invalid"};
+  }
   static_cast<void>(
       CellsFor(config_.local_window_size_m, config_.fine_resolution_m));
 }
@@ -112,7 +136,8 @@ grid_map_msgs::msg::GridMap IncrementalDemoScenario::MakeLocalObservation(
       CellsFor(config_.local_window_size_m, config_.fine_resolution_m);
   const std::size_t height = width;
   const double half = config_.local_window_size_m / 2.0;
-  std::vector<float> elevation(width * height);
+  std::vector<float> elevation(width * height,
+                               std::numeric_limits<float>::quiet_NaN());
   for (std::size_t y = 0U; y < height; ++y) {
     for (std::size_t x = 0U; x < width; ++x) {
       const double world_x = pose.x_m - half +
@@ -121,7 +146,9 @@ grid_map_msgs::msg::GridMap IncrementalDemoScenario::MakeLocalObservation(
       const double world_y = pose.y_m - half +
                              (static_cast<double>(y) + 0.5) *
                                  config_.fine_resolution_m;
-      elevation[y * width + x] = ElevationAt(world_x, world_y);
+      if (IsObserved(config_, pose, world_x, world_y)) {
+        elevation[y * width + x] = ElevationAt(world_x, world_y);
+      }
     }
   }
 
@@ -156,12 +183,17 @@ visualization_msgs::msg::MarkerArray IncrementalDemoScenario::MakeLocalWindow(
   marker.color.g = 1.0F;
   marker.color.b = 0.35F;
   marker.color.a = 0.75F;
-  const double half = config_.local_window_size_m / 2.0;
-  AppendPoint(marker, pose.x_m - half, pose.y_m - half);
-  AppendPoint(marker, pose.x_m + half, pose.y_m - half);
-  AppendPoint(marker, pose.x_m + half, pose.y_m + half);
-  AppendPoint(marker, pose.x_m - half, pose.y_m + half);
-  AppendPoint(marker, pose.x_m - half, pose.y_m - half);
+  constexpr std::size_t kArcSegments = 24U;
+  const double fov_rad = config_.sensor_fov_deg * std::numbers::pi / 180.0;
+  AppendPoint(marker, pose.x_m, pose.y_m);
+  for (std::size_t index = 0U; index <= kArcSegments; ++index) {
+    const double ratio = static_cast<double>(index) /
+                         static_cast<double>(kArcSegments);
+    const double yaw = pose.yaw_rad - 0.5 * fov_rad + ratio * fov_rad;
+    AppendPoint(marker, pose.x_m + config_.sensor_range_m * std::cos(yaw),
+                pose.y_m + config_.sensor_range_m * std::sin(yaw));
+  }
+  AppendPoint(marker, pose.x_m, pose.y_m);
   visualization_msgs::msg::MarkerArray output;
   output.markers.push_back(std::move(marker));
   return output;

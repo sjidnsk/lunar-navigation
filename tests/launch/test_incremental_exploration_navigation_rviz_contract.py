@@ -31,6 +31,9 @@ PUBLIC_ARGUMENTS = {
     "platform_type": "wheel",
     "fine_resolution_m": "0.2",
     "task_size_m": "300.0",
+    "sensor_range_m": "10.0",
+    "sensor_fov_deg": "120.0",
+    "angular_speed_radps": "1.0",
     "start_rviz": "true",
     "show_ground_truth": "false",
 }
@@ -69,7 +72,7 @@ def _node_executables() -> set[str]:
     return executables
 
 
-def test_launch_exposes_only_the_five_demo_arguments() -> None:
+def test_launch_exposes_the_demo_observation_and_turning_arguments() -> None:
     assert _launch_arguments() == PUBLIC_ARGUMENTS
     assert "publish_global_elevation" not in _source(LAUNCH)
 
@@ -164,6 +167,8 @@ def test_motion_emulator_consumes_only_active_path_reference() -> None:
     assert '"/planning_demo/visualization/active_path"' not in text
     assert "/Car/T5/Car_Cmd_Vel" not in text
     assert "Twist" not in text
+    assert "InitialScanPath" in text
+    assert "follower_.SetPath(InitialScanPath())" in text
 
     scenario = _source(SCENARIO_NODE)
     assert '"/planning_demo/robot_trace"' in scenario
@@ -223,6 +228,7 @@ def test_probe_cancels_the_active_action_before_stopping_launch() -> None:
     assert '"path_invalidated_after_cancel"' in text
     assert '"clean_shutdown"' in text
     assert "Asked to publish result for goal that does not exist" in text
+    assert "math.pi / angular_speed" in _source(LAUNCH)
 
 
 def _live_available() -> bool:

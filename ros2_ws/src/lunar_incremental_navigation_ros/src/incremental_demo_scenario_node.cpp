@@ -57,7 +57,10 @@ void ApplyNoPathRecoveryBarrier(grid_map_msgs::msg::GridMap& observation) {
       }
       const std::size_t physical_row = width - 1U - x;
       const std::size_t physical_column = height - 1U - y;
-      elevation[physical_column * width + physical_row] = 0.9F;
+      float& cell = elevation[physical_column * width + physical_row];
+      if (std::isfinite(cell)) {
+        cell = 0.9F;
+      }
     }
   }
 }
@@ -70,11 +73,15 @@ class IncrementalDemoScenarioNode final : public rclcpp::Node {
         show_ground_truth_(
             declare_parameter<bool>("show_ground_truth", false)),
         require_no_path_recovery_(RequireNoPathRecoveryDemo()),
+        sensor_range_m_(declare_parameter<double>("sensor_range_m", 10.0)),
+        sensor_fov_deg_(declare_parameter<double>("sensor_fov_deg", 120.0)),
         scenario_(IncrementalDemoScenarioConfig{
             .fine_resolution_m =
                 declare_parameter<double>("fine_resolution_m", 0.2),
-            .local_window_size_m = 16.0,
-            .task_size_m = declare_parameter<double>("task_size_m", 300.0)}) {
+            .local_window_size_m = 2.0 * sensor_range_m_,
+            .task_size_m = declare_parameter<double>("task_size_m", 300.0),
+            .sensor_range_m = sensor_range_m_,
+            .sensor_fov_deg = sensor_fov_deg_}) {
     if (platform_type_ != "wheel" && platform_type_ != "legged") {
       throw std::invalid_argument{"platform_type must be wheel or legged"};
     }
@@ -255,6 +262,8 @@ class IncrementalDemoScenarioNode final : public rclcpp::Node {
   bool require_no_path_recovery_{};
   bool no_path_recovery_barrier_injected_{};
   std::size_t no_path_recovery_barrier_cycles_remaining_{};
+  double sensor_range_m_{};
+  double sensor_fov_deg_{};
   IncrementalDemoScenario scenario_;
   std::mutex mutex_;
   std::optional<IncrementalDemoPose> pose_;

@@ -16,8 +16,10 @@ struct IncrementalDemoPose final {
 
 struct IncrementalDemoScenarioConfig final {
   double fine_resolution_m{0.2};
-  double local_window_size_m{16.0};
+  double local_window_size_m{20.0};
   double task_size_m{300.0};
+  double sensor_range_m{10.0};
+  double sensor_fov_deg{120.0};
 };
 
 class IncrementalDemoScenario final {
