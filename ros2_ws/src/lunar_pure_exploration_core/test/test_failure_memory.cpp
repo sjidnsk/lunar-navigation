@@ -77,6 +77,32 @@ FailureMemoryLimits Limits(std::size_t entries = 8U,
 constexpr PersistentFailureReason kPersistent =
     PersistentFailureReason::kExecutionReplansExhausted;
 
+TEST(FailureMemory, NavigationFailuresUseTheExistingEvidencePatchLifetime) {
+  const GridGeometry geometry{8U, 8U, 1.0, 0.0, 0.0, 0.0};
+  const auto base = RectangularRaster(geometry, UniformData(geometry));
+  const auto no_path_candidate =
+      CandidateAt(base, {2.5, 2.5}, {10, 20, 30});
+  const auto timeout_candidate =
+      CandidateAt(base, {5.5, 5.5}, {40, 50, 60});
+
+  FailureMemory memory(1.0, Limits());
+  memory.BeginTask("navigation-failures");
+  memory.RecordPersistentFailure(
+      no_path_candidate, PersistentFailureReason::kNavigationNoPath, base);
+  memory.RecordPersistentFailure(
+      timeout_candidate, PersistentFailureReason::kNavigationTimeout, base);
+
+  EXPECT_TRUE(memory.IsSuppressed(no_path_candidate, base));
+  EXPECT_TRUE(memory.IsSuppressed(timeout_candidate, base));
+
+  auto changed_data = UniformData(geometry);
+  SetCell(changed_data, geometry, {2, 2}, kOccupied);
+  const auto changed =
+      RectangularRaster(geometry, std::move(changed_data));
+  EXPECT_FALSE(memory.IsSuppressed(no_path_candidate, changed));
+  EXPECT_TRUE(memory.IsSuppressed(timeout_candidate, changed));
+}
+
 TEST(FailureMemory, ValidatesLimitsReasonAndAcceptedStartScope) {
   EXPECT_THROW(FailureMemory(0.0, Limits()), std::invalid_argument);
   EXPECT_THROW(FailureMemory(-1.0, Limits()), std::invalid_argument);

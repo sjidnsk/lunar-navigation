@@ -44,12 +44,44 @@ ament_target_dependencies(${PROJECT_NAME}
   visualization_msgs)
 target_link_libraries(${PROJECT_NAME} yaml-cpp)
 
+add_library(${PROJECT_NAME}_incremental SHARED
+  src/incremental_exploration_node.cpp
+  src/marker_builder.cpp
+  src/navigation_client.cpp
+  src/platform_config_loader.cpp
+  src/pose_resolver.cpp
+  src/task_map_marker_builder.cpp)
+target_compile_features(${PROJECT_NAME}_incremental PUBLIC cxx_std_20)
+target_include_directories(${PROJECT_NAME}_incremental
+  PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+    "$<INSTALL_INTERFACE:include>")
+ament_target_dependencies(${PROJECT_NAME}_incremental
+  diagnostic_msgs
+  geometry_msgs
+  lunar_planning_msgs
+  lunar_pure_exploration_core
+  lunar_pure_exploration_msgs
+  nav_msgs
+  rclcpp
+  rclcpp_action
+  tf2_msgs
+  visualization_msgs)
+target_link_libraries(${PROJECT_NAME}_incremental yaml-cpp)
+
 add_executable(pure_exploration_node src/main.cpp)
 target_compile_features(pure_exploration_node PRIVATE cxx_std_20)
 target_link_libraries(pure_exploration_node ${PROJECT_NAME})
 
+add_executable(incremental_exploration_node
+  src/incremental_exploration_main.cpp)
+target_compile_features(incremental_exploration_node PRIVATE cxx_std_20)
+target_link_libraries(incremental_exploration_node
+  ${PROJECT_NAME}_incremental)
+
 install(
-  TARGETS ${PROJECT_NAME} pure_exploration_node
+  TARGETS ${PROJECT_NAME} ${PROJECT_NAME}_incremental
+    pure_exploration_node incremental_exploration_node
   EXPORT export_${PROJECT_NAME}
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
@@ -71,6 +103,10 @@ install(
 install(
   FILES "${LUNAR_PURE_EXPLORATION_LAUNCH_SOURCE_DIR}/pure_exploration.launch.py"
   DESTINATION share/${PROJECT_NAME}/launch)
+install(
+  FILES "${LUNAR_PURE_EXPLORATION_LAUNCH_SOURCE_DIR}/exploration_navigation.launch.py"
+  DESTINATION share/${PROJECT_NAME}/launch
+  OPTIONAL)
 
 if(BUILD_TESTING)
   find_package(action_msgs REQUIRED)
@@ -90,11 +126,11 @@ if(BUILD_TESTING)
   file(SHA256 "${_planner_ros_source_dir}/pure_plan_motion_server.cpp"
     _pure_plan_motion_server_sha)
   if(NOT _message_conversion_sha STREQUAL
-      "397be394bcf8c460dc2654bc2ef45c7181914461007367e338da2395f862a160" OR
+      "bcb8a6b20958f4a154b3e7a48b1d743026c6e927cca53014ddc167cb25a6a451" OR
      NOT _accepted_goal_finalizer_sha STREQUAL
       "bcd4dd1be9e56d6495b63171651b8449994d292d6451f3be960fd0fa72235d63" OR
      NOT _pure_plan_motion_server_sha STREQUAL
-      "133373fe2cc8ff058bd7da407e754da027be70027895f829ab7c3f4c13be4139")
+      "fe1f09c82ba8463eec22f0fa2d2d9280bf59873353e9f8d118c401b118253fb6")
     message(FATAL_ERROR
       "final planner source changed; re-review Task 10 compatibility")
   endif()
@@ -149,6 +185,26 @@ if(BUILD_TESTING)
   ament_add_gtest(test_execution_monitor test/test_execution_monitor.cpp)
   target_compile_features(test_execution_monitor PRIVATE cxx_std_20)
   target_link_libraries(test_execution_monitor ${PROJECT_NAME})
+
+  ament_add_gtest(test_navigation_client test/test_navigation_client.cpp)
+  target_compile_features(test_navigation_client PRIVATE cxx_std_20)
+  ament_target_dependencies(test_navigation_client rclcpp rclcpp_action)
+  target_link_libraries(test_navigation_client
+    ${PROJECT_NAME}_incremental)
+
+  ament_add_gtest(test_task_map_marker_builder
+    test/test_task_map_marker_builder.cpp)
+  target_compile_features(test_task_map_marker_builder PRIVATE cxx_std_20)
+  target_link_libraries(test_task_map_marker_builder
+    ${PROJECT_NAME}_incremental)
+
+  ament_add_gtest(test_incremental_exploration_node
+    test/test_incremental_exploration_node.cpp)
+  target_compile_features(test_incremental_exploration_node PRIVATE cxx_std_20)
+  ament_target_dependencies(test_incremental_exploration_node
+    action_msgs rclcpp rclcpp_action)
+  target_link_libraries(test_incremental_exploration_node
+    ${PROJECT_NAME}_incremental)
 endif()
 
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)

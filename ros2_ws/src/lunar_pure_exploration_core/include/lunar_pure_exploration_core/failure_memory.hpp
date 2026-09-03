@@ -11,6 +11,8 @@ namespace lunar::pure_exploration {
 
 enum class PersistentFailureReason : std::uint8_t {
   kExecutionReplansExhausted,
+  kNavigationNoPath,
+  kNavigationTimeout,
 };
 
 struct FailureMemoryLimits {

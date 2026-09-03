@@ -172,8 +172,13 @@ bool FailureMemory::SameGeometry(const GridGeometry& left,
 void FailureMemory::RecordPersistentFailure(
     const CandidateView& candidate, PersistentFailureReason reason,
     const TaskRaster& raster) {
-  if (reason != PersistentFailureReason::kExecutionReplansExhausted) {
-    throw std::invalid_argument("unsupported persistent failure reason");
+  switch (reason) {
+    case PersistentFailureReason::kExecutionReplansExhausted:
+    case PersistentFailureReason::kNavigationNoPath:
+    case PersistentFailureReason::kNavigationTimeout:
+      break;
+    default:
+      throw std::invalid_argument("unsupported persistent failure reason");
   }
   if (!std::isfinite(candidate.pose.x) || !std::isfinite(candidate.pose.y)) {
     throw std::invalid_argument("failure candidate world center must be finite");
