@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>lunar_incremental_navigation_ros</name>
+  <version>0.1.0</version>
+  <description>ROS integration for incremental lunar navigation.</description>
+  <maintainer email="maintainers@example.invalid">Lunar Navigation Maintainers</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>ament_index_cpp</depend>
+  <depend>action_msgs</depend>
+  <depend>diagnostic_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>grid_map_msgs</depend>
+  <depend>lunar_incremental_navigation_core</depend>
+  <depend>lunar_planning_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_action</depend>
+  <depend>tf2_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>yaml-cpp</depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
