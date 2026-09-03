@@ -36,6 +36,17 @@ PlatformGeometry WheelPlatform() {
   };
 }
 
+PlatformGeometry LeggedPlatform() {
+  return PlatformGeometry{
+      .platform_id = "yobotics-quad48",
+      .platform_type = "LEGGED",
+      .base_frame_id = "base_link",
+      .footprint_vertices = {{0.34, 0.165}, {0.34, -0.165},
+                             {-0.34, -0.165}, {-0.34, 0.165}},
+      .minimum_clearance_m = 0.3,
+  };
+}
+
 PlatformGeometry CompactWheelPlatform() {
   return PlatformGeometry{
       .platform_id = "compact",
@@ -255,6 +266,18 @@ TEST(CandidateGeneratorTest, RejectsFinitePlatformInputsWhoseDerivedGeometryOver
                std::overflow_error);
 }
 
+TEST(CandidateGeneratorTest, AcceptsLeggedDecisionGeometry) {
+  const CandidateGenerator generator(LeggedPlatform(), StandardYawOffsets(),
+                                     GenerousLimits());
+
+  EXPECT_DOUBLE_EQ(generator.platform_length_m(), 0.68);
+  EXPECT_DOUBLE_EQ(generator.platform_width_m(), 0.33);
+  EXPECT_NEAR(generator.footprint_circumscribed_radius_m(),
+              std::hypot(0.34, 0.165), 1.0e-12);
+  EXPECT_NEAR(generator.minimum_standoff_m(), std::hypot(0.34, 0.165) + 0.3,
+              1.0e-12);
+}
+
 TEST(CandidateGeneratorTest, ChargesQuadraticPlatformValidationBeforePairLoops) {
   auto exact = GenerousLimits();
   exact.maximum_collision_work_units = 12U;
@@ -281,7 +304,7 @@ TEST(CandidateGeneratorTest, ChargesQuadraticPlatformValidationBeforePairLoops) 
 
 TEST(CandidateGeneratorTest, RejectsInvalidPlatformPayloadYawOffsetsAndLimits) {
   auto platform = WheelPlatform();
-  platform.platform_type = "LEGGED";
+  platform.platform_type = "HOPPER";
   EXPECT_THROW(CandidateGenerator(platform, StandardYawOffsets(), GenerousLimits()),
                std::invalid_argument);
   platform = WheelPlatform();

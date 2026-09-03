@@ -65,9 +65,12 @@ bool SegmentsIntersect(Vec2 a, Vec2 b, Vec2 c, Vec2 d) {
 
 std::size_t ValidateAndNormalizeFootprint(PlatformGeometry& platform,
                                           std::size_t maximum_work_units) {
-  if (platform.platform_type != "WHEELED" || platform.platform_id.empty() ||
+  if ((platform.platform_type != "WHEELED" &&
+       platform.platform_type != "LEGGED") ||
+      platform.platform_id.empty() ||
       platform.base_frame_id.empty()) {
-    throw std::invalid_argument("candidate platform must be identified WHEELED payload");
+    throw std::invalid_argument(
+        "candidate platform must be identified WHEELED or LEGGED payload");
   }
   if (!std::isfinite(platform.minimum_clearance_m) ||
       platform.minimum_clearance_m < 0.0) {

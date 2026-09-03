@@ -15,7 +15,7 @@ namespace lunar::pure_exploration_ros {
 namespace {
 
 [[noreturn]] void InvalidConfig() {
-  throw std::invalid_argument{"invalid wheel platform config"};
+  throw std::invalid_argument{"invalid exploration platform config"};
 }
 
 void RequireExactKeys(
@@ -141,12 +141,75 @@ lunar::pure_exploration::PlatformGeometry ParseWheel(
   };
 }
 
-}  // namespace
+lunar::pure_exploration::PlatformGeometry ParseLegged(
+    const YAML::Node& root) {
+  RequireExactKeys(root, {"platform", "platform_id", "platform_type",
+                          "capability_version", "base_frame_id",
+                          "capability"});
 
-LoadedPlatformConfig LoadPlatformConfig(
+  if (RequireNonemptyString(root, "platform") != "legged" ||
+      RequireNonemptyString(root, "platform_type") != "LEGGED" ||
+      RequireNonemptyString(root, "base_frame_id") != "base_link") {
+    InvalidConfig();
+  }
+  const std::string platform_id =
+      RequireNonemptyString(root, "platform_id");
+  static_cast<void>(RequireNonemptyString(root, "capability_version"));
+
+  const YAML::Node capability = Require(root, "capability");
+  RequireExactKeys(
+      capability,
+      {"body_extent_m", "nominal_body_height_m", "body_height_m",
+       "platform_mass_kg", "nominal_payload_kg", "maximum_payload_kg",
+       "maximum_forward_speed_mps", "maximum_reverse_speed_mps",
+       "maximum_lateral_speed_mps", "maximum_yaw_rate_radps",
+       "maximum_linear_acceleration_mps2",
+       "maximum_yaw_acceleration_radps2", "maximum_slope_rad",
+       "maximum_step_height_m", "maximum_gap_width_m",
+       "minimum_body_clearance_m", "step_vertical_rate_mps",
+       "unknown_is_traversable", "motion_primitives"});
+
+  const YAML::Node body_extent = Require(capability, "body_extent_m");
+  if (!body_extent.IsSequence() || body_extent.size() != 3U ||
+      !body_extent[0U].IsScalar() || !body_extent[1U].IsScalar() ||
+      !body_extent[2U].IsScalar()) {
+    InvalidConfig();
+  }
+  const double length_m = body_extent[0U].as<double>();
+  const double width_m = body_extent[1U].as<double>();
+  const double height_m = body_extent[2U].as<double>();
+  if (!std::isfinite(length_m) || !std::isfinite(width_m) ||
+      !std::isfinite(height_m) || length_m <= 0.0 || width_m <= 0.0 ||
+      height_m <= 0.0) {
+    InvalidConfig();
+  }
+
+  const double minimum_clearance_m =
+      RequireFiniteDouble(capability, "minimum_body_clearance_m");
+  if (minimum_clearance_m < 0.0) {
+    InvalidConfig();
+  }
+
+  const double half_length_m = length_m / 2.0;
+  const double half_width_m = width_m / 2.0;
+  return lunar::pure_exploration::PlatformGeometry{
+      .platform_id = platform_id,
+      .platform_type = "LEGGED",
+      .base_frame_id = "base_link",
+      .footprint_vertices = {{half_length_m, half_width_m},
+                             {half_length_m, -half_width_m},
+                             {-half_length_m, -half_width_m},
+                             {-half_length_m, half_width_m}},
+      .minimum_clearance_m = minimum_clearance_m,
+  };
+}
+
+LoadedPlatformConfig LoadPlatformConfigImpl(
     const std::filesystem::path& yaml_path,
-    const std::string_view platform_selector) {
-  if (platform_selector != "wheel") {
+    const std::string_view platform_selector,
+    const bool allow_legged) {
+  if (platform_selector != "wheel" &&
+      (!allow_legged || platform_selector != "legged")) {
     throw std::invalid_argument{"unsupported exploration platform selector"};
   }
 
@@ -162,11 +225,27 @@ LoadedPlatformConfig LoadPlatformConfig(
   }
 
   try {
-    return LoadedPlatformConfig{.geometry = ParseWheel(root)};
+    return LoadedPlatformConfig{
+        .geometry = platform_selector == "wheel" ? ParseWheel(root)
+                                                   : ParseLegged(root)};
   } catch (const YAML::Exception& error) {
     throw std::invalid_argument{"malformed platform config: " +
                                 std::string{error.what()}};
   }
+}
+
+}  // namespace
+
+LoadedPlatformConfig LoadPlatformConfig(
+    const std::filesystem::path& yaml_path,
+    const std::string_view platform_selector) {
+  return LoadPlatformConfigImpl(yaml_path, platform_selector, false);
+}
+
+LoadedPlatformConfig LoadIncrementalPlatformConfig(
+    const std::filesystem::path& yaml_path,
+    const std::string_view platform_selector) {
+  return LoadPlatformConfigImpl(yaml_path, platform_selector, true);
 }
 
 }  // namespace lunar::pure_exploration_ros

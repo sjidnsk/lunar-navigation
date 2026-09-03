@@ -94,8 +94,8 @@ IncrementalExplorationNodeParameters LoadParameters(rclcpp::Node& node) {
     throw std::invalid_argument{"platform_config is required"};
   }
   auto platform =
-      LoadPlatformConfig(std::filesystem::path{platform_config},
-                         platform_selector)
+      LoadIncrementalPlatformConfig(std::filesystem::path{platform_config},
+                                    platform_selector)
           .geometry;
 
   const auto threshold =

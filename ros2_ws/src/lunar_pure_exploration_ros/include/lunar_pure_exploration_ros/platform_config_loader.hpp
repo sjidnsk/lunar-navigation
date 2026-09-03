@@ -15,4 +15,8 @@ struct LoadedPlatformConfig {
     const std::filesystem::path& yaml_path,
     std::string_view platform_selector);
 
+[[nodiscard]] LoadedPlatformConfig LoadIncrementalPlatformConfig(
+    const std::filesystem::path& yaml_path,
+    std::string_view platform_selector);
+
 }  // namespace lunar::pure_exploration_ros

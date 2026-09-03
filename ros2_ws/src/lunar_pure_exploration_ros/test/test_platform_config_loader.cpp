@@ -75,6 +75,8 @@ class TemporaryYaml final {
 
 std::string WheelYaml() { return ReadText(PlannerConfigPath("wheel.yaml")); }
 
+std::string LeggedYaml() { return ReadText(PlannerConfigPath("legged.yaml")); }
+
 TEST(PlatformConfigLoader, LoadsPlannerInstalledWheelGeometry) {
   const LoadedPlatformConfig config =
       LoadPlatformConfig(PlannerConfigPath("wheel.yaml"), "wheel");
@@ -94,7 +96,48 @@ TEST(PlatformConfigLoader, LoadsPlannerInstalledWheelGeometry) {
   EXPECT_DOUBLE_EQ(config.geometry.minimum_clearance_m, 0.2);
 }
 
-TEST(PlatformConfigLoader, RejectsNonWheelSelectorsAndProfiles) {
+TEST(PlatformConfigLoader, LoadsPlannerInstalledLeggedGeometry) {
+  const LoadedPlatformConfig config =
+      LoadIncrementalPlatformConfig(PlannerConfigPath("legged.yaml"),
+                                    "legged");
+
+  EXPECT_EQ(config.geometry.platform_id, "yobotics-quad48");
+  EXPECT_EQ(config.geometry.platform_type, "LEGGED");
+  EXPECT_EQ(config.geometry.base_frame_id, "base_link");
+  ASSERT_EQ(config.geometry.footprint_vertices.size(), 4U);
+  EXPECT_DOUBLE_EQ(config.geometry.footprint_vertices[0].x, 0.34);
+  EXPECT_DOUBLE_EQ(config.geometry.footprint_vertices[0].y, 0.165);
+  EXPECT_DOUBLE_EQ(config.geometry.footprint_vertices[1].x, 0.34);
+  EXPECT_DOUBLE_EQ(config.geometry.footprint_vertices[1].y, -0.165);
+  EXPECT_DOUBLE_EQ(config.geometry.footprint_vertices[2].x, -0.34);
+  EXPECT_DOUBLE_EQ(config.geometry.footprint_vertices[2].y, -0.165);
+  EXPECT_DOUBLE_EQ(config.geometry.footprint_vertices[3].x, -0.34);
+  EXPECT_DOUBLE_EQ(config.geometry.footprint_vertices[3].y, 0.165);
+  EXPECT_DOUBLE_EQ(config.geometry.minimum_clearance_m, 0.3);
+}
+
+TEST(PlatformConfigLoader, RejectsMalformedLeggedGeometry) {
+  for (const auto& replacement : {
+           std::pair{"body_extent_m: [0.68, 0.33, 0.35]",
+                     "body_extent_m: [0.68, 0.33]"},
+           std::pair{"body_extent_m: [0.68, 0.33, 0.35]",
+                     "body_extent_m: [0.68, .nan, 0.35]"},
+           std::pair{"body_extent_m: [0.68, 0.33, 0.35]",
+                     "body_extent_m: [-0.68, 0.33, 0.35]"},
+           std::pair{"minimum_body_clearance_m: 0.3",
+                     "minimum_body_clearance_m: -0.01"},
+           std::pair{"minimum_body_clearance_m: 0.3",
+                     "minimum_body_clearance_m: .inf"},
+           std::pair{"capability:\n",
+                     "capability:\n  unexpected_capability: true\n"}}) {
+    const TemporaryYaml yaml{
+        ReplaceOnce(LeggedYaml(), replacement.first, replacement.second)};
+    EXPECT_THROW(LoadIncrementalPlatformConfig(yaml.path(), "legged"),
+                 std::invalid_argument);
+  }
+}
+
+TEST(PlatformConfigLoader, PreservesLegacyWheelOnlySelectorContract) {
   EXPECT_THROW(LoadPlatformConfig(PlannerConfigPath("wheel.yaml"), ""),
                std::invalid_argument);
   EXPECT_THROW(LoadPlatformConfig(PlannerConfigPath("wheel.yaml"), "Wheel"),
@@ -103,13 +146,35 @@ TEST(PlatformConfigLoader, RejectsNonWheelSelectorsAndProfiles) {
                std::invalid_argument);
   EXPECT_THROW(LoadPlatformConfig(PlannerConfigPath("wheel.yaml"), "legged"),
                std::invalid_argument);
+  EXPECT_THROW(LoadPlatformConfig(PlannerConfigPath("legged.yaml"), "wheel"),
+               std::invalid_argument);
+  EXPECT_THROW(LoadPlatformConfig(PlannerConfigPath("legged.yaml"), "legged"),
+               std::invalid_argument);
   EXPECT_THROW(LoadPlatformConfig(PlannerConfigPath("wheel.yaml"), "hopper"),
                std::invalid_argument);
   EXPECT_THROW(LoadPlatformConfig(PlannerConfigPath("wheel.yaml"), "unknown"),
                std::invalid_argument);
-  EXPECT_THROW(LoadPlatformConfig(PlannerConfigPath("legged.yaml"), "legged"),
-               std::invalid_argument);
   EXPECT_THROW(LoadPlatformConfig(PlannerConfigPath("hopper.yaml"), "hopper"),
+               std::invalid_argument);
+}
+
+TEST(PlatformConfigLoader,
+     IncrementalApiLoadsWheelAndRejectsUnsupportedSelectorsAndMismatches) {
+  EXPECT_EQ(LoadIncrementalPlatformConfig(PlannerConfigPath("wheel.yaml"),
+                                           "wheel")
+                .geometry.platform_type,
+            "WHEELED");
+  EXPECT_THROW(LoadIncrementalPlatformConfig(PlannerConfigPath("wheel.yaml"),
+                                              "legged"),
+               std::invalid_argument);
+  EXPECT_THROW(LoadIncrementalPlatformConfig(PlannerConfigPath("legged.yaml"),
+                                              "wheel"),
+               std::invalid_argument);
+  EXPECT_THROW(LoadIncrementalPlatformConfig(PlannerConfigPath("hopper.yaml"),
+                                              "hopper"),
+               std::invalid_argument);
+  EXPECT_THROW(LoadIncrementalPlatformConfig(PlannerConfigPath("wheel.yaml"),
+                                              "unknown"),
                std::invalid_argument);
 }
 
