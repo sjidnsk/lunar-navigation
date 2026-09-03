@@ -203,11 +203,12 @@ ros2 launch lunar_pure_planner_ros lunar_surface_rviz_demo.launch.py
 这个 launch 仅在 `/lunar_demo/*` 中显式启用交付协议；生产配置
 `demo_delivery_protocol_enabled` 默认仍为 `false`。新目标先使 Demo 停车并清除旧执行段；首个目标或
 恢复 STOP 会用同一 token 交付全局图、局部图、odometry 和 `map->odom` TF，普通 4 m 滚动周期只需
-重交付局部图和停止位姿 odometry。规划器收到完整输入（足式还须完成可通行性投影）后返回可靠
-ACK；同 token 重发保持幂等。Demo 收到与当前 `request_id + map_token + segment_index` 匹配的
-EXECUTE 才移动。普通轮式/足式 `Path` 只用于 RViz 显示，不能解除停车状态。两类平台均以 `12 m`
-为名义局部前视，每执行 `4 m` 或当前段耗尽就停车并交付下一版地图；隔离 Demo 的 ACK 窗口为
-`10 s`，以容纳首张 1 km 全局图适配。
+重交付局部图和当前位姿 odometry。规划器收到完整输入（足式还须完成可通行性投影）后返回可靠
+ACK；同 token 重发保持幂等。首段仍须收到匹配当前 `request_id + map_token + segment_index` 的
+EXECUTE 才移动；普通轮式/足式 `Path` 只用于 RViz 显示。两类平台均以 `12 m` 为名义局部前视，
+每执行 `4 m` 触发下一版地图：ACK 前短暂保持快照位姿，ACK 后在后台规划期间继续执行旧段的剩余
+部分，新 EXECUTE 到达后从当前位置附近的前向路径段接续。只有旧段耗尽、新目标、恢复或失败时
+停车。隔离 Demo 的 ACK 窗口为 `10 s`，以容纳首张 1 km 全局图适配。
 
 RViz 固定坐标系为 `map`，初始顶视范围约为整张 1 km 地图。为规避部分 Mesa/RViz 组合中
 `Map` 与 GridMap 插件同时启用的 GLSL sampler 冲突，默认关闭原始占据图；**Wheel traversability**
