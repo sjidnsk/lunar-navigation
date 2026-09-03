@@ -22,6 +22,7 @@ find_package(yaml-cpp REQUIRED)
 set(LUNAR_INCREMENTAL_NAVIGATION_ROS_SOURCES
   src/elevation_pipeline.cpp
   src/exploration_map_projector.cpp
+  src/incremental_demo_scenario.cpp
   src/incremental_map_publisher.cpp
   src/incremental_navigation_node.cpp
   src/input_store.cpp
@@ -65,6 +66,20 @@ target_compile_features(lunar_incremental_navigation_node PUBLIC cxx_std_20)
 target_link_libraries(lunar_incremental_navigation_node ${PROJECT_NAME})
 ament_target_dependencies(lunar_incremental_navigation_node rclcpp)
 
+add_executable(incremental_demo_scenario_node
+  src/incremental_demo_scenario_node.cpp)
+target_compile_features(incremental_demo_scenario_node PUBLIC cxx_std_20)
+target_link_libraries(incremental_demo_scenario_node ${PROJECT_NAME})
+ament_target_dependencies(incremental_demo_scenario_node
+  geometry_msgs grid_map_msgs lunar_planning_msgs nav_msgs rclcpp tf2_msgs
+  visualization_msgs)
+
+add_executable(incremental_demo_motion_emulator_node
+  src/incremental_demo_motion_emulator_node.cpp)
+target_compile_features(incremental_demo_motion_emulator_node PUBLIC cxx_std_20)
+ament_target_dependencies(incremental_demo_motion_emulator_node
+  geometry_msgs lunar_planning_msgs nav_msgs rclcpp visualization_msgs)
+
 install(
   TARGETS ${PROJECT_NAME}
   EXPORT export_${PROJECT_NAME}
@@ -74,6 +89,8 @@ install(
   INCLUDES DESTINATION include)
 install(
   TARGETS lunar_incremental_navigation_node
+    incremental_demo_scenario_node
+    incremental_demo_motion_emulator_node
   RUNTIME DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
 
@@ -84,6 +101,10 @@ get_filename_component(
 get_filename_component(
   LUNAR_INCREMENTAL_NAVIGATION_LAUNCH_SOURCE_DIR
   "${CMAKE_CURRENT_SOURCE_DIR}/../../../launch"
+  ABSOLUTE)
+get_filename_component(
+  LUNAR_INCREMENTAL_NAVIGATION_RVIZ_SOURCE_DIR
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../../rviz"
   ABSOLUTE)
 install(
   DIRECTORY "${LUNAR_INCREMENTAL_NAVIGATION_CONFIG_SOURCE_DIR}/"
@@ -99,6 +120,11 @@ install(
   FILES_MATCHING
     PATTERN "exploration_navigation.launch.py"
     PATTERN "incremental_exploration_navigation_rviz.launch.py")
+install(
+  DIRECTORY "${LUNAR_INCREMENTAL_NAVIGATION_RVIZ_SOURCE_DIR}/"
+  DESTINATION share/${PROJECT_NAME}/rviz
+  FILES_MATCHING
+    PATTERN "incremental_exploration_navigation.rviz")
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)

@@ -1,0 +1,131 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /Global Options1
+        - /Three-state task map1
+        - /Fine traversability1
+    Splitter Ratio: 0.55
+    Tree Height: 640
+  - Class: rviz_common/Views
+    Name: Views
+    Splitter Ratio: 0.5
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Enabled: true
+      Name: Metric grid
+      Plane: XY
+      Cell Size: 1
+      Color: 70; 74; 80
+      Alpha: 0.35
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Task boundary
+      Topic: /planning_demo/exploration/task_boundary
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Three-state task map
+      Topic: /planning_demo/exploration/task_map_markers
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Local observation window
+      Topic: /planning_demo/local_window
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Frontiers
+      Topic: /planning_demo/exploration/frontiers
+      Value: true
+    - Class: rviz_default_plugins/Pose
+      Enabled: true
+      Name: Current goal
+      Topic: /planning_demo/exploration/current_goal
+      Color: 255; 0; 255
+      Alpha: 1
+      Shape: Arrow
+      Shaft Length: 1.2
+      Shaft Radius: 0.12
+      Head Length: 0.40
+      Head Radius: 0.24
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Fine traversability
+      Topic: /planning_demo/planning/fine_traversability
+      Value: true
+    - Class: rviz_default_plugins/Path
+      Enabled: true
+      Name: Global route
+      Topic: /planning_demo/planning/global_route
+      Color: 60; 120; 255
+      Alpha: 0.95
+      Line Style: Billboards
+      Line Width: 0.08
+      Pose Style: None
+    - Class: rviz_default_plugins/Path
+      Enabled: true
+      Name: Active path
+      Topic: /planning_demo/visualization/active_path
+      Color: 255; 140; 0
+      Alpha: 1
+      Line Style: Billboards
+      Line Width: 0.22
+      Pose Style: None
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Robot
+      Topic: /planning_demo/robot
+      Value: true
+    - Class: rviz_default_plugins/Path
+      Enabled: true
+      Name: Robot and trace
+      Topic: /planning_demo/robot_trace
+      Color: 255; 255; 255
+      Alpha: 1
+      Line Style: Billboards
+      Line Width: 0.10
+      Pose Style: None
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: HUD
+      Topic: /planning_demo/hud
+      Value: true
+    - Class: rviz_default_plugins/Map
+      Enabled: true
+      Name: Ground truth (visualization only)
+      Topic: /planning_demo/ground_truth
+      Alpha: 0.25
+      Color Scheme: map
+      Draw Behind: true
+      Value: true
+  Global Options:
+    Background Color: 28; 30; 34
+    Fixed Frame: map
+    Frame Rate: 30
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: Incremental exploration
+      Scale: 25
+      Target Frame: <Fixed Frame>
+      X: 0
+      Y: 0
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 920
+  Hide Left Dock: false
+  Hide Right Dock: false
+  Views:
+    collapsed: false
+  Width: 1440
