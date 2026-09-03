@@ -1,0 +1,55 @@
+schema_version: lunar-incremental-navigation/v2
+
+inputs:
+  grid_map:
+    name: /Car/T3/mapping/grid_map
+    type: grid_map_msgs/msg/GridMap
+    owner: external
+    frame: odom
+    required_layers: [elevation]
+  odometry:
+    name: /Car/T3/localization/odometry
+    type: nav_msgs/msg/Odometry
+    owner: external
+    frame: odom
+    child_frame: base_footprint
+  tf:
+    name: /tf
+    type: tf2_msgs/msg/TFMessage
+    owner: external
+    chain: [map, odom]
+
+action:
+  name: /Car/T4/navigation/navigate_to_pose
+  type: lunar_planning_msgs/action/NavigateToPose
+  owner: lunar_incremental_navigation_ros
+
+outputs:
+  exploration_map:
+    name: /Car/T4/mapping/exploration_map
+    type: nav_msgs/msg/OccupancyGrid
+    owner: lunar_incremental_navigation_ros
+    frame: map
+    values:
+      unknown: -1
+      free: 0
+      occupied: 100
+    qos:
+      reliability: reliable
+      durability: transient_local
+      history: keep_last
+      depth: 1
+  path_reference:
+    name: /Car/T4/planning/path_reference
+    type: lunar_planning_msgs/msg/PathReference
+    owner: lunar_incremental_navigation_ros
+    frame: map
+  global_route:
+    name: /Car/T4/planning/global_route
+    type: nav_msgs/msg/Path
+    owner: lunar_incremental_navigation_ros
+    frame: map
+  diagnostics:
+    name: /Car/T4/planning/diagnostics
+    type: diagnostic_msgs/msg/DiagnosticArray
+    owner: lunar_incremental_navigation_ros

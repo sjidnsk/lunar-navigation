@@ -1,0 +1,43 @@
+stack:
+  mode: incremental_v2
+
+common:
+  platform_type: wheel
+  use_sim_time: false
+  frames:
+    map: map
+    odom: odom
+    base_link: base_footprint
+  odometry_topic: /Car/T3/localization/odometry
+  tf_topic: /tf
+
+exploration:
+  occupied_threshold: 50
+  minimum_frontier_length_m: 1.0
+  coverage_target: 0.80
+  sensor_range_m: 10.0
+  sensor_fov_deg: 90.0
+  yaw_offsets_deg: [-45.0, -22.5, 0.0, 22.5, 45.0]
+  exploration_map_topic: /Car/T4/mapping/exploration_map
+  task_topic: /Car/T4/exploration/task
+  navigation_action: /Car/T4/navigation/navigate_to_pose
+  status_topic: /Car/T4/exploration/status
+  task_boundary_topic: /Car/T4/exploration/task_boundary
+  task_map_markers_topic: /Car/T4/exploration/task_map_markers
+  current_goal_topic: /Car/T4/exploration/current_goal
+  frontiers_topic: /Car/T4/exploration/frontiers
+  diagnostics_topic: /Car/T4/exploration/diagnostics
+
+navigation:
+  coarse_resolution_m: 1.0
+  planning_sla_ms: 2000
+  planning_hard_timeout_ms: 3000
+  global_subdeadline_ms: 500
+  local_map_topic: /Car/T3/mapping/grid_map
+  local_map_qos_reliability: reliable
+  local_map_qos_durability: transient_local
+  action_name: /Car/T4/navigation/navigate_to_pose
+  path_reference_topic: /Car/T4/planning/path_reference
+  global_route_topic: /Car/T4/planning/global_route
+  diagnostics_topic: /Car/T4/planning/diagnostics
+  exploration_map_topic: /Car/T4/mapping/exploration_map
