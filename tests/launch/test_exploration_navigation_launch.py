@@ -9,6 +9,7 @@ import sys
 import types
 
 import pytest
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -192,6 +193,24 @@ def test_explicit_mode_platform_and_time_override_yaml_defaults(
         "pure_planner.launch.py",
         "pure_exploration.launch.py",
     }
+
+
+def test_legacy_mode_ignores_invalid_incremental_only_common_contracts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Reject an incremental QoS/frame validation that blocks explicit legacy rollback."""
+    config = yaml.safe_load(STACK_CONFIG.read_text(encoding="utf-8"))
+    config["common"]["exploration_map_qos"]["depth"] = 2
+    config_path = tmp_path / "legacy-with-invalid-v2.yaml"
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    module, Node, IncludeLaunchDescription = _launch_module(monkeypatch)
+
+    actions = _compose(
+        module, config_file=str(config_path), stack_mode="legacy", platform_type="wheel"
+    )
+
+    assert all(isinstance(action, IncludeLaunchDescription) for action in actions)
+    assert not any(isinstance(action, Node) for action in actions)
 
 
 def test_invalid_mode_does_not_construct_another_action_server(

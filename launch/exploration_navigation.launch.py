@@ -59,6 +59,13 @@ def _require_common(config: dict[str, object]) -> dict[str, object]:
     return common
 
 
+def _legacy_common(config: dict[str, object]) -> dict[str, object]:
+    common = config["common"]
+    if not isinstance(common, dict):
+        raise RuntimeError("exploration_navigation common defaults are invalid")
+    return common
+
+
 def _resolved_value(override: str, configured: object, name: str) -> str:
     value = override or configured
     if not isinstance(value, str) or not value:
@@ -108,11 +115,18 @@ def _incremental_parameters(
 def _compose(context):
     config_file = LaunchConfiguration("config_file").perform(context).strip()
     config = _load_config(config_file)
-    common = _require_common(config)
+    stack = config["stack"]
+    if not isinstance(stack, dict):
+        raise RuntimeError("exploration_navigation stack defaults are invalid")
     stack_mode = _resolved_value(
         LaunchConfiguration("stack_mode").perform(context).strip(),
-        config["stack"].get("mode"), "stack_mode",
+        stack.get("mode"), "stack_mode",
     )
+
+    if stack_mode not in {"legacy", "incremental_v2"}:
+        raise RuntimeError("unsupported stack_mode; expected legacy or incremental_v2")
+
+    common = _legacy_common(config)
     platform_type = _resolved_value(
         LaunchConfiguration("platform_type").perform(context).strip(),
         common.get("platform_type"), "platform_type",
@@ -122,37 +136,11 @@ def _compose(context):
         common.get("use_sim_time"),
     )
 
-    navigation_share = Path(
-        get_package_share_directory("lunar_incremental_navigation_ros")
-    )
-    planner_share = Path(get_package_share_directory("lunar_pure_planner_ros"))
-    exploration_share = Path(
-        get_package_share_directory("lunar_pure_exploration_ros")
-    )
-    platform_config = str(navigation_share / "config" / f"{platform_type}.yaml")
-
-    if stack_mode == "incremental_v2":
-        navigation, exploration = _incremental_parameters(
-            config, common, platform_type, platform_config, use_sim_time
-        )
-        return [
-            Node(
-                package="lunar_incremental_navigation_ros",
-                executable="lunar_incremental_navigation_node",
-                name="incremental_navigation",
-                parameters=[navigation],
-                output="screen",
-            ),
-            Node(
-                package="lunar_pure_exploration_ros",
-                executable="incremental_exploration_node",
-                name="incremental_exploration",
-                parameters=[exploration],
-                output="screen",
-            ),
-        ]
-
     if stack_mode == "legacy":
+        planner_share = Path(get_package_share_directory("lunar_pure_planner_ros"))
+        exploration_share = Path(
+            get_package_share_directory("lunar_pure_exploration_ros")
+        )
         return [
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
@@ -175,7 +163,35 @@ def _compose(context):
             ),
         ]
 
-    raise RuntimeError("unsupported stack_mode; expected legacy or incremental_v2")
+    if stack_mode == "incremental_v2":
+        common = _require_common(config)
+        navigation_share = Path(
+            get_package_share_directory("lunar_incremental_navigation_ros")
+        )
+        platform_config = str(
+            navigation_share / "config" / f"{platform_type}.yaml"
+        )
+        navigation, exploration = _incremental_parameters(
+            config, common, platform_type, platform_config, use_sim_time
+        )
+        return [
+            Node(
+                package="lunar_incremental_navigation_ros",
+                executable="lunar_incremental_navigation_node",
+                name="incremental_navigation",
+                parameters=[navigation],
+                output="screen",
+            ),
+            Node(
+                package="lunar_pure_exploration_ros",
+                executable="incremental_exploration_node",
+                name="incremental_exploration",
+                parameters=[exploration],
+                output="screen",
+            ),
+        ]
+
+    raise AssertionError("validated stack mode was not dispatched")
 
 
 def generate_launch_description() -> LaunchDescription:
