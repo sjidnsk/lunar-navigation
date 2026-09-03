@@ -9,6 +9,7 @@ find_package(nav_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(trajectory_msgs REQUIRED)
+find_package(unique_identifier_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/DemoMapAck.msg"
@@ -16,10 +17,12 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/GoalRegion.msg"
   "msg/HopSegment.msg"
   "msg/MotionReference.msg"
+  "msg/PathReference.msg"
   "msg/PlannerDiagnostics.msg"
   "msg/TimedPath.msg"
   "action/PlanMotion.action"
-  DEPENDENCIES action_msgs builtin_interfaces geometry_msgs nav_msgs std_msgs trajectory_msgs
+  "action/NavigateToPose.action"
+  DEPENDENCIES action_msgs builtin_interfaces geometry_msgs nav_msgs std_msgs trajectory_msgs unique_identifier_msgs
 )
 
 ament_export_dependencies(rosidl_default_runtime)

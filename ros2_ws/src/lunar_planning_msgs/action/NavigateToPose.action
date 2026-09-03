@@ -1,0 +1,23 @@
+float64 target_x_m
+float64 target_y_m
+bool has_target_yaw
+float64 target_yaw_rad
+---
+uint8 GOAL_REACHED=0
+uint8 NO_PATH=1
+uint8 INVALID_GOAL=2
+uint8 MAP_UNAVAILABLE=3
+uint8 TIMEOUT=4
+uint8 CANCELED=5
+uint8 INTERNAL_ERROR=6
+uint8 outcome
+string reason_code
+uint64 last_segment_revision
+---
+uint8 PLANNING=0
+uint8 EXECUTING=1
+uint8 REPLANNING=2
+uint8 session_state
+uint64 planning_cycle
+uint64 active_segment_revision
+string reason_code
