@@ -18,6 +18,18 @@ nav_msgs::msg::Path StraightPath(const double finish_x_m) {
   return path;
 }
 
+nav_msgs::msg::Path DenseStraightPath(const double start_x_m,
+                                      const double finish_x_m) {
+  nav_msgs::msg::Path path;
+  path.header.frame_id = "odom";
+  for (double x_m = start_x_m; x_m <= finish_x_m; x_m += 0.5) {
+    geometry_msgs::msg::PoseStamped pose;
+    pose.pose.position.x = x_m;
+    path.poses.push_back(pose);
+  }
+  return path;
+}
+
 builtin_interfaces::msg::Time Stamp(const int32_t seconds) {
   builtin_interfaces::msg::Time stamp;
   stamp.sec = seconds;
@@ -115,7 +127,7 @@ TEST(LunarSurfaceDemoState, PublishesFirstLocalMapThenEveryFourMetres) {
 }
 
 TEST(LunarSurfaceDemoState,
-     DeliveryProtocolStopsAtFourMetresAndClearsTheExecutedSegment) {
+     DeliveryProtocolKeepsExecutingAfterRefreshAckUntilReplacementArrives) {
   LunarSurfaceDemoState state;
   state.Reset(0.0, 0.0);
   state.EnableDeliveryProtocol(
@@ -135,10 +147,20 @@ TEST(LunarSurfaceDemoState,
   state.Advance(0.5);
   ASSERT_TRUE(state.ShouldBeginMapDelivery(4.0));
   state.BeginMapDelivery(Stamp(11));
+  EXPECT_TRUE(state.has_active_path());
   EXPECT_FALSE(state.can_advance());
-  EXPECT_FALSE(state.has_active_path());
+  ASSERT_TRUE(state.HandleMapAck(Ack("rviz-4m", Stamp(11))));
+  EXPECT_TRUE(state.can_advance());
+
   state.Advance(0.5);
-  EXPECT_DOUBLE_EQ(state.x_m(), 4.0);
+  state.Advance(0.5);
+  state.Advance(0.5);
+  EXPECT_DOUBLE_EQ(state.x_m(), 5.5);
+
+  ASSERT_TRUE(state.HandleSegment(ExecuteSegment(
+      "rviz-4m", Stamp(11), 2U, DenseStraightPath(4.0, 16.0))));
+  state.Advance(0.5);
+  EXPECT_DOUBLE_EQ(state.x_m(), 6.0);
 }
 
 TEST(LunarSurfaceDemoState, WaitsForBothConsumersBeforePublishing) {

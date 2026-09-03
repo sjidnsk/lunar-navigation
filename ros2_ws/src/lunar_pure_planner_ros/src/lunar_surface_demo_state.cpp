@@ -1,6 +1,8 @@
 #include "lunar_pure_planner_ros/lunar_surface_demo_state.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
 #include <utility>
 
 #include "lunar_pure_planner_ros/lunar_surface_demo_motion.hpp"
@@ -11,6 +13,41 @@ namespace {
 bool SameToken(const builtin_interfaces::msg::Time& left,
                const builtin_interfaces::msg::Time& right) noexcept {
   return left.sec == right.sec && left.nanosec == right.nanosec;
+}
+
+std::size_t FirstPoseAfterNearestProjection(const nav_msgs::msg::Path& path,
+                                            const double x_m,
+                                            const double y_m) noexcept {
+  if (path.poses.size() <= 1U) {
+    return 0U;
+  }
+
+  double best_distance_squared = std::numeric_limits<double>::infinity();
+  std::size_t best_next_pose = 1U;
+  for (std::size_t next_pose = 1U; next_pose < path.poses.size();
+       ++next_pose) {
+    const auto& start = path.poses[next_pose - 1U].pose.position;
+    const auto& finish = path.poses[next_pose].pose.position;
+    const double dx = finish.x - start.x;
+    const double dy = finish.y - start.y;
+    const double length_squared = dx * dx + dy * dy;
+    const double projection = length_squared > 0.0
+        ? std::clamp(((x_m - start.x) * dx + (y_m - start.y) * dy) /
+                         length_squared,
+                     0.0, 1.0)
+        : 0.0;
+    const double projected_x = start.x + projection * dx;
+    const double projected_y = start.y + projection * dy;
+    const double offset_x = x_m - projected_x;
+    const double offset_y = y_m - projected_y;
+    const double distance_squared =
+        offset_x * offset_x + offset_y * offset_y;
+    if (distance_squared <= best_distance_squared) {
+      best_distance_squared = distance_squared;
+      best_next_pose = next_pose;
+    }
+  }
+  return best_next_pose;
 }
 
 }  // namespace
@@ -130,7 +167,6 @@ void LunarSurfaceDemoState::BeginMapDelivery(
   cached_segment_.reset();
   distance_since_map_delivery_m_ = 0.0;
   map_delivery_pending_ = true;
-  ClearActivePath();
   delivery_state_ = DeliveryState::kWaitingForAck;
 }
 
@@ -185,7 +221,8 @@ bool LunarSurfaceDemoState::has_active_path() const noexcept {
 bool LunarSurfaceDemoState::can_advance() const noexcept {
   return has_active_path() &&
          (delivery_state_ == DeliveryState::kLegacy ||
-          delivery_state_ == DeliveryState::kExecuting);
+          delivery_state_ == DeliveryState::kExecuting ||
+          delivery_state_ == DeliveryState::kWaitingForSegment);
 }
 
 void LunarSurfaceDemoState::ClearActivePath() noexcept {
@@ -195,7 +232,8 @@ void LunarSurfaceDemoState::ClearActivePath() noexcept {
 
 void LunarSurfaceDemoState::ActivateSegment(
     const lunar_planning_msgs::msg::DemoPlanSegment& segment) {
-  AcceptPath(segment.executable_path);
+  active_path_ = segment.executable_path;
+  next_path_pose_ = FirstPoseAfterNearestProjection(active_path_, x_m_, y_m_);
   delivery_state_ = DeliveryState::kExecuting;
 }
 
