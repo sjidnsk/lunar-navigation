@@ -2,7 +2,7 @@
 
 `lunar_pure_planner_ros` 是独立的普通 ROS 2 节点，不使用 Lifecycle manager，也不启动旧规划器。
 
-## 纯前沿探索整合
+## 纯前沿探索整合（legacy）
 
 目标目录已加入三个物理隔离的探索包：
 
@@ -81,6 +81,104 @@ ros2 topic echo /Car/T4/exploration/status
 当前 Humble 整合验证：三个探索包构建通过，core 201 项和 ROS 134 项测试均为 0 失败；安装态
 假 `PlanMotion` server 的 Goal、Result、MotionReference 握手通过。真实课题三在线输入、真实控制器、
 车辆执行和 Jetson AGX Orin 性能/稳定性尚未运行，不能由本机验证替代。
+
+## 增量探索—导航栈（incremental_v2）
+
+`incremental_v2` 是与上节 legacy 栈并列的启动路径：它保留 legacy 的
+`PlanMotion.action`、`pure_exploration_node`、`lunar_pure_planner_*` 和既有
+`global_overview: nav_msgs/msg/OccupancyGrid` 语义，不向旧接口回写新版字段。启动时只能二选一，
+没有运行时模式切换或自动回退。
+
+```bash
+# 目标 Humble/Orin 环境：先构建并 source 该环境自己的安装前缀。
+source /opt/ros/humble/setup.bash
+source /absolute/path/to/install/setup.bash
+
+# 新版：唯一增量地图 + 薄探索决策器。
+ros2 launch lunar_pure_exploration_ros exploration_navigation.launch.py \
+  stack_mode:=incremental_v2 platform_type:=wheel
+
+# 回退：只启动冻结的 legacy 规划器与 legacy explorer。
+ros2 launch lunar_pure_exploration_ros exploration_navigation.launch.py \
+  stack_mode:=legacy platform_type:=wheel
+```
+
+`stack_mode`、平台、Topic、粗分辨率与探索参数集中在
+`config/exploration_navigation.yaml`；`config/incremental_navigation_interfaces.yaml` 是新版接口事实。
+当前 `coarse_resolution_m` 默认 `1.0 m`。轮式、足式都直接使用已经定型的可通行性与 8 邻域 A*；
+本栈没有修改其邻居展开、代价、足式有向边认证、路径简化或滚动会话。
+
+### 新版输入、地图与职责
+
+`incremental_v2` 不读取课题三全局先验：不订阅、不等待、也不转换
+`/Car/T3/mapping/global_overview` 或 `/Car/T3/semantic/current_pose`。唯一环境输入为：
+
+| 输入 | ROS 类型 | 用途 |
+| --- | --- | --- |
+| `/Car/T3/mapping/grid_map` | `grid_map_msgs/msg/GridMap`（必有 `elevation` layer） | 唯一原始地图；只由 `incremental_navigation` 订阅。 |
+| `/Car/T3/localization/odometry` | `nav_msgs/msg/Odometry` | 平面状态输入。 |
+| `/tf` | `tf2_msgs/msg/TFMessage` | 直接 `map -> odom` 变换。 |
+
+第一张有效局部 `GridMap` 冻结 fine resolution；当前允许输入 `0.2 m`，未来允许 `0.1 m`。分辨率由
+消息本身决定，不将 `0.1 m` 静默重采样为 `0.2 m`，也不支持运行时热切换；变更分辨率需重启该栈。
+
+导航进程拥有唯一的 `PersistentElevationMap` 和由其派生的 fine snapshot。它从同一 fine snapshot
+发布 `/Car/T4/mapping/exploration_map`（`nav_msgs/msg/OccupancyGrid`）：`-1=UNKNOWN`、
+`0=FREE/CANDIDATE`、`100=PROVEN_BLOCKED`，QoS 固定为 Reliable、Transient Local、KeepLast(1)。
+`incremental_exploration_node` 只读这张正式图、odometry、`/tf`、任务和
+`NavigateToPose` Action；它不订阅原始 `GridMap`，也不持有或重建导航内部地图。反向地，导航器不订阅
+探索任务 Topic；探索器每次只维护一个 Action goal。
+
+新版导航 Action 为 `/Car/T4/navigation/navigate_to_pose`
+（`lunar_planning_msgs/action/NavigateToPose`），路径为
+`/Car/T4/planning/path_reference`（`lunar_planning_msgs/msg/PathReference`）。判定一次规划周期成功时，
+必须同时看到 diagnostics 的 `cycle_result=PLAN_FOUND`、非空的
+`PathReference.state=ACTIVE` 及一致的 segment/traversability revision；真正的目标导航成功只以
+Action Result `GOAL_REACHED` 为准。Action accepted、单独 RViz 线条或 `PathReference` 存在都不是
+导航完成证据。
+
+### Jazzy 隔离 RViz 演示
+
+以下命令只用于本机 ROS 2 Jazzy 演示；所有算法接口位于 `/planning_demo/*`（`/tf` 例外），不发布
+`/Car/T5/Car_Cmd_Vel`，不接入生产课题三输入。由于 legacy explorer 的同包 target 仍有既有依赖，
+fresh 临时构建使用其最小依赖闭包：
+
+```bash
+export PROJECT_ROOT=/absolute/path/to/lunar_pure_planner_orin
+cd "$PROJECT_ROOT"
+source /opt/ros/jazzy/setup.bash
+export INCREMENTAL_BUILD_DIR="$(mktemp -d /tmp/lunar-incremental-demo-XXXXXX)"
+colcon --log-base "$INCREMENTAL_BUILD_DIR/log" build --base-paths ros2_ws/src \
+  --packages-up-to lunar_incremental_navigation_ros \
+    lunar_pure_exploration_ros lunar_pure_planner_ros \
+  --build-base "$INCREMENTAL_BUILD_DIR/build" \
+  --install-base "$INCREMENTAL_BUILD_DIR/install"
+source "$INCREMENTAL_BUILD_DIR/install/setup.bash"
+
+# wheel + 0.2 m；改为 0.1 或 legged 时必须重启。
+ros2 launch lunar_incremental_navigation_ros incremental_exploration_navigation_rviz.launch.py \
+  platform_type:=wheel fine_resolution_m:=0.2 task_size_m:=24.0 \
+  start_rviz:=true show_ground_truth:=false
+```
+
+RViz Fixed Frame 为 `map`。显示布局包括任务边界、三态任务图、16 m 局部窗口、frontier、唯一洋红
+current goal、fine traversability、细蓝 global route、粗橙 active path、机器人/轨迹和 HUD；可选
+ground truth 只供显示。不要显示或解释 A* OPEN/CLOSED 集合。必演场景为 wheel + `0.2 m`、wheel +
+`0.1 m`、legged + `0.2 m`、当前候选被局部障碍阻断后的 `NO_PATH` 换候选，以及无
+global overview 的启动。无图形环境可使用 `start_rviz:=false` 做闭环检查，但不能把它写成 RViz
+人工视觉验收。
+
+最小图检查命令：
+
+```bash
+ros2 topic info -v /planning_demo/grid_map
+ros2 topic info -v /planning_demo/mapping/exploration_map
+ros2 action info /planning_demo/navigation/navigate_to_pose
+```
+
+本功能的源码/Jazzy 证据与命令结果见
+`docs/validation/2026-09-03-incremental-exploration-navigation.md`。Jazzy 结果不等价于
+Humble、Jetson AGX Orin、DDS 跨机、rosbag、真实 mapper/TF 或实车验证；这些层级仍为 `NOT_RUN`。
 
 ## Jazzy 300 m 探索闭环（测试专用）
 
