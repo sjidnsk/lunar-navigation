@@ -129,6 +129,12 @@ nav_msgs::msg::OccupancyGrid ExplorationMapWithUnknownRobotCell() {
   return map;
 }
 
+nav_msgs::msg::OccupancyGrid FullyOccupiedExplorationMap() {
+  auto map = ExplorationMap(false);
+  std::fill(map.data.begin(), map.data.end(), std::int8_t{100});
+  return map;
+}
+
 nav_msgs::msg::OccupancyGrid FinerExplorationMap() {
   nav_msgs::msg::OccupancyGrid map;
   map.header.frame_id = "map";
@@ -470,12 +476,38 @@ TEST_F(IncrementalExplorationNodeTest,
 
 TEST_F(IncrementalExplorationNodeTest,
        UnknownCurrentCellStillSubmitsKnownFreeFrontierGoal) {
-  map_publisher_->publish(ExplorationMapWithUnknownRobotCell());
+  const auto map = ExplorationMapWithUnknownRobotCell();
+  map_publisher_->publish(map);
   odometry_publisher_->publish(Odometry());
   tf_publisher_->publish(MapFromOdom());
   task_publisher_->publish(StartTask());
 
   EXPECT_TRUE(WaitFor([this] { return server_->goal_count() == 1U; }));
+  const auto goal = server_->goal(0U);
+  const auto goal_x = static_cast<std::int32_t>(std::floor(goal.target_x_m));
+  const auto goal_y = static_cast<std::int32_t>(std::floor(goal.target_y_m));
+  ASSERT_GE(goal_x, 0);
+  ASSERT_GE(goal_y, 0);
+  ASSERT_LT(static_cast<std::uint32_t>(goal_x), map.info.width);
+  ASSERT_LT(static_cast<std::uint32_t>(goal_y), map.info.height);
+  EXPECT_EQ(map.data.at(static_cast<std::size_t>(goal_y) * map.info.width +
+                        static_cast<std::uint32_t>(goal_x)),
+            0);
+}
+
+TEST_F(IncrementalExplorationNodeTest,
+       NoMapBackedFreeEvidenceWaitsBeforeCoverageCompletion) {
+  map_publisher_->publish(FullyOccupiedExplorationMap());
+  odometry_publisher_->publish(Odometry());
+  tf_publisher_->publish(MapFromOdom());
+  task_publisher_->publish(StartTask());
+
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LastStatus();
+    return status && status->state == Status::WAITING_FOR_INPUT &&
+           status->reason_code == "WAITING_FOR_KNOWN_FREE_MAP_EVIDENCE";
+  }));
+  EXPECT_EQ(server_->goal_count(), 0U);
 }
 
 TEST_F(IncrementalExplorationNodeTest,
