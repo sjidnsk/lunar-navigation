@@ -103,10 +103,12 @@ ros2 launch lunar_pure_exploration_ros exploration_navigation.launch.py \
   stack_mode:=legacy platform_type:=wheel
 ```
 
-`stack_mode`、平台、Topic、粗分辨率与探索参数集中在
-`config/exploration_navigation.yaml`；`config/incremental_navigation_interfaces.yaml` 是新版接口事实。
-当前 `coarse_resolution_m` 默认 `1.0 m`。轮式、足式都直接使用已经定型的可通行性与 8 邻域 A*；
-本栈没有修改其邻居展开、代价、足式有向边认证、路径简化或滚动会话。
+`config/exploration_navigation.yaml` 是 `incremental_v2` 的默认配置，且由
+`lunar_pure_exploration_ros` 安装和拥有；`config/incremental_navigation_interfaces.yaml` 是新版接口事实。
+显式 `stack_mode:=legacy` 不读取这份 YAML，也不要求安装
+`lunar_incremental_navigation_ros`，只使用 legacy launch 自己的默认值及显式的 `platform_type`/
+`use_sim_time` 覆盖。当前 `coarse_resolution_m` 默认 `1.0 m`。轮式、足式都直接使用已经定型的
+可通行性与 8 邻域 A*；本栈没有修改其邻居展开、代价、足式有向边认证、路径简化或滚动会话。
 
 ### 新版输入、地图与职责
 
@@ -116,16 +118,25 @@ ros2 launch lunar_pure_exploration_ros exploration_navigation.launch.py \
 | 输入 | ROS 类型 | 用途 |
 | --- | --- | --- |
 | `/Car/T3/mapping/grid_map` | `grid_map_msgs/msg/GridMap`（必有 `elevation` layer） | 唯一原始地图；只由 `incremental_navigation` 订阅。 |
-| `/Car/T3/localization/odometry` | `nav_msgs/msg/Odometry` | 平面状态输入。 |
+| `/Car/T3/localization/odometry` | `nav_msgs/msg/Odometry`；`odom -> base_link` | 平面状态输入。 |
 | `/tf` | `tf2_msgs/msg/TFMessage` | 直接 `map -> odom` 变换。 |
+
+对外位姿契约固定为 `odom -> base_link`。轮式 `config/wheel.yaml` 中的
+`base_frame_id: base_footprint` 保留为物理 footprint 几何参数，不是 odometry child frame。
 
 第一张有效局部 `GridMap` 冻结 fine resolution；当前允许输入 `0.2 m`，未来允许 `0.1 m`。分辨率由
 消息本身决定，不将 `0.1 m` 静默重采样为 `0.2 m`，也不支持运行时热切换；变更分辨率需重启该栈。
 
+`navigation.local_window_size_m` 默认 `64.0 m`。局部规划窗口按 fine resolution 换算为格数：
+`0.2 m` 为 `320 × 320`，`0.1 m` 为 `640 × 640`。局部求解器固定工作区上限为 `640` 格/轴；若配置在
+当前 fine resolution 下超出该容量，导航周期以 `LOCAL_WINDOW_CAPACITY_EXCEEDED` 明确结束，不会把物理
+窗口静默缩短。
+
 导航进程拥有唯一的 `PersistentElevationMap` 和由其派生的 fine snapshot。它从同一 fine snapshot
 发布 `/Car/T4/mapping/exploration_map`（`nav_msgs/msg/OccupancyGrid`）：`-1=UNKNOWN`、
 `0=FREE/CANDIDATE`、`100=PROVEN_BLOCKED`，QoS 固定为 Reliable、Transient Local、KeepLast(1)。
-`incremental_exploration_node` 只读这张正式图、odometry、`/tf`、任务和
+`incremental_exploration_node` 只接受这三个精确栅格值，其他值会以 `INVALID_EXPLORATION_MAP` 拒绝；它只读
+这张正式图、odometry、`/tf`、任务和
 `NavigateToPose` Action；它不订阅原始 `GridMap`，也不持有或重建导航内部地图。反向地，导航器不订阅
 探索任务 Topic；探索器每次只维护一个 Action goal。
 
@@ -161,12 +172,15 @@ ros2 launch lunar_incremental_navigation_ros incremental_exploration_navigation_
   start_rviz:=true show_ground_truth:=false
 ```
 
-RViz Fixed Frame 为 `map`。显示布局包括任务边界、三态任务图、16 m 局部窗口、frontier、唯一洋红
+RViz Fixed Frame 为 `map`。显示布局包括任务边界、三态任务图、16 m 局部观测窗口、frontier、唯一洋红
 current goal、fine traversability、细蓝 global route、粗橙 active path、机器人/轨迹和 HUD；可选
 ground truth 只供显示。不要显示或解释 A* OPEN/CLOSED 集合。必演场景为 wheel + `0.2 m`、wheel +
 `0.1 m`、legged + `0.2 m`、当前候选被局部障碍阻断后的 `NO_PATH` 换候选，以及无
 global overview 的启动。无图形环境可使用 `start_rviz:=false` 做闭环检查，但不能把它写成 RViz
 人工视觉验收。
+
+其中演示的 `16 m` 局部观测是 scenario 发布给地图管线的输入范围，不是
+`navigation.local_window_size_m` 的规划窗口，也不能用作 `64 m` 规划窗口的容量或性能证据。
 
 最小图检查命令：
 

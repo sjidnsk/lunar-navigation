@@ -105,6 +105,7 @@ nav_msgs::msg::OccupancyGrid ExplorationMap(bool broad_frontier = true) {
   map.info.resolution = 1.0F;
   map.info.origin.orientation.w = 1.0;
   map.data.assign(144U, 0);
+  map.data.front() = 100;
   if (broad_frontier) {
     for (std::uint32_t y = 0U; y < map.info.height; ++y) {
       for (std::uint32_t x = 7U; x < map.info.width; ++x) {
@@ -297,7 +298,6 @@ class IncrementalExplorationNodeTest : public ::testing::Test {
         .information_gain_limits = {1000000U},
         .score_weights = {},
         .failure_memory_limits = {100U, 10000U, 100000U},
-        .occupied_threshold = 50,
         .minimum_frontier_length_m = 1.0,
         .coverage_target = 1.0,
         .exploration_map_topic = prefix + "/exploration_map",
@@ -368,6 +368,51 @@ TEST_F(IncrementalExplorationNodeTest, StartWithoutMapWaitsForInput) {
   ASSERT_TRUE(WaitFor([this] {
     const auto status = LastStatus();
     return status && status->state == Status::WAITING_FOR_INPUT;
+  }));
+  EXPECT_EQ(server_->goal_count(), 0U);
+}
+
+TEST_F(IncrementalExplorationNodeTest,
+       RejectsEveryValueOutsideThePublishedThreeStateExplorationMap) {
+  task_publisher_->publish(StartTask());
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LastStatus();
+    return status && status->state == Status::WAITING_FOR_INPUT;
+  }));
+  tf_publisher_->publish(MapFromOdom());
+  odometry_publisher_->publish(Odometry());
+
+  for (const std::int8_t invalid_value : {std::int8_t{49}, std::int8_t{50},
+                                          std::int8_t{101}}) {
+    auto invalid_map = ExplorationMap(false);
+    invalid_map.data.at(1U) = invalid_value;
+    map_publisher_->publish(std::move(invalid_map));
+
+    ASSERT_TRUE(WaitFor([this] {
+      const auto status = LastStatus();
+      return status && status->reason_code.rfind("INVALID_EXPLORATION_MAP:", 0U) == 0U;
+    }));
+    EXPECT_EQ(server_->goal_count(), 0U);
+  }
+}
+
+TEST_F(IncrementalExplorationNodeTest,
+       RejectsBaseFootprintOdometryUnderTheSharedOdomToBaseLinkContract) {
+  task_publisher_->publish(StartTask());
+  map_publisher_->publish(ExplorationMap(false));
+  tf_publisher_->publish(MapFromOdom());
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LastStatus();
+    return status && status->state == Status::WAITING_FOR_INPUT;
+  }));
+
+  auto invalid_odometry = Odometry();
+  invalid_odometry.child_frame_id = "base_footprint";
+  odometry_publisher_->publish(std::move(invalid_odometry));
+
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LastStatus();
+    return status && status->reason_code.rfind("INVALID_POSE_INPUT:", 0U) == 0U;
   }));
   EXPECT_EQ(server_->goal_count(), 0U);
 }

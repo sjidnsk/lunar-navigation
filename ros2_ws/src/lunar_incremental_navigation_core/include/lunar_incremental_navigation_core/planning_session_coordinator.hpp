@@ -61,6 +61,7 @@ struct CycleOutput final {
 struct PlanningSessionCoordinatorConfig final {
   double goal_position_tolerance_m{};
   double goal_yaw_tolerance_rad{};
+  double local_window_size_m{64.0};
   std::chrono::nanoseconds global_subdeadline{std::chrono::milliseconds(500)};
   NowFn now{[] { return SteadyClock::now(); }};
 };

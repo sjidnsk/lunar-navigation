@@ -52,41 +52,79 @@ TEST(LocalPlanningWindow, CentersAndClipsALatticeAlignedBoundedWindow) {
   const auto fine = MakeFine(1000U, 900U);
   const Vec2 start = CellCenter(fine->geometry(), {.x = 700, .y = 500});
 
-  const auto window = BuildLocalPlanningWindow(*fine, start);
+  const auto window = BuildLocalPlanningWindow(*fine, start, 64.0);
 
-  ASSERT_TRUE(window);
-  EXPECT_TRUE(IsLocalPlanningWindowFor(*window, fine->geometry()));
-  EXPECT_EQ(window->width(), kMaximumLocalPlanningWindowAxisCells);
-  EXPECT_EQ(window->height(), kMaximumLocalPlanningWindowAxisCells);
-  EXPECT_EQ(window->min_inclusive(), (GridIndex{.x = 540, .y = 340}));
-  EXPECT_EQ(window->max_exclusive(), (GridIndex{.x = 860, .y = 660}));
-  EXPECT_TRUE(window->Contains(GridIndex{.x = 700, .y = 500}));
+  ASSERT_EQ(window.status, LocalPlanningWindowStatus::kReady);
+  ASSERT_TRUE(window.geometry);
+  EXPECT_TRUE(IsLocalPlanningWindowFor(*window.geometry, fine->geometry()));
+  EXPECT_EQ(window.geometry->width(), 320U);
+  EXPECT_EQ(window.geometry->height(), 320U);
+  EXPECT_EQ(window.geometry->min_inclusive(), (GridIndex{.x = 540, .y = 340}));
+  EXPECT_EQ(window.geometry->max_exclusive(), (GridIndex{.x = 860, .y = 660}));
+  EXPECT_TRUE(window.geometry->Contains(GridIndex{.x = 700, .y = 500}));
+}
+
+TEST(LocalPlanningWindow,
+     DerivesTheSame64MeterWindowFromPointTwoAndPointOneMeterFineMaps) {
+  const auto point_two = MakeFine(1000U, 900U, 0.2);
+  const auto point_one = MakeFine(1000U, 900U, 0.1);
+
+  const auto point_two_window = BuildLocalPlanningWindow(
+      *point_two, CellCenter(point_two->geometry(), {.x = 700, .y = 500}),
+      64.0);
+  const auto point_one_window = BuildLocalPlanningWindow(
+      *point_one, CellCenter(point_one->geometry(), {.x = 700, .y = 500}),
+      64.0);
+
+  ASSERT_EQ(point_two_window.status, LocalPlanningWindowStatus::kReady);
+  ASSERT_TRUE(point_two_window.geometry);
+  EXPECT_EQ(point_two_window.geometry->width(), 320U);
+  EXPECT_EQ(point_two_window.geometry->height(), 320U);
+  ASSERT_EQ(point_one_window.status, LocalPlanningWindowStatus::kReady);
+  ASSERT_TRUE(point_one_window.geometry);
+  EXPECT_EQ(point_one_window.geometry->width(), 640U);
+  EXPECT_EQ(point_one_window.geometry->height(), 640U);
+}
+
+TEST(LocalPlanningWindow, RejectsRatherThanTruncatesAWindowBeyondWorkspaceCapacity) {
+  const auto fine = MakeFine(1000U, 900U, 0.1);
+
+  const auto window = BuildLocalPlanningWindow(
+      *fine, CellCenter(fine->geometry(), {.x = 700, .y = 500}), 64.1);
+
+  EXPECT_EQ(window.status, LocalPlanningWindowStatus::kCapacityExceeded);
+  EXPECT_FALSE(window.geometry);
 }
 
 TEST(LocalPlanningWindow, ShiftsAtMapEdgesWithoutDroppingTheStartCell) {
   const auto fine = MakeFine(1000U, 900U);
 
   const auto lower = BuildLocalPlanningWindow(
-      *fine, CellCenter(fine->geometry(), {.x = 2, .y = 3}));
-  ASSERT_TRUE(lower);
-  EXPECT_EQ(lower->min_inclusive(), (GridIndex{.x = 0, .y = 0}));
-  EXPECT_EQ(lower->max_exclusive(), (GridIndex{.x = 320, .y = 320}));
+      *fine, CellCenter(fine->geometry(), {.x = 2, .y = 3}), 64.0);
+  ASSERT_EQ(lower.status, LocalPlanningWindowStatus::kReady);
+  ASSERT_TRUE(lower.geometry);
+  EXPECT_EQ(lower.geometry->min_inclusive(), (GridIndex{.x = 0, .y = 0}));
+  EXPECT_EQ(lower.geometry->max_exclusive(), (GridIndex{.x = 320, .y = 320}));
 
   const auto upper = BuildLocalPlanningWindow(
-      *fine, CellCenter(fine->geometry(), {.x = 997, .y = 897}));
-  ASSERT_TRUE(upper);
-  EXPECT_EQ(upper->min_inclusive(), (GridIndex{.x = 680, .y = 580}));
-  EXPECT_EQ(upper->max_exclusive(), (GridIndex{.x = 1000, .y = 900}));
+      *fine, CellCenter(fine->geometry(), {.x = 997, .y = 897}), 64.0);
+  ASSERT_EQ(upper.status, LocalPlanningWindowStatus::kReady);
+  ASSERT_TRUE(upper.geometry);
+  EXPECT_EQ(upper.geometry->min_inclusive(), (GridIndex{.x = 680, .y = 580}));
+  EXPECT_EQ(upper.geometry->max_exclusive(), (GridIndex{.x = 1000, .y = 900}));
 }
 
 TEST(LocalPlanningWindow, PreservesSmallerMapsAndRejectsOutsideStarts) {
   const auto fine = MakeFine(8U, 5U, 1.0);
   const auto full = BuildLocalPlanningWindow(
-      *fine, CellCenter(fine->geometry(), {.x = 4, .y = 2}));
-  ASSERT_TRUE(full);
-  EXPECT_EQ(full->min_inclusive(), fine->geometry().min_inclusive());
-  EXPECT_EQ(full->max_exclusive(), fine->geometry().max_exclusive());
-  EXPECT_FALSE(BuildLocalPlanningWindow(*fine, {.x = 1000.0, .y = 0.0}));
+      *fine, CellCenter(fine->geometry(), {.x = 4, .y = 2}), 64.0);
+  ASSERT_EQ(full.status, LocalPlanningWindowStatus::kReady);
+  ASSERT_TRUE(full.geometry);
+  EXPECT_EQ(full.geometry->min_inclusive(), fine->geometry().min_inclusive());
+  EXPECT_EQ(full.geometry->max_exclusive(), fine->geometry().max_exclusive());
+  EXPECT_EQ(BuildLocalPlanningWindow(*fine, {.x = 1000.0, .y = 0.0}, 64.0)
+                .status,
+            LocalPlanningWindowStatus::kStartOutsideFineMap);
 }
 
 }  // namespace

@@ -44,7 +44,7 @@ def _load_config(path: str) -> dict[str, object]:
 def _require_common(config: dict[str, object]) -> dict[str, object]:
     common = config["common"]
     if not isinstance(common, dict) or common.get("frames") != {
-        "map": "map", "odom": "odom", "base_link": "base_footprint"
+        "map": "map", "odom": "odom", "base_link": "base_link"
     }:
         raise RuntimeError("exploration_navigation common frame contract is invalid")
     if common.get("local_map_qos") != {
@@ -113,28 +113,38 @@ def _incremental_parameters(
 
 
 def _compose(context):
-    config_file = LaunchConfiguration("config_file").perform(context).strip()
-    config = _load_config(config_file)
-    stack = config["stack"]
-    if not isinstance(stack, dict):
-        raise RuntimeError("exploration_navigation stack defaults are invalid")
-    stack_mode = _resolved_value(
-        LaunchConfiguration("stack_mode").perform(context).strip(),
-        stack.get("mode"), "stack_mode",
-    )
+    requested_stack_mode = LaunchConfiguration("stack_mode").perform(context).strip()
+    if requested_stack_mode == "legacy":
+        # An explicit rollback must not need the optional incremental package
+        # or its YAML. The legacy launch files retain their own defaults.
+        stack_mode = "legacy"
+        platform_type = (
+            LaunchConfiguration("platform_type").perform(context).strip() or "wheel"
+        )
+        use_sim_time = (
+            LaunchConfiguration("use_sim_time").perform(context).strip() or "false"
+        )
+    else:
+        config_file = LaunchConfiguration("config_file").perform(context).strip()
+        config = _load_config(config_file)
+        stack = config["stack"]
+        if not isinstance(stack, dict):
+            raise RuntimeError("exploration_navigation stack defaults are invalid")
+        stack_mode = _resolved_value(
+            requested_stack_mode, stack.get("mode"), "stack_mode",
+        )
+        if stack_mode not in {"legacy", "incremental_v2"}:
+            raise RuntimeError("unsupported stack_mode; expected legacy or incremental_v2")
 
-    if stack_mode not in {"legacy", "incremental_v2"}:
-        raise RuntimeError("unsupported stack_mode; expected legacy or incremental_v2")
-
-    common = _legacy_common(config)
-    platform_type = _resolved_value(
-        LaunchConfiguration("platform_type").perform(context).strip(),
-        common.get("platform_type"), "platform_type",
-    )
-    use_sim_time = _resolved_bool(
-        LaunchConfiguration("use_sim_time").perform(context).strip(),
-        common.get("use_sim_time"),
-    )
+        common = _legacy_common(config)
+        platform_type = _resolved_value(
+            LaunchConfiguration("platform_type").perform(context).strip(),
+            common.get("platform_type"), "platform_type",
+        )
+        use_sim_time = _resolved_bool(
+            LaunchConfiguration("use_sim_time").perform(context).strip(),
+            common.get("use_sim_time"),
+        )
 
     if stack_mode == "legacy":
         planner_share = Path(get_package_share_directory("lunar_pure_planner_ros"))
@@ -195,14 +205,14 @@ def _compose(context):
 
 
 def generate_launch_description() -> LaunchDescription:
-    navigation_share = get_package_share_directory("lunar_incremental_navigation_ros")
+    exploration_share = get_package_share_directory("lunar_pure_exploration_ros")
     return LaunchDescription(
         [
             DeclareLaunchArgument("stack_mode", default_value=""),
             DeclareLaunchArgument("platform_type", default_value=""),
             DeclareLaunchArgument(
                 "config_file",
-                default_value=f"{navigation_share}/config/exploration_navigation.yaml",
+                default_value=f"{exploration_share}/config/exploration_navigation.yaml",
             ),
             DeclareLaunchArgument("use_sim_time", default_value=""),
             OpaqueFunction(function=_compose),

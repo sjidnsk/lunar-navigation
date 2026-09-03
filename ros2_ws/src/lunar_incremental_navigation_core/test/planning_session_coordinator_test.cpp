@@ -309,6 +309,36 @@ TEST(PlanningSessionCoordinator,
 }
 
 TEST(PlanningSessionCoordinator,
+     PassesTheConfiguredMeterWindowToLocalTargetAndStartPatchPorts) {
+  FakePorts fake;
+  auto config = Config();
+  config.local_window_size_m = 4.0;
+  PlanningSessionCoordinator coordinator(Wheel(), {}, config, fake.Bind());
+  ASSERT_TRUE(coordinator.Start(SessionId{{1U}},
+                                FinalGoal{.target_x_m = 5.5,
+                                          .target_y_m = 3.5})
+                  .accepted);
+
+  const CycleOutput output = coordinator.PlanCycle(
+      At(3.5, 3.5), SnapshotBundle{.fine = MakeFine()},
+      CycleTrigger::kContinue, SearchDeadline::max());
+
+  ASSERT_TRUE(output.path_reference);
+  ASSERT_TRUE(fake.local_window_seen_by_target);
+  ASSERT_TRUE(fake.local_window_seen_by_patch);
+  EXPECT_EQ(fake.local_window_seen_by_target->width(), 4U);
+  EXPECT_EQ(fake.local_window_seen_by_target->height(), 4U);
+  EXPECT_EQ(fake.local_window_seen_by_target->min_inclusive(),
+            (GridIndex{.x = 1, .y = 1}));
+  EXPECT_EQ(fake.local_window_seen_by_target->max_exclusive(),
+            (GridIndex{.x = 5, .y = 5}));
+  EXPECT_EQ(fake.local_window_seen_by_patch->min_inclusive(),
+            fake.local_window_seen_by_target->min_inclusive());
+  EXPECT_EQ(fake.local_window_seen_by_patch->max_exclusive(),
+            fake.local_window_seen_by_target->max_exclusive());
+}
+
+TEST(PlanningSessionCoordinator,
      AppliesOneInternalGoalToleranceToTheSelectedLocalTarget) {
   FakePorts fake;
   auto config = Config();

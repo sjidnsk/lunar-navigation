@@ -98,7 +98,9 @@ get_filename_component(
   "${CMAKE_CURRENT_SOURCE_DIR}/../../../launch"
   ABSOLUTE)
 install(
-  FILES "${LUNAR_PURE_EXPLORATION_CONFIG_SOURCE_DIR}/pure_exploration.yaml"
+  FILES
+    "${LUNAR_PURE_EXPLORATION_CONFIG_SOURCE_DIR}/pure_exploration.yaml"
+    "${LUNAR_PURE_EXPLORATION_CONFIG_SOURCE_DIR}/exploration_navigation.yaml"
   DESTINATION share/${PROJECT_NAME}/config)
 install(
   FILES "${LUNAR_PURE_EXPLORATION_LAUNCH_SOURCE_DIR}/pure_exploration.launch.py"

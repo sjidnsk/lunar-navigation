@@ -94,8 +94,7 @@ AdapterResult<lunar::incremental_navigation::StateInput> AdaptStateInput(
   if (map_from_odom.parent_frame != "map" ||
       map_from_odom.child_frame != "odom" ||
       odometry.header.frame_id != "odom" ||
-      (odometry.child_frame_id != "base_link" &&
-       odometry.child_frame_id != "base_footprint") ||
+      odometry.child_frame_id != "base_link" ||
       !Finite(odometry.pose.pose.position.x) ||
       !Finite(odometry.pose.pose.position.y) ||
       !Finite(odometry.pose.pose.position.z)) {

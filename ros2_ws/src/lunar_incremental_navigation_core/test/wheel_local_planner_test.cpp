@@ -375,27 +375,59 @@ TEST(WheelLocalPlanner, ReusesDenseBuffersForThe320By320Envelope) {
             << " path_points=" << result.path.size() << '\n';
 }
 
+TEST(WheelLocalPlanner,
+     PlansThe64MeterPointOneMeterWindowWithoutReducingItsCellResolution) {
+  const auto fine = MakeFine(640U, 640U, {}, true, 0.1);
+  const Pose2 start{.position_m = {.x = 0.05, .y = 0.05}};
+  const auto local_window = BuildLocalPlanningWindow(*fine, start.position_m, 64.0);
+  ASSERT_EQ(local_window.status, LocalPlanningWindowStatus::kReady);
+  ASSERT_TRUE(local_window.geometry);
+  ASSERT_EQ(local_window.geometry->width(), 640U);
+  ASSERT_EQ(local_window.geometry->height(), 640U);
+  const RequestLocalPlanningView view(
+      fine, *local_window.geometry, start, 0.0,
+      std::vector<LocalCellOverride>{});
+  WheelLocalPlanner planner;
+
+  const auto begin = SteadyClock::now();
+  const auto result = planner.Plan(
+      view, start, Target(63.95, 63.95), SteadyClock::time_point::max(),
+      StopToken{});
+  const auto elapsed = std::chrono::duration<double, std::milli>(
+      SteadyClock::now() - begin);
+
+  ASSERT_EQ(result.status, LocalPlanResult::Status::kPlanFound);
+  EXPECT_EQ(planner.buffer_capacity_cells(), 640U * 640U);
+  std::cout << "wheel_local_640x640_point1_ms=" << elapsed.count()
+            << " expanded=" << result.statistics.expanded_states
+            << " generated=" << result.statistics.generated_states
+            << " open_peak=" << result.statistics.open_peak
+            << " path_points=" << result.path.size() << '\n';
+}
+
 TEST(WheelLocalPlanner, RejectsWindowsLargerThanTheFrozenEnvelope) {
-  const auto fine = MakeFine(321U, 1U, {}, true);
+  const auto fine = MakeFine(641U, 1U, {}, true);
   WheelLocalPlanner planner;
   EXPECT_EQ(planner
                 .Plan(View(fine), {.position_m = {.x = 0.5, .y = 0.5}},
-                      Target(320.5, 0.5), SteadyClock::time_point::max(),
+                      Target(640.5, 0.5), SteadyClock::time_point::max(),
                       StopToken{})
                 .status,
             LocalPlanResult::Status::kNoPath);
   EXPECT_EQ(planner.buffer_capacity_cells(), 0U);
   EXPECT_EQ(planner.buffer_allocation_count(), 0U);
 
-  const Pose2 start{.position_m = {.x = 160.5, .y = 0.5}};
-  const auto local_window =
-      BuildLocalPlanningWindow(*fine, start.position_m);
-  ASSERT_TRUE(local_window);
-  EXPECT_EQ(local_window->width(), 320U);
-  EXPECT_EQ(local_window->height(), 1U);
+  const Pose2 start{.position_m = {.x = 320.5, .y = 0.5}};
+  const auto local_window = BuildLocalPlanningWindow(
+      *fine, start.position_m, 640.0);
+  ASSERT_EQ(local_window.status, LocalPlanningWindowStatus::kReady);
+  ASSERT_TRUE(local_window.geometry);
+  EXPECT_EQ(local_window.geometry->width(), 640U);
+  EXPECT_EQ(local_window.geometry->height(), 1U);
   const RequestLocalPlanningView bounded(
-      fine, *local_window, start, 0.0, std::vector<LocalCellOverride>{});
-  EXPECT_EQ(planner.Plan(bounded, start, Target(161.5, 0.5),
+      fine, *local_window.geometry, start, 0.0,
+      std::vector<LocalCellOverride>{});
+  EXPECT_EQ(planner.Plan(bounded, start, Target(321.5, 0.5),
                          SteadyClock::time_point::max(), StopToken{})
                 .status,
             LocalPlanResult::Status::kPlanFound);

@@ -267,9 +267,11 @@ PlanningSessionCoordinator::PlanningSessionCoordinator(
       impl_->config.goal_position_tolerance_m < 0.0 ||
       !std::isfinite(impl_->config.goal_yaw_tolerance_rad) ||
       impl_->config.goal_yaw_tolerance_rad < 0.0 ||
+      !std::isfinite(impl_->config.local_window_size_m) ||
+      impl_->config.local_window_size_m <= 0.0 ||
       impl_->config.global_subdeadline < std::chrono::nanoseconds::zero()) {
     throw std::invalid_argument(
-        "planning session tolerances and subdeadline must be nonnegative");
+        "planning session tolerances, local window, and subdeadline are invalid");
   }
 }
 
@@ -423,19 +425,23 @@ CycleOutput PlanningSessionCoordinator::PlanCycle(
     return output;
   }
 
-  const std::optional<SparseGridGeometry> local_window =
-      BuildLocalPlanningWindow(*snapshots.fine, start);
-  if (!local_window) {
+  const LocalPlanningWindowResult local_window = BuildLocalPlanningWindow(
+      *snapshots.fine, start, impl_->config.local_window_size_m);
+  if (!local_window.geometry) {
+    const std::string reason =
+        local_window.status == LocalPlanningWindowStatus::kCapacityExceeded
+            ? "LOCAL_WINDOW_CAPACITY_EXCEEDED"
+            : "START_OUTSIDE_FINE_MAP";
     output.terminal = impl_->Finish(
-        SessionOutcome::kNoPath, "START_OUTSIDE_FINE_MAP",
+        SessionOutcome::kNoPath, reason,
         impl_->last_safety_evaluated_fine_revision);
-    output.feedback = impl_->Feedback("START_OUTSIDE_FINE_MAP");
+    output.feedback = impl_->Feedback(reason);
     return output;
   }
 
   std::optional<LocalTarget> target;
   try {
-    target = impl_->ports.select_target(*snapshots.fine, *local_window, start,
+    target = impl_->ports.select_target(*snapshots.fine, *local_window.geometry, start,
                                         *impl_->goal, guidance_route);
   } catch (...) {
     output.terminal = impl_->Finish(SessionOutcome::kInternalError,
@@ -463,7 +469,7 @@ CycleOutput PlanningSessionCoordinator::PlanCycle(
   StartPatchResult patch;
   try {
     patch = impl_->ports.build_start_patch(
-        snapshots.fine, *local_window, state.base_link_pose, impl_->capability,
+        snapshots.fine, *local_window.geometry, state.base_link_pose, impl_->capability,
         impl_->profile);
   } catch (...) {
     output.terminal = impl_->Finish(SessionOutcome::kInternalError,

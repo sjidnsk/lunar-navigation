@@ -19,6 +19,10 @@ EXPLORATION_SOURCE = (
     ROOT
     / "ros2_ws/src/lunar_pure_exploration_ros/src/incremental_exploration_node.cpp"
 )
+EXPLORATION_HEADER = (
+    ROOT
+    / "ros2_ws/src/lunar_pure_exploration_ros/include/lunar_pure_exploration_ros/incremental_exploration_node.hpp"
+)
 EXPLORATION_MAP_PROJECTOR = (
     ROOT
     / "ros2_ws/src/lunar_incremental_navigation_ros/src/exploration_map_projector.cpp"
@@ -28,6 +32,12 @@ EXPLORATION_MAP_PUBLISHER = (
     / "ros2_ws/src/lunar_incremental_navigation_ros/src/incremental_map_publisher.cpp"
 )
 EXPLORATION_MANIFEST = ROOT / "ros2_ws/src/lunar_pure_exploration_ros/package.xml"
+EXPLORATION_CMAKE = ROOT / "ros2_ws/src/lunar_pure_exploration_ros/CMakeLists.txt"
+NAVIGATION_CMAKE = ROOT / "ros2_ws/src/lunar_incremental_navigation_ros/CMakeLists.txt"
+PLANNER_CMAKE = ROOT / "ros2_ws/src/lunar_pure_planner_ros/CMakeLists.txt"
+STATE_ADAPTER_SOURCE = (
+    ROOT / "ros2_ws/src/lunar_incremental_navigation_ros/src/state_adapter.cpp"
+)
 MESSAGE_ROOT = ROOT / "ros2_ws/src/lunar_planning_msgs"
 
 
@@ -61,7 +71,13 @@ def test_incremental_interfaces_are_local_only_and_define_durable_exploration_ma
         "frame": "odom",
         "required_layers": ["elevation"],
     }
-    assert interfaces["inputs"]["odometry"]["type"] == "nav_msgs/msg/Odometry"
+    assert interfaces["inputs"]["odometry"] == {
+        "name": "/Car/T3/localization/odometry",
+        "type": "nav_msgs/msg/Odometry",
+        "owner": "external",
+        "frame": "odom",
+        "child_frame": "base_link",
+    }
     assert interfaces["inputs"]["tf"]["type"] == "tf2_msgs/msg/TFMessage"
     assert interfaces["action"] == {
         "name": "/Car/T4/navigation/navigate_to_pose",
@@ -109,7 +125,7 @@ def test_single_stack_config_has_only_shared_mode_platform_and_node_defaults() -
     assert common["frames"] == {
         "map": "map",
         "odom": "odom",
-        "base_link": "base_footprint",
+        "base_link": "base_link",
     }
     assert common["exploration_map_qos"] == {
         "reliability": "reliable",
@@ -119,10 +135,34 @@ def test_single_stack_config_has_only_shared_mode_platform_and_node_defaults() -
     }
     assert not {"coarse_resolution_m", "local_map_topic", "exploration_map_topic", "action_name", "navigation_action"} & set(config["exploration"])
     assert not {"coarse_resolution_m", "local_map_topic", "exploration_map_topic", "action_name", "navigation_action"} & set(config["navigation"])
+    assert config["navigation"]["local_window_size_m"] == 64.0
+    assert "occupied_threshold" not in config["exploration"]
     text = STACK_CONFIG.read_text(encoding="utf-8").lower()
     assert "fine_resolution" not in text
     assert "motion_primitives" not in text
     assert "footprint_xy_m" not in text
+    navigation_source = NAVIGATION_SOURCE.read_text(encoding="utf-8")
+    assert 'declare_parameter<double>("local_window_size_m", 64.0)' in navigation_source
+
+
+def test_incremental_explorer_consumes_only_the_published_three_state_map() -> None:
+    """Reject a threshold-based reinterpretation of the v2 exploration map."""
+    config = _yaml(STACK_CONFIG)
+    source = EXPLORATION_SOURCE.read_text(encoding="utf-8")
+    header = EXPLORATION_HEADER.read_text(encoding="utf-8")
+
+    assert config["exploration"].get("occupied_threshold") is None
+    assert "occupied_threshold" not in source
+    assert "occupied_threshold" not in header
+    assert "-1, 0, or 100" in source
+
+
+def test_incremental_odometry_contract_is_odom_to_base_link_everywhere() -> None:
+    """Reject a wheel-footprint frame from leaking into the external pose contract."""
+    adapter = STATE_ADAPTER_SOURCE.read_text(encoding="utf-8")
+
+    assert 'odometry.child_frame_id != "base_link"' in adapter
+    assert "base_footprint" not in adapter
 
 
 def test_incremental_source_keeps_navigation_and_exploration_interfaces_separate() -> None:
@@ -182,12 +222,21 @@ def test_stack_config_and_launch_exclude_legacy_or_pose_topic_inputs() -> None:
         assert forbidden not in launch
 
 
-def test_top_level_launch_package_declares_its_incremental_runtime_dependencies() -> None:
-    """Reject an installed launch whose manifest cannot provide its imports and node package."""
+def test_top_level_launch_keeps_legacy_independent_and_owns_its_default_config() -> None:
+    """Reject a rollback that needs the incremental package or its installed YAML."""
     manifest = EXPLORATION_MANIFEST.read_text(encoding="utf-8")
+    exploration_cmake = EXPLORATION_CMAKE.read_text(encoding="utf-8")
+    navigation_cmake = NAVIGATION_CMAKE.read_text(encoding="utf-8")
+    planner_cmake = PLANNER_CMAKE.read_text(encoding="utf-8")
 
-    assert "<exec_depend>lunar_incremental_navigation_ros</exec_depend>" in manifest
+    assert "<exec_depend>lunar_incremental_navigation_ros</exec_depend>" not in manifest
     assert "<exec_depend>python3-yaml</exec_depend>" in manifest
+    assert "exploration_navigation.yaml" in exploration_cmake
+    assert "exploration_navigation.launch.py" in exploration_cmake
+    assert 'PATTERN "exploration_navigation.yaml"' not in navigation_cmake
+    assert 'PATTERN "exploration_navigation.launch.py"' not in navigation_cmake
+    assert 'PATTERN "exploration_navigation.yaml" EXCLUDE' in planner_cmake
+    assert 'PATTERN "exploration_navigation.launch.py" EXCLUDE' in planner_cmake
 
 
 def test_incremental_action_is_additive_and_legacy_plan_motion_is_unchanged() -> None:

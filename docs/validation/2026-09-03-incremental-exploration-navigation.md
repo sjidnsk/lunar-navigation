@@ -3,8 +3,9 @@
 - 日期：2026-09-03
 - 集成分支：`feat/incremental-exploration-navigation`
 - 实现基线：`1cde6ce feat: add incremental exploration rviz demo`（本文档提交前）
+- 最终审查修复：`fix/incremental-exploration-navigation-review`（本次单一修复提交）
 - 环境：本机 Ubuntu / ROS 2 Jazzy
-- 临时构建根：`/tmp/lunar-incremental-final-rEXB8q`
+- 最终审查临时构建根：`/tmp/lunar-review-final-FyZP96`
 
 ## 范围与结论边界
 
@@ -22,7 +23,7 @@ legacy 路径仍为原 `PlanMotion.action`、`pure_exploration_node`、`lunar_pu
 | 项目 | 类型/语义 | 责任 |
 | --- | --- | --- |
 | `/Car/T3/mapping/grid_map` | `grid_map_msgs/msg/GridMap`，只读取 `elevation` layer | 仅 `incremental_navigation` 订阅，累计为唯一 `PersistentElevationMap`。 |
-| `/Car/T3/localization/odometry` | `nav_msgs/msg/Odometry` | 导航器与探索器的状态输入。 |
+| `/Car/T3/localization/odometry` | `nav_msgs/msg/Odometry`；`odom -> base_link` | 导航器与探索器的状态输入。 |
 | `/tf` | `tf2_msgs/msg/TFMessage` | 直接 `map -> odom` 变换。 |
 | `/Car/T4/mapping/exploration_map` | `nav_msgs/msg/OccupancyGrid`；`-1/0/100` | 导航器从同一 fine snapshot 发布；探索器只读。QoS：Reliable + Transient Local + KeepLast(1)。 |
 | `/Car/T4/navigation/navigate_to_pose` | `lunar_planning_msgs/action/NavigateToPose` | 探索器唯一 client，导航器 server；探索器一次只有一个 current goal。 |
@@ -35,6 +36,26 @@ legacy 路径仍为原 `PlanMotion.action`、`pure_exploration_node`、`lunar_pu
 规划周期的正式成功判据是 `cycle_result=PLAN_FOUND`、非空 `PathReference.state=ACTIVE`，并且
 segment/traversability revision 一致。目标导航完成的正式判据是 Action Result `GOAL_REACHED`；
 Action accepted、单独 RViz 线条或仅有 `PathReference` 都不充当完成证据。
+
+## 最终审查修复的契约闭合
+
+本次只修复四项最终审查契约，不改轮式/足式的 8 邻域 A* 展开、代价、足式有向边认证、legacy
+explorer 或控制器：
+
+- `navigation.local_window_size_m` 默认 `64.0 m`，局部窗口按 fine resolution 换算：`0.2 m -> 320`
+  格/轴，`0.1 m -> 640` 格/轴。固定局部工作区容量同步为 `640` 格/轴；超过容量时返回
+  `LOCAL_WINDOW_CAPACITY_EXCEEDED`，不再把物理窗口静默裁成旧的 320 格。
+- 显式 `stack_mode:=legacy` 在读取 YAML 或查找增量导航包之前分支，使用 legacy 自己的默认值；因此
+  在 `lunar_incremental_navigation_ros` 未安装且 `config_file` 缺失/不可读时仍可启动。默认 YAML 和顶层
+  launch 由 `lunar_pure_exploration_ros` 安装；`incremental_v2` 仍会读取 YAML 并要求增量导航包。
+- 新 explorer 入口只接受 `/Car/T4/mapping/exploration_map` 的精确 `{-1, 0, 100}` 值。`49`、`50`、`101`
+  均产生 `INVALID_EXPLORATION_MAP`，且不会提交 goal；共享 legacy `OccupancyGridView` 未修改。
+- 对外状态契约统一为 `odom -> base_link`，同时更新接口 YAML、顶层 YAML、launch、导航 state adapter
+  和 explorer 的严格 PoseResolver。轮式 `base_frame_id: base_footprint` 保留为 footprint 几何参数，不是
+  odometry child frame。
+
+RViz scenario 标注的 `16 m` 局部观测仍是输入地图范围，不是 `local_window_size_m`。它可验证 demo
+闭环，不可当作 64 m 规划窗口的容量或性能证据。
 
 ## Fresh Jazzy 构建与回归
 
@@ -87,17 +108,36 @@ python3 -m pytest -q \
   tests/launch/test_incremental_exploration_navigation_rviz_contract.py
 ```
 
-结果：`31 passed in 21.93s`。它覆盖 legacy `PlanMotion` 与新版消息隔离、唯一 GridMap 输入、双栈互斥
-launch、`0.2/0.1` 输入规则、RViz 资源与四个无 GUI 闭环场景。Task 7 未修改允许的三个测试文件。
+原始结果为 `31 passed in 21.93s`。最终审查修复在此基础上新增物理窗口、显式 legacy 回退、三态图和
+`odom -> base_link` 的回归；本次重跑结果与命令见下一节，不能把历史结果代替修复后的验证。
+
+### 最终审查修复重跑
+
+在新的 `/tmp/lunar-review-final-FyZP96` Jazzy 闭包中，以
+`ROS_LOCALHOST_ONLY=1`、独立 `ROS_DOMAIN_ID=118` 重跑 core、导航 ROS、探索 core 与探索 ROS 的 CTest，
+结果分别为 `13/13`、`9/9`、`13/13`、`12/12` passed。新增的 core 回归实际构造并规划
+`0.1 m`、`64 m`、`640 × 640` 局部窗口：wheel 一次局部规划测得 `1.4502 ms`（expanded `640`），legged
+一次测得 `13.3973 ms`（expanded `1`）。这些是单次核心容量回归的观测值，不是整栈实时性或 Orin 性能结论。
+
+同一闭包的 fresh install 归属检查确认顶层 YAML/launch 仅存在于
+`lunar_pure_exploration_ros`，在 `lunar_incremental_navigation_ros` 与
+`lunar_pure_planner_ros` 均不存在。静态 interface/launch 合同为 `20 passed`，覆盖：缺少增量导航包与缺失
+配置时的显式 legacy、仍依赖该包的 incremental_v2、默认 YAML 安装归属、`49/50/101` 三态图拒绝及
+`base_footprint` odometry 拒绝。
+
+完整相关 pytest 收集 `36` 项，实跑得到 `35 passed, 1 failed`：既有
+`test_no_path_feedback_replaces_the_candidate` 的 headless demo probe 在本次闭包中未观测到
+`NO_PATH`（输出 `no_path_observed=false`、`candidate_replaced=false`）。该失败未改动轮式/足式 A*、探索器或
+控制器，作为 demo 回归待后续单独处理；不得以历史的 NO_PATH probe 通过记录替代本次结果。Humble/Orin 未运行。
 
 ## Jazzy 无 RViz 闭环与运行时图
 
-在 source 上述 fresh install 后，以 `ROS_LOCALHOST_ONLY=1` 与独立 ROS domain 实测 probe：
+以下是实现基线 `1cde6ce` 的历史 headless probe 记录，不替代上述最终审查修复后的结果：
 
 | 重启场景 | 实测结果 |
 | --- | --- |
 | wheel + `0.2 m` | 收到 `GridMap`、探索图、frontier、唯一 goal 与非空 ACTIVE path；诊断记录 `PLAN_FOUND`；resolution 断言为真。 |
-| wheel + `0.1 m` | 同上，`fine_resolution_m=0.1` 且 resolution 断言为真；没有重采样参数。 |
+| wheel + `0.1 m` | 同上，`fine_resolution_m=0.1` 且 resolution 断言为真；没有重采样参数。该 demo 的输入观测仅 16 m，不能证明 64 m 局部规划窗口性能。 |
 | legged + `0.2 m` | 同上，`platform=legged`，未用 wheel 配置替代。 |
 | wheel + `0.2 m`，向当前候选注入局部 elevation 阻断 | `no_path_observed=true`、`candidate_replaced=true`、`unique_goals=3`；关闭前导航 Action 已无 active goal。 |
 
@@ -142,7 +182,7 @@ probe 在活跃周期记录了 `PLAN_FOUND` 与 ACTIVE 非空路径。手工点�
 演示 launch 为
 `lunar_incremental_navigation_ros/incremental_exploration_navigation_rviz.launch.py`；全算法 Topic 位于
 `/planning_demo/*`，仅 `/tf` 例外。RViz Fixed Frame 为 `map`，布局应含任务边界、三态任务图、16 m
-局部窗口、frontier、唯一洋红 current goal、fine traversability、细蓝 global route、粗橙 active path、
+局部观测窗口、frontier、唯一洋红 current goal、fine traversability、细蓝 global route、粗橙 active path、
 robot/trace 与 HUD；可选 ground truth 只供显示，不是算法输入。配置刻意不显示 A* OPEN/CLOSED。
 
 以上四个场景是 `start_rviz:=false` 的自动 Jazzy 闭环证据。RViz GUI 的人工视觉检查为 `NOT_RUN`；应在

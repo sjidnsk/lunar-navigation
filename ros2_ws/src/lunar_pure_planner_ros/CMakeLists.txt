@@ -146,13 +146,15 @@ install(
   DESTINATION share/${PROJECT_NAME}/config
   FILES_MATCHING
     PATTERN "*.yaml"
-    PATTERN "pure_exploration.yaml" EXCLUDE)
+    PATTERN "pure_exploration.yaml" EXCLUDE
+    PATTERN "exploration_navigation.yaml" EXCLUDE)
 install(
   DIRECTORY "${LUNAR_PURE_PLANNER_LAUNCH_SOURCE_DIR}/"
   DESTINATION share/${PROJECT_NAME}/launch
   FILES_MATCHING
     PATTERN "*.launch.py"
-    PATTERN "pure_exploration.launch.py" EXCLUDE)
+    PATTERN "pure_exploration.launch.py" EXCLUDE
+    PATTERN "exploration_navigation.launch.py" EXCLUDE)
 if(LUNAR_BUILD_DEMO)
   get_filename_component(
     LUNAR_PURE_PLANNER_RVIZ_SOURCE_DIR

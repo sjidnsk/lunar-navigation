@@ -75,6 +75,7 @@ struct RuntimeParameters final {
   std::chrono::milliseconds planning_hard_timeout;
   std::chrono::milliseconds global_subdeadline;
   double coarse_resolution_m;
+  double local_window_size_m;
   std::string odometry_topic;
   std::string tf_topic;
   std::string action_name;
@@ -130,15 +131,19 @@ struct RuntimeParameters final {
       node.declare_parameter<std::int64_t>("global_subdeadline_ms", 500);
   const double coarse_resolution_m =
       node.declare_parameter<double>("coarse_resolution_m", 1.0);
+  const double local_window_size_m =
+      node.declare_parameter<double>("local_window_size_m", 64.0);
   if (planning_sla_ms <= 0 ||
       planning_hard_timeout_ms <= planning_sla_ms ||
       global_subdeadline_ms <= 0 ||
       global_subdeadline_ms >= planning_hard_timeout_ms ||
-      !std::isfinite(coarse_resolution_m) || coarse_resolution_m <= 0.0) {
+      !std::isfinite(coarse_resolution_m) || coarse_resolution_m <= 0.0 ||
+      !std::isfinite(local_window_size_m) || local_window_size_m <= 0.0) {
     throw std::runtime_error(
         "PLANNER_ERROR: require 0 < planning_sla_ms < "
         "planning_hard_timeout_ms and 0 < global_subdeadline_ms < "
-        "planning_hard_timeout_ms and coarse_resolution_m > 0");
+        "planning_hard_timeout_ms and coarse_resolution_m > 0 and "
+        "local_window_size_m > 0");
   }
   RuntimeParameters parameters{
       .platform_name = platform_name,
@@ -156,6 +161,7 @@ struct RuntimeParameters final {
       .global_subdeadline =
           std::chrono::milliseconds{global_subdeadline_ms},
       .coarse_resolution_m = coarse_resolution_m,
+      .local_window_size_m = local_window_size_m,
       .odometry_topic = node.declare_parameter<std::string>(
           "odometry_topic", "/Car/T3/localization/odometry"),
       .tf_topic = node.declare_parameter<std::string>("tf_topic", "/tf"),
@@ -478,6 +484,7 @@ struct IncrementalNavigationNode::Impl final {
                 parameters.profile.goal_position_tolerance_m,
             .goal_yaw_tolerance_rad =
                 parameters.profile.goal_yaw_tolerance_rad,
+            .local_window_size_m = parameters.local_window_size_m,
             .global_subdeadline = parameters.global_subdeadline},
         Instrument(std::move(ports)));
 

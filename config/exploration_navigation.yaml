@@ -7,7 +7,7 @@ common:
   frames:
     map: map
     odom: odom
-    base_link: base_footprint
+    base_link: base_link
   coarse_resolution_m: 1.0
   local_map_topic: /Car/T3/mapping/grid_map
   exploration_map_topic: /Car/T4/mapping/exploration_map
@@ -24,7 +24,6 @@ common:
     depth: 1
 
 exploration:
-  occupied_threshold: 50
   minimum_frontier_length_m: 1.0
   coverage_target: 0.80
   sensor_range_m: 10.0
@@ -42,6 +41,7 @@ navigation:
   planning_sla_ms: 2000
   planning_hard_timeout_ms: 3000
   global_subdeadline_ms: 500
+  local_window_size_m: 64.0
   path_reference_topic: /Car/T4/planning/path_reference
   global_route_topic: /Car/T4/planning/global_route
   diagnostics_topic: /Car/T4/planning/diagnostics

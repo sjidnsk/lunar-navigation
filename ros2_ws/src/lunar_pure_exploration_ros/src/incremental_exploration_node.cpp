@@ -66,6 +66,18 @@ using lunar::pure_exploration::Pose2;
 using lunar::pure_exploration::TaskRaster;
 using lunar::pure_exploration::Vec2;
 
+constexpr std::int8_t kPublishedExplorationMapOccupiedValue{100};
+
+void RequirePublishedExplorationMapValues(
+    const std::vector<std::int8_t>& values) {
+  for (const std::int8_t value : values) {
+    if (value != -1 && value != 0 && value != 100) {
+      throw std::invalid_argument{
+          "exploration map values must be exactly -1, 0, or 100"};
+    }
+  }
+}
+
 std::string AbsoluteTopic(rclcpp::Node& node, const std::string& name,
                           const std::string& default_value) {
   auto result = node.declare_parameter<std::string>(name, default_value);
@@ -98,8 +110,6 @@ IncrementalExplorationNodeParameters LoadParameters(rclcpp::Node& node) {
                                     platform_selector)
           .geometry;
 
-  const auto threshold =
-      node.declare_parameter<std::int64_t>("occupied_threshold", 50);
   const auto minimum_frontier =
       node.declare_parameter<double>("minimum_frontier_length_m", 1.0);
   const auto coverage_target =
@@ -112,8 +122,8 @@ IncrementalExplorationNodeParameters LoadParameters(rclcpp::Node& node) {
       node.declare_parameter<double>("goal_yaw_tolerance_deg", 11.25);
   const auto yaw_offsets_deg = node.declare_parameter<std::vector<double>>(
       "yaw_offsets_deg", {-45.0, -22.5, 0.0, 22.5, 45.0});
-  if (threshold < 0 || threshold > 100 || yaw_offsets_deg.size() != 5U ||
-      !std::isfinite(minimum_frontier) || minimum_frontier <= 0.0 ||
+  if (yaw_offsets_deg.size() != 5U || !std::isfinite(minimum_frontier) ||
+      minimum_frontier <= 0.0 ||
       !std::isfinite(coverage_target) || coverage_target <= 0.0 ||
       coverage_target > 1.0 || !std::isfinite(sensor_range) ||
       sensor_range <= 0.0 || !std::isfinite(sensor_fov_deg) ||
@@ -164,7 +174,6 @@ IncrementalExplorationNodeParameters LoadParameters(rclcpp::Node& node) {
           {PositiveSize(node, "maximum_failure_entries", 1000),
            PositiveSize(node, "maximum_failure_patch_cells_per_entry", 10000),
            PositiveSize(node, "maximum_failure_total_patch_cells", 1000000)},
-      .occupied_threshold = static_cast<std::int8_t>(threshold),
       .minimum_frontier_length_m = minimum_frontier,
       .coverage_target = coverage_target,
       .goal_yaw_tolerance_rad =
@@ -570,7 +579,7 @@ void RefreshDecisionLocked(Runtime& runtime) {
   const auto geometry = MapGeometry(*runtime.latest_map);
   const OccupancyGridView source_map(
       geometry, runtime.latest_map->data,
-      runtime.parameters.occupied_threshold);
+      kPublishedExplorationMapOccupiedValue);
   if (!runtime.task_grid_geometry) {
     runtime.task_grid_geometry =
         FixedTaskGeometry(geometry, *runtime.task_boundary);
@@ -578,7 +587,7 @@ void RefreshDecisionLocked(Runtime& runtime) {
   const auto projected_data =
       ProjectToFixedGrid(source_map, *runtime.task_grid_geometry);
   const OccupancyGridView map(*runtime.task_grid_geometry, projected_data,
-                              runtime.parameters.occupied_threshold);
+                              kPublishedExplorationMapOccupiedValue);
   runtime.raster = TaskRaster::Build(
       map, *runtime.task_boundary, runtime.parameters.task_raster_limits);
   runtime.coverage = CalculateCoverage(*runtime.raster);
@@ -878,8 +887,9 @@ void HandleMap(const std::weak_ptr<Runtime>& weak_runtime,
     }
     try {
       const auto geometry = MapGeometry(map);
+      RequirePublishedExplorationMapValues(map.data);
       static_cast<void>(OccupancyGridView(
-          geometry, map.data, runtime->parameters.occupied_threshold));
+          geometry, map.data, kPublishedExplorationMapOccupiedValue));
       if (runtime->exploration_map_sequence ==
           std::numeric_limits<std::uint64_t>::max()) {
         throw std::overflow_error{"exploration map sequence exhausted"};

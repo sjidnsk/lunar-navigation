@@ -112,13 +112,11 @@ install(
   FILES_MATCHING
     PATTERN "wheel.yaml"
     PATTERN "legged.yaml"
-    PATTERN "exploration_navigation.yaml"
     PATTERN "incremental_navigation_interfaces.yaml")
 install(
   DIRECTORY "${LUNAR_INCREMENTAL_NAVIGATION_LAUNCH_SOURCE_DIR}/"
   DESTINATION share/${PROJECT_NAME}/launch
   FILES_MATCHING
-    PATTERN "exploration_navigation.launch.py"
     PATTERN "incremental_exploration_navigation_rviz.launch.py")
 install(
   DIRECTORY "${LUNAR_INCREMENTAL_NAVIGATION_RVIZ_SOURCE_DIR}/"

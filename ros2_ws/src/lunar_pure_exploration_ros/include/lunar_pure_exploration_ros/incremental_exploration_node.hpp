@@ -31,7 +31,6 @@ struct IncrementalExplorationNodeParameters final {
       information_gain_limits;
   lunar::pure_exploration::ScoreWeights score_weights;
   lunar::pure_exploration::FailureMemoryLimits failure_memory_limits;
-  std::int8_t occupied_threshold;
   double minimum_frontier_length_m;
   double coverage_target;
   double goal_yaw_tolerance_rad{0.19634954084936207};

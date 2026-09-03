@@ -132,11 +132,11 @@ struct Fixture final {
 
 [[nodiscard]] Fixture MakeLargeDerivedFixture(
     const std::size_t width, const std::size_t height,
-    const LeggedCapability& capability) {
+    const LeggedCapability& capability, const double resolution_m = 1.0) {
   GridGeometry geometry{.frame_id = "map",
                         .width = width,
                         .height = height,
-                        .resolution_m = 1.0};
+                        .resolution_m = resolution_m};
   std::vector<float> elevation(width * height, 0.0F);
   PersistentElevationMap map;
   const auto update = map.Apply(ElevationEvidence{
@@ -155,8 +155,10 @@ struct Fixture final {
   auto fine = FineTraversabilityBuilder().Derive(
       map.Snapshot(), capability, profile);
   const Pose2 anchor{.position_m = {
-                         .x = static_cast<double>(width / 2U) + 0.5,
-                         .y = static_cast<double>(height / 2U) + 0.5}};
+                         .x = (static_cast<double>(width / 2U) + 0.5) *
+                              resolution_m,
+                         .y = (static_cast<double>(height / 2U) + 0.5) *
+                              resolution_m}};
   auto view = std::make_shared<const RequestLocalPlanningView>(
       fine, anchor, 0.0, std::vector<LocalCellOverride>{});
   return {.fine = std::move(fine), .view = std::move(view)};
@@ -668,29 +670,54 @@ TEST(LeggedLocalPlannerV2,
 }
 
 TEST(LeggedLocalPlannerV2,
+     PlansThe64MeterPointOneMeterWindowWithoutReducingItsCellResolution) {
+  LeggedCapability capability = Capability();
+  capability.motion_primitives = {capability.motion_primitives.front()};
+  const Fixture fixture = MakeLargeDerivedFixture(
+      640U, 640U, capability, 0.1);
+  const Pose2 start{.position_m = {.x = 32.05, .y = 32.05}};
+  const LocalTarget target = TargetAt({.x = 33.05, .y = 32.05});
+
+  const auto begin = SteadyClock::now();
+  const LocalPlanResult result = LeggedLocalPlanner(capability).Plan(
+      *fixture.view, start, target, SteadyClock::time_point::max(), {});
+  const auto elapsed = std::chrono::duration<double, std::milli>(
+      SteadyClock::now() - begin);
+
+  ASSERT_EQ(result.status, LocalPlanResult::Status::kPlanFound);
+  EXPECT_LE(result.statistics.expanded_states, 2U);
+  std::cout << "legged_local_640x640_point1_ms=" << elapsed.count()
+            << " expanded=" << result.statistics.expanded_states
+            << " generated=" << result.statistics.generated_states
+            << " open_peak=" << result.statistics.open_peak
+            << " path_points=" << result.path.size() << '\n';
+}
+
+TEST(LeggedLocalPlannerV2,
      BoundedViewKeepsAGrowingFineSnapshotInsideTheLocalEnvelope) {
   LeggedCapability capability = Capability();
   capability.motion_primitives = {capability.motion_primitives.front()};
-  const Fixture fixture = MakeLargeDerivedFixture(321U, 320U, capability);
-  const Pose2 start = PoseAt({.x = 160, .y = 160});
+  const Fixture fixture = MakeLargeDerivedFixture(641U, 640U, capability);
+  const Pose2 start = PoseAt({.x = 320, .y = 320});
 
   EXPECT_EQ(LeggedLocalPlanner(capability)
                 .Plan(*fixture.view, start,
-                      TargetAt(PoseAt({.x = 161, .y = 160}).position_m),
+                      TargetAt(PoseAt({.x = 321, .y = 320}).position_m),
                       SteadyClock::time_point::max(), {})
                 .status,
             LocalPlanResult::Status::kNoPath);
 
-  const auto local_window =
-      BuildLocalPlanningWindow(*fixture.fine, start.position_m);
-  ASSERT_TRUE(local_window);
-  EXPECT_EQ(local_window->CellCount(), 320U * 320U);
+  const auto local_window = BuildLocalPlanningWindow(
+      *fixture.fine, start.position_m, 640.0);
+  ASSERT_EQ(local_window.status, LocalPlanningWindowStatus::kReady);
+  ASSERT_TRUE(local_window.geometry);
+  EXPECT_EQ(local_window.geometry->CellCount(), 640U * 640U);
   const RequestLocalPlanningView bounded(
-      fixture.fine, *local_window, start, 0.0,
+      fixture.fine, *local_window.geometry, start, 0.0,
       std::vector<LocalCellOverride>{});
   EXPECT_EQ(LeggedLocalPlanner(capability)
                 .Plan(bounded, start,
-                      TargetAt(PoseAt({.x = 161, .y = 160}).position_m),
+                      TargetAt(PoseAt({.x = 321, .y = 320}).position_m),
                       SteadyClock::time_point::max(), {})
                 .status,
             LocalPlanResult::Status::kPlanFound);

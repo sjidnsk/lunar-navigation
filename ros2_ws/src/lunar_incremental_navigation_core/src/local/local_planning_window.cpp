@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <utility>
 
 namespace lunar::incremental_navigation {
 namespace {
@@ -67,20 +68,31 @@ bool IsLocalPlanningWindowFor(const SparseGridGeometry& window,
          window_maximum.y <= base_maximum.y;
 }
 
-std::optional<SparseGridGeometry> BuildLocalPlanningWindow(
-    const FineTraversabilitySnapshot& fine, const Vec2 start) noexcept {
+LocalPlanningWindowResult BuildLocalPlanningWindow(
+    const FineTraversabilitySnapshot& fine, const Vec2 start,
+    const double local_window_size_m) noexcept {
   const SparseGridGeometry& base = fine.geometry();
   const std::optional<GridIndex> anchor = WorldToCell(base, start);
   if (!anchor) {
-    return std::nullopt;
+    return {.status = LocalPlanningWindowStatus::kStartOutsideFineMap};
   }
+  if (!std::isfinite(local_window_size_m) || local_window_size_m <= 0.0) {
+    return {.status = LocalPlanningWindowStatus::kCapacityExceeded};
+  }
+  const double requested_axis_cells =
+      std::ceil(local_window_size_m / base.resolution_m());
+  if (!std::isfinite(requested_axis_cells) || requested_axis_cells <= 0.0 ||
+      requested_axis_cells >
+          static_cast<double>(kMaximumLocalPlanningWindowAxisCells)) {
+    return {.status = LocalPlanningWindowStatus::kCapacityExceeded};
+  }
+  const std::size_t requested_axis =
+      static_cast<std::size_t>(requested_axis_cells);
 
-  const std::size_t width = std::min(
-      base.width(), kMaximumLocalPlanningWindowAxisCells);
-  const std::size_t height = std::min(
-      base.height(), kMaximumLocalPlanningWindowAxisCells);
+  const std::size_t width = std::min(base.width(), requested_axis);
+  const std::size_t height = std::min(base.height(), requested_axis);
   if (width == 0U || height == 0U) {
-    return std::nullopt;
+    return {.status = LocalPlanningWindowStatus::kStartOutsideFineMap};
   }
   const auto span = [](const std::size_t value) {
     return static_cast<std::int64_t>(value);
@@ -100,9 +112,10 @@ std::optional<SparseGridGeometry> BuildLocalPlanningWindow(
   SparseGridGeometry window(base.frame_id(), base.resolution_m(),
                             base.origin_m(), window_minimum, window_maximum);
   if (!IsLocalPlanningWindowFor(window, base) || !window.Contains(*anchor)) {
-    return std::nullopt;
+    return {.status = LocalPlanningWindowStatus::kStartOutsideFineMap};
   }
-  return window;
+  return {.status = LocalPlanningWindowStatus::kReady,
+          .geometry = std::move(window)};
 }
 
 }  // namespace lunar::incremental_navigation

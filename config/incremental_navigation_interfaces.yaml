@@ -12,7 +12,7 @@ inputs:
     type: nav_msgs/msg/Odometry
     owner: external
     frame: odom
-    child_frame: base_footprint
+    child_frame: base_link
   tf:
     name: /tf
     type: tf2_msgs/msg/TFMessage

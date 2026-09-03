@@ -22,8 +22,12 @@ class _Context:
         self.launch_configurations = configurations
 
 
-def _launch_module(monkeypatch: pytest.MonkeyPatch):
+def _launch_module(
+    monkeypatch: pytest.MonkeyPatch,
+    unavailable_packages: set[str] | None = None,
+):
     """Load the real launch source with minimal action doubles, not ROS runtime."""
+    unavailable = unavailable_packages or set()
     class LaunchConfiguration:
         def __init__(self, name: str) -> None:
             self.name = name
@@ -61,8 +65,13 @@ def _launch_module(monkeypatch: pytest.MonkeyPatch):
         def __init__(self, **kwargs: object) -> None:
             self.kwargs = kwargs
 
+    def package_share(package: str) -> str:
+        if package in unavailable:
+            raise LookupError(f"package unavailable: {package}")
+        return str(ROOT / "ros2_ws/src" / package)
+
     packages = types.ModuleType("ament_index_python.packages")
-    packages.get_package_share_directory = lambda package: str(ROOT / "ros2_ws/src" / package)
+    packages.get_package_share_directory = package_share
     ament_index = types.ModuleType("ament_index_python")
     launch = types.ModuleType("launch")
     launch.LaunchDescription = LaunchDescription
@@ -166,6 +175,7 @@ def test_yaml_defaults_construct_only_incremental_action_server_and_share_endpoi
     assert navigation["platform_type"] == exploration["platform_selector"] == "wheel"
     assert navigation["action_name"] == exploration["navigation_action"] == "/Car/T4/navigation/navigate_to_pose"
     assert navigation["exploration_map_topic"] == exploration["exploration_map_topic"] == "/Car/T4/mapping/exploration_map"
+    assert navigation["local_window_size_m"] == 64.0
     assert navigation["use_sim_time"].value is False
     assert exploration["use_sim_time"].value is False
 
@@ -211,6 +221,60 @@ def test_legacy_mode_ignores_invalid_incremental_only_common_contracts(
 
     assert all(isinstance(action, IncludeLaunchDescription) for action in actions)
     assert not any(isinstance(action, Node) for action in actions)
+
+
+def test_explicit_legacy_needs_neither_incremental_package_nor_config_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject a rollback path that resolves v2 resources before selecting legacy."""
+    module, Node, IncludeLaunchDescription = _launch_module(
+        monkeypatch, {"lunar_incremental_navigation_ros"}
+    )
+
+    actions = _compose(
+        module,
+        stack_mode="legacy",
+        config_file="/definitely/missing/exploration_navigation.yaml",
+    )
+
+    assert all(isinstance(action, IncludeLaunchDescription) for action in actions)
+    assert not any(isinstance(action, Node) for action in actions)
+    assert {
+        action.source.path.rsplit("/", 1)[-1] for action in actions
+    } == {"pure_planner.launch.py", "pure_exploration.launch.py"}
+
+
+def test_incremental_mode_still_requires_the_incremental_navigation_package(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject a legacy-only fallback from being silently used for explicit v2."""
+    module, _, _ = _launch_module(
+        monkeypatch, {"lunar_incremental_navigation_ros"}
+    )
+
+    with pytest.raises(LookupError, match="lunar_incremental_navigation_ros"):
+        _compose(module, stack_mode="incremental_v2")
+
+
+def test_default_config_is_owned_by_the_top_level_exploration_package(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject default-config lookup through the optional incremental package."""
+    module, _, _ = _launch_module(
+        monkeypatch, {"lunar_incremental_navigation_ros"}
+    )
+
+    description = module.generate_launch_description()
+    config_argument = next(
+        action
+        for action in description.actions
+        if action.args and action.args[0] == "config_file"
+    )
+
+    assert config_argument.kwargs["default_value"] == (
+        f"{ROOT / 'ros2_ws/src/lunar_pure_exploration_ros'}/config/"
+        "exploration_navigation.yaml"
+    )
 
 
 def test_invalid_mode_does_not_construct_another_action_server(

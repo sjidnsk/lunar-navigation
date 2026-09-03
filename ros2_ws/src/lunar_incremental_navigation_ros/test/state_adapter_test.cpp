@@ -56,26 +56,21 @@ TEST(StateAdapterTest, NormalizesDirectTransformWithoutFreshnessPolicy) {
   EXPECT_EQ(adapted.value->stamp.nanoseconds_since_epoch, 0);
 }
 
-TEST(StateAdapterTest, ConvertsWheelAndLeggedOdometryPoseOnly) {
+TEST(StateAdapterTest, ConvertsOnlyTheSharedOdomToBaseLinkPoseContract) {
   const auto direct = AdaptDirectMapFromOdom(MapFromOdom());
   ASSERT_TRUE(direct.value);
-  auto odometry = OdomState("base_footprint");
+  auto rejected_odometry = OdomState("base_footprint");
+  EXPECT_FALSE(AdaptStateInput(*direct.value, rejected_odometry).value);
+
+  auto odometry = OdomState("base_link");
   odometry.twist.twist.linear.x = std::numeric_limits<double>::quiet_NaN();
 
-  const auto wheel = AdaptStateInput(*direct.value, odometry);
-  const auto legged = AdaptStateInput(*direct.value, OdomState("base_link"));
+  const auto adapted = AdaptStateInput(*direct.value, odometry);
 
-  ASSERT_TRUE(wheel.value) << wheel.reason_code;
-  ASSERT_TRUE(legged.value) << legged.reason_code;
-  EXPECT_DOUBLE_EQ(wheel.value->base_link_pose.position_m.x, 12.0);
-  EXPECT_DOUBLE_EQ(wheel.value->base_link_pose.position_m.y, 1.0);
-  EXPECT_DOUBLE_EQ(wheel.value->base_link_pose.yaw_rad, 0.0);
-  EXPECT_DOUBLE_EQ(wheel.value->base_link_pose.position_m.x,
-                   legged.value->base_link_pose.position_m.x);
-  EXPECT_DOUBLE_EQ(wheel.value->base_link_pose.position_m.y,
-                   legged.value->base_link_pose.position_m.y);
-  EXPECT_DOUBLE_EQ(wheel.value->base_link_pose.yaw_rad,
-                   legged.value->base_link_pose.yaw_rad);
+  ASSERT_TRUE(adapted.value) << adapted.reason_code;
+  EXPECT_DOUBLE_EQ(adapted.value->base_link_pose.position_m.x, 12.0);
+  EXPECT_DOUBLE_EQ(adapted.value->base_link_pose.position_m.y, 1.0);
+  EXPECT_DOUBLE_EQ(adapted.value->base_link_pose.yaw_rad, 0.0);
 }
 
 }  // namespace
