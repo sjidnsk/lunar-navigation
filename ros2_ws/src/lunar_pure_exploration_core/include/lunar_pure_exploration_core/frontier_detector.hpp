@@ -36,6 +36,11 @@ struct FrontierDetection {
   FrontierDetectionReason reason;
 };
 
+struct TaskwideFrontierDetection {
+  std::vector<FrontierCluster> clusters;
+  std::uint32_t map_backed_free_cell_count;
+};
+
 struct FrontierParameters {
   double minimum_cluster_length_m;
 };
@@ -45,6 +50,7 @@ class FrontierDetector {
   explicit FrontierDetector(FrontierParameters parameters);
   FrontierDetection Detect(const TaskRaster& raster,
                            GridIndex robot_cell) const;
+  TaskwideFrontierDetection DetectAll(const TaskRaster& raster) const;
 
  private:
   FrontierParameters parameters_;

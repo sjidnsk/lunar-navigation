@@ -265,6 +265,30 @@ std::vector<GridIndex> FindFrontierCells(const TaskRaster& raster,
   return frontier_cells;
 }
 
+std::vector<GridIndex> FindAllFrontierCells(
+    const TaskRaster& raster, std::uint32_t& map_backed_free_cell_count) {
+  std::vector<GridIndex> frontier_cells;
+  for (const GridIndex cell : raster.map_backed_cells()) {
+    if (raster.Classify(cell) != CellState::kFree) {
+      continue;
+    }
+    if (map_backed_free_cell_count ==
+        std::numeric_limits<std::uint32_t>::max()) {
+      throw std::overflow_error("map-backed free cell count overflows uint32");
+    }
+    ++map_backed_free_cell_count;
+
+    for (const DirectionStep& step : kCardinalSteps) {
+      const GridIndex neighbor = CheckedOffset(cell, step.dx, step.dy);
+      if (raster.Classify(neighbor) == CellState::kUnknown) {
+        frontier_cells.push_back(cell);
+        break;
+      }
+    }
+  }
+  return frontier_cells;
+}
+
 std::vector<std::vector<GridIndex>> ClusterFrontierCells(
     const std::vector<GridIndex>& frontier_cells) {
   const std::set<GridIndex> frontier_set(frontier_cells.begin(),
@@ -291,6 +315,24 @@ std::vector<std::vector<GridIndex>> ClusterFrontierCells(
     }
     clusters.push_back(std::move(cluster));
   }
+  return clusters;
+}
+
+std::vector<FrontierCluster> BuildAcceptedClusters(
+    const TaskRaster& raster, const std::vector<GridIndex>& frontier_cells,
+    double minimum_cluster_length_m) {
+  std::vector<FrontierCluster> clusters;
+  for (std::vector<GridIndex>& cells : ClusterFrontierCells(frontier_cells)) {
+    FrontierCluster cluster = BuildCluster(raster, std::move(cells));
+    if (cluster.length_m >= minimum_cluster_length_m) {
+      clusters.push_back(std::move(cluster));
+    }
+  }
+  std::sort(clusters.begin(), clusters.end(),
+            [](const FrontierCluster& left, const FrontierCluster& right) {
+              return std::tie(left.id, left.canonical_key, left.cells) <
+                     std::tie(right.id, right.canonical_key, right.cells);
+            });
   return clusters;
 }
 
@@ -370,25 +412,25 @@ FrontierDetection FrontierDetector::Detect(const TaskRaster& raster,
   std::uint32_t reachable_count = 0U;
   const std::vector<GridIndex> frontier_cells =
       FindFrontierCells(raster, start, reachable_count);
-  std::vector<FrontierCluster> clusters;
-  for (std::vector<GridIndex>& cells :
-       ClusterFrontierCells(frontier_cells)) {
-    FrontierCluster cluster = BuildCluster(raster, std::move(cells));
-    if (cluster.length_m >= parameters_.minimum_cluster_length_m) {
-      clusters.push_back(std::move(cluster));
-    }
-  }
-  std::sort(clusters.begin(), clusters.end(),
-            [](const FrontierCluster& left, const FrontierCluster& right) {
-              return std::tie(left.id, left.canonical_key, left.cells) <
-                     std::tie(right.id, right.canonical_key, right.cells);
-            });
 
   return FrontierDetection{
-      .clusters = std::move(clusters),
+      .clusters = BuildAcceptedClusters(raster, frontier_cells,
+                                        parameters_.minimum_cluster_length_m),
       .reachable_free_cell_count = reachable_count,
       .has_reachable_free_start = true,
       .reason = FrontierDetectionReason::kOk,
+  };
+}
+
+TaskwideFrontierDetection FrontierDetector::DetectAll(
+    const TaskRaster& raster) const {
+  std::uint32_t map_backed_free_cell_count = 0U;
+  const std::vector<GridIndex> frontier_cells =
+      FindAllFrontierCells(raster, map_backed_free_cell_count);
+  return TaskwideFrontierDetection{
+      .clusters = BuildAcceptedClusters(raster, frontier_cells,
+                                        parameters_.minimum_cluster_length_m),
+      .map_backed_free_cell_count = map_backed_free_cell_count,
   };
 }
 

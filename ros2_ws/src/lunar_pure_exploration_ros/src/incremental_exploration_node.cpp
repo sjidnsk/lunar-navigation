@@ -46,19 +46,14 @@ using DiagnosticStatus = diagnostic_msgs::msg::DiagnosticStatus;
 using KeyValue = diagnostic_msgs::msg::KeyValue;
 using Status = lunar_pure_exploration_msgs::msg::PureExplorationStatus;
 using Task = lunar_pure_exploration_msgs::msg::PureExplorationTask;
-using lunar::pure_exploration::BoundaryGuidanceResult;
 using lunar::pure_exploration::CalculateCoverage;
 using lunar::pure_exploration::CandidateGain;
 using lunar::pure_exploration::CandidateView;
-using lunar::pure_exploration::CellState;
 using lunar::pure_exploration::CoverageStats;
 using lunar::pure_exploration::FrontierCluster;
-using lunar::pure_exploration::FrontierDetection;
 using lunar::pure_exploration::FrontierDetector;
 using lunar::pure_exploration::FrontierParameters;
 using lunar::pure_exploration::GridGeometry;
-using lunar::pure_exploration::GridIndex;
-using lunar::pure_exploration::NavigationPhase;
 using lunar::pure_exploration::OccupancyGridView;
 using lunar::pure_exploration::PersistentFailureReason;
 using lunar::pure_exploration::Polygon2;
@@ -118,8 +113,6 @@ IncrementalExplorationNodeParameters LoadParameters(rclcpp::Node& node) {
       node.declare_parameter<double>("sensor_range_m", 10.0);
   const auto sensor_fov_deg =
       node.declare_parameter<double>("sensor_fov_deg", 90.0);
-  const auto goal_yaw_tolerance_deg =
-      node.declare_parameter<double>("goal_yaw_tolerance_deg", 11.25);
   const auto yaw_offsets_deg = node.declare_parameter<std::vector<double>>(
       "yaw_offsets_deg", {-45.0, -22.5, 0.0, 22.5, 45.0});
   if (yaw_offsets_deg.size() != 5U || !std::isfinite(minimum_frontier) ||
@@ -127,8 +120,7 @@ IncrementalExplorationNodeParameters LoadParameters(rclcpp::Node& node) {
       !std::isfinite(coverage_target) || coverage_target <= 0.0 ||
       coverage_target > 1.0 || !std::isfinite(sensor_range) ||
       sensor_range <= 0.0 || !std::isfinite(sensor_fov_deg) ||
-      sensor_fov_deg <= 0.0 || !std::isfinite(goal_yaw_tolerance_deg) ||
-      goal_yaw_tolerance_deg < 0.0) {
+      sensor_fov_deg <= 0.0) {
     throw std::invalid_argument{"invalid incremental exploration parameters"};
   }
   lunar::pure_exploration::CandidateParameters candidate_parameters;
@@ -152,12 +144,6 @@ IncrementalExplorationNodeParameters LoadParameters(rclcpp::Node& node) {
            maximum_candidates,
            PositiveSize(node, "maximum_collision_work_units", 1000000)},
       .task_raster_limits = {maximum_task_cells},
-      .boundary_guidance_limits =
-          {PositiveSize(node, "maximum_guidance_grid_cells",
-                        static_cast<std::int64_t>(maximum_task_cells)),
-           PositiveSize(node, "maximum_guidance_work_units", 8388608),
-           PositiveSize(node, "maximum_approach_candidates",
-                        static_cast<std::int64_t>(maximum_candidates))},
       .sensor_model =
           {sensor_range, sensor_fov_deg * std::numbers::pi / 180.0},
       .information_gain_limits =
@@ -176,8 +162,6 @@ IncrementalExplorationNodeParameters LoadParameters(rclcpp::Node& node) {
            PositiveSize(node, "maximum_failure_total_patch_cells", 1000000)},
       .minimum_frontier_length_m = minimum_frontier,
       .coverage_target = coverage_target,
-      .goal_yaw_tolerance_rad =
-          goal_yaw_tolerance_deg * std::numbers::pi / 180.0,
       .exploration_map_topic = AbsoluteTopic(
           node, "exploration_map_topic", "/Car/T4/mapping/exploration_map"),
       .odometry_topic = AbsoluteTopic(
@@ -328,24 +312,6 @@ std::uint32_t ToU32(const std::size_t value) {
                           std::numeric_limits<std::uint32_t>::max())));
 }
 
-std::string ApproachWaitReason(
-    const lunar::pure_exploration::ApproachWaitReason reason) {
-  using Reason = lunar::pure_exploration::ApproachWaitReason;
-  switch (reason) {
-    case Reason::kNone:
-      return "APPROACH_READY";
-    case Reason::kWaitingForSafeStart:
-      return "WAITING_FOR_SAFE_START";
-    case Reason::kWaitingForTaskMapCoverage:
-      return "WAITING_FOR_TASK_MAP_COVERAGE";
-    case Reason::kNoGuidanceRoute:
-      return "NO_GUIDANCE_ROUTE";
-    case Reason::kNoSafeCandidate:
-      return "NO_SAFE_APPROACH_CANDIDATE";
-  }
-  return "APPROACH_WAITING";
-}
-
 visualization_msgs::msg::MarkerArray BoundaryMarkers(
     const Polygon2& boundary) {
   visualization_msgs::msg::Marker marker;
@@ -388,9 +354,6 @@ struct IncrementalExplorationNode::Runtime final {
         candidate_generator(parameters.platform,
                             parameters.candidate_parameters,
                             parameters.candidate_limits),
-        boundary_guidance(parameters.platform, parameters.sensor_model,
-                          parameters.goal_yaw_tolerance_rad,
-                          parameters.boundary_guidance_limits),
         information_gain(parameters.sensor_model,
                          parameters.information_gain_limits),
         ranker(parameters.score_weights,
@@ -425,7 +388,6 @@ struct IncrementalExplorationNode::Runtime final {
   bool teardown{false};
   IncrementalExplorationNodeParameters parameters;
   lunar::pure_exploration::CandidateGenerator candidate_generator;
-  lunar::pure_exploration::BoundaryGuidance boundary_guidance;
   lunar::pure_exploration::InformationGainEvaluator information_gain;
   lunar::pure_exploration::CandidateRanker ranker;
   lunar::pure_exploration::FailureMemory failure_memory;
@@ -439,7 +401,6 @@ struct IncrementalExplorationNode::Runtime final {
   std::vector<FrontierCluster> frontiers;
   std::vector<CandidateView> candidates;
   std::vector<std::size_t> decision_order;
-  std::optional<BoundaryGuidanceResult> approach;
   std::optional<ActiveGoal> active_goal;
   std::optional<std::uint64_t> minimum_decision_map_sequence;
   std::string task_id;
@@ -448,6 +409,7 @@ struct IncrementalExplorationNode::Runtime final {
   std::uint64_t exploration_map_sequence{0U};
   std::uint64_t task_generation{0U};
   std::uint32_t completed_goal_count{0U};
+  std::uint32_t map_backed_free_cell_count{0U};
   std::uint32_t reachable_candidate_count{0U};
   bool cancel_expected{false};
   MarkerBuilder marker_builder;
@@ -468,22 +430,6 @@ struct IncrementalExplorationNode::Runtime final {
 namespace {
 
 using Runtime = IncrementalExplorationNode::Runtime;
-
-ApproachMarkers BuildApproachMarkers(const BoundaryGuidanceResult& result) {
-  ApproachMarkers markers;
-  markers.intent_points.reserve(result.intents.size());
-  for (const auto& intent : result.intents) {
-    markers.intent_points.push_back(
-        Vec2{static_cast<double>(intent.cell.x),
-             static_cast<double>(intent.cell.y)});
-  }
-  markers.candidates.reserve(result.candidates.size());
-  for (const auto& candidate : result.candidates) {
-    markers.candidates.push_back(
-        {.identity = candidate.identity, .pose = candidate.pose});
-  }
-  return markers;
-}
 
 void PublishLocked(Runtime& runtime) {
   Status status;
@@ -522,23 +468,17 @@ void PublishLocked(Runtime& runtime) {
     runtime.task_map_publisher->publish(
         runtime.task_map_marker_builder.Build(*runtime.raster, "map"));
   }
-  if (runtime.approach) {
-    auto approach_markers = BuildApproachMarkers(*runtime.approach);
-    runtime.frontiers_publisher->publish(runtime.marker_builder.Build(
-        {}, {}, std::nullopt, &approach_markers));
-  } else {
-    std::optional<MarkerSelection> selected;
-    if (runtime.active_goal &&
-        runtime.active_goal->candidate.frontier_canonical_key) {
-      selected = MarkerSelection{
-          .candidate_key = runtime.active_goal->candidate.key,
-          .frontier_canonical_key =
-              *runtime.active_goal->candidate.frontier_canonical_key,
-          .target = runtime.active_goal->candidate.pose};
-    }
-    runtime.frontiers_publisher->publish(runtime.marker_builder.Build(
-        runtime.frontiers, runtime.candidates, selected));
+  std::optional<MarkerSelection> selected;
+  if (runtime.active_goal &&
+      runtime.active_goal->candidate.frontier_canonical_key) {
+    selected = MarkerSelection{
+        .candidate_key = runtime.active_goal->candidate.key,
+        .frontier_canonical_key =
+            *runtime.active_goal->candidate.frontier_canonical_key,
+        .target = runtime.active_goal->candidate.pose};
   }
+  runtime.frontiers_publisher->publish(runtime.marker_builder.Build(
+      runtime.frontiers, runtime.candidates, selected));
 
   DiagnosticArray diagnostics;
   diagnostics.header = status.header;
@@ -568,7 +508,7 @@ void RefreshDecisionLocked(Runtime& runtime) {
   runtime.frontiers.clear();
   runtime.candidates.clear();
   runtime.decision_order.clear();
-  runtime.approach.reset();
+  runtime.map_backed_free_cell_count = 0U;
   runtime.reachable_candidate_count = 0U;
   if (!runtime.latest_map || !runtime.task_boundary) {
     runtime.raster.reset();
@@ -596,57 +536,31 @@ void RefreshDecisionLocked(Runtime& runtime) {
     return;
   }
 
-  auto guidance = runtime.boundary_guidance.Build(
-      map, *runtime.raster, *robot_pose);
-  if (guidance.phase == NavigationPhase::kApproachTask) {
-    runtime.decision_order =
-        runtime.boundary_guidance.CoarseOrder(guidance, *robot_pose);
-    runtime.candidates.reserve(guidance.candidates.size());
-    for (std::size_t index = 0U; index < guidance.candidates.size(); ++index) {
-      const auto& candidate = guidance.candidates[index];
-      runtime.candidates.push_back(
-          {.id = candidate.id,
-           .frontier_id = 0U,
-           .frontier_index = index,
-           .key = candidate.identity.candidate_key,
-           .pose = candidate.pose,
-           .frontier_distance_m = candidate.remaining_cost.path_length_m});
-    }
-    runtime.reason_code = ApproachWaitReason(guidance.wait_reason);
-    runtime.approach = std::move(guidance);
-  } else {
-    const auto robot_cell = runtime.raster->WorldToCell(
-        Vec2{robot_pose->x, robot_pose->y});
-    if (!robot_cell ||
-        runtime.raster->Classify(*robot_cell) != CellState::kFree) {
-      runtime.reason_code = "WAITING_FOR_REACHABLE_KNOWN_START";
-      return;
-    }
-    const FrontierDetection detection = FrontierDetector(
-        FrontierParameters{runtime.parameters.minimum_frontier_length_m})
-                                             .Detect(*runtime.raster,
-                                                     *robot_cell);
-    runtime.frontiers = detection.clusters;
-    if (!detection.has_reachable_free_start) {
-      runtime.reason_code = "WAITING_FOR_REACHABLE_KNOWN_START";
-      return;
-    }
-    runtime.candidates = runtime.candidate_generator.Generate(
-        *runtime.raster, runtime.frontiers);
-    std::vector<CandidateGain> gains;
-    gains.reserve(runtime.candidates.size());
-    for (std::size_t index = 0U; index < runtime.candidates.size(); ++index) {
-      gains.push_back(
-          {index, runtime.information_gain
-                      .Evaluate(*runtime.raster, runtime.candidates[index])
-                      .visible_unknown_area_m2});
-    }
-    const auto ranked = runtime.ranker.CoarseRank(
-        runtime.candidates, runtime.frontiers, gains, *robot_pose);
-    runtime.decision_order.reserve(ranked.size());
-    for (const auto& row : ranked) {
-      runtime.decision_order.push_back(row.candidate_index);
-    }
+  const auto detection = FrontierDetector(
+      FrontierParameters{runtime.parameters.minimum_frontier_length_m})
+                             .DetectAll(*runtime.raster);
+  runtime.frontiers = detection.clusters;
+  runtime.map_backed_free_cell_count = detection.map_backed_free_cell_count;
+  if (runtime.map_backed_free_cell_count == 0U) {
+    runtime.reason_code = "WAITING_FOR_KNOWN_FREE_MAP_EVIDENCE";
+    return;
+  }
+
+  runtime.candidates = runtime.candidate_generator.Generate(
+      *runtime.raster, runtime.frontiers);
+  std::vector<CandidateGain> gains;
+  gains.reserve(runtime.candidates.size());
+  for (std::size_t index = 0U; index < runtime.candidates.size(); ++index) {
+    gains.push_back(
+        {index, runtime.information_gain
+                    .Evaluate(*runtime.raster, runtime.candidates[index])
+                    .visible_unknown_area_m2});
+  }
+  const auto ranked = runtime.ranker.CoarseRank(
+      runtime.candidates, runtime.frontiers, gains, *robot_pose);
+  runtime.decision_order.reserve(ranked.size());
+  for (const auto& row : ranked) {
+    runtime.decision_order.push_back(row.candidate_index);
   }
 
   for (const std::size_t index : runtime.decision_order) {
@@ -681,6 +595,14 @@ void Decide(const std::shared_ptr<Runtime>& runtime) {
       runtime->state = Status::SELECTING_FRONTIER;
       runtime->reason_code = "SELECTING_FRONTIER";
       RefreshDecisionLocked(*runtime);
+      if (runtime->map_backed_free_cell_count == 0U) {
+        runtime->state = Status::WAITING_FOR_INPUT;
+        runtime->reason_code = "WAITING_FOR_KNOWN_FREE_MAP_EVIDENCE";
+        runtime->minimum_decision_map_sequence =
+            runtime->exploration_map_sequence + 1U;
+        PublishLocked(*runtime);
+        return;
+      }
       if (runtime->coverage.coverage_ratio >=
           runtime->parameters.coverage_target) {
         runtime->state = Status::COMPLETED;
@@ -688,7 +610,7 @@ void Decide(const std::shared_ptr<Runtime>& runtime) {
         PublishLocked(*runtime);
         return;
       }
-      if (!runtime->approach && runtime->frontiers.empty()) {
+      if (runtime->frontiers.empty()) {
         runtime->state = Status::COMPLETED;
         runtime->reason_code = "COMPLETED_NO_REACHABLE_FRONTIER";
         PublishLocked(*runtime);
@@ -705,10 +627,7 @@ void Decide(const std::shared_ptr<Runtime>& runtime) {
       }
       if (!selected) {
         runtime->state = Status::WAITING_FOR_INPUT;
-        runtime->reason_code = runtime->approach
-                                   ? ApproachWaitReason(
-                                         runtime->approach->wait_reason)
-                                   : "WAITING_FOR_MAP_CHANGE";
+        runtime->reason_code = "WAITING_FOR_MAP_CHANGE";
         runtime->minimum_decision_map_sequence =
             runtime->exploration_map_sequence + 1U;
         PublishLocked(*runtime);
@@ -1021,7 +940,7 @@ void HandleTask(const std::weak_ptr<Runtime>& weak_runtime,
         runtime->frontiers.clear();
         runtime->candidates.clear();
         runtime->decision_order.clear();
-        runtime->approach.reset();
+        runtime->map_backed_free_cell_count = 0U;
         runtime->minimum_decision_map_sequence.reset();
         runtime->state = Status::IDLE;
         runtime->reason_code = "CANCELED";

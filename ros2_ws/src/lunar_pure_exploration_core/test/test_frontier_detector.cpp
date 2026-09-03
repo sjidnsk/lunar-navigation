@@ -185,6 +185,24 @@ TEST(FrontierDetectorTest, IgnoresUnknownIslandBehindOccupiedWall) {
   EXPECT_TRUE(detection.clusters.empty());
 }
 
+TEST(FrontierDetectorTest,
+     DetectAllFindsTaskwideFrontierBehindOccupiedWallWithoutRobotStart) {
+  const TaskRaster raster = BuildRaster(
+      5U, 3U,
+      {
+          100, 100, 100, 100, 100,
+          0,   0,   100, 0,   -1,
+          100, 100, 100, 100, 100,
+      });
+
+  const auto detection = FrontierDetector({0.0}).DetectAll(raster);
+
+  EXPECT_EQ(detection.map_backed_free_cell_count, 3U);
+  ASSERT_EQ(detection.clusters.size(), 1U);
+  EXPECT_EQ(detection.clusters[0].cells,
+            (std::vector<GridIndex>{{3, 1}}));
+}
+
 TEST(FrontierDetectorTest, ConcaveTaskNotchDoesNotCreateAFrontier) {
   const GridGeometry geometry{
       .width = 3U,

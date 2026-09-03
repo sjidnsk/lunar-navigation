@@ -120,6 +120,15 @@ nav_msgs::msg::OccupancyGrid ExplorationMap(bool broad_frontier = true) {
   return map;
 }
 
+nav_msgs::msg::OccupancyGrid ExplorationMapWithUnknownRobotCell() {
+  auto map = ExplorationMap(false);
+  constexpr std::uint32_t kRobotCellX = 2U;
+  constexpr std::uint32_t kRobotCellY = 2U;
+  map.data.at(static_cast<std::size_t>(kRobotCellY) * map.info.width +
+              kRobotCellX) = -1;
+  return map;
+}
+
 nav_msgs::msg::OccupancyGrid FinerExplorationMap() {
   nav_msgs::msg::OccupancyGrid map;
   map.header.frame_id = "map";
@@ -296,7 +305,6 @@ class IncrementalExplorationNodeTest : public ::testing::Test {
               std::numbers::pi / 8.0, std::numbers::pi / 4.0}},
         .candidate_limits = {100000U, 10000U, 1000000U},
         .task_raster_limits = {100000U},
-        .boundary_guidance_limits = {100000U, 800000U, 10000U},
         .sensor_model = {5.0, std::numbers::pi / 2.0},
         .information_gain_limits = {1000000U},
         .score_weights = {},
@@ -458,6 +466,16 @@ TEST_F(IncrementalExplorationNodeTest,
     return status && status->candidate_count > first_count;
   }));
   EXPECT_EQ(server_->goal_count(), 1U);
+}
+
+TEST_F(IncrementalExplorationNodeTest,
+       UnknownCurrentCellStillSubmitsKnownFreeFrontierGoal) {
+  map_publisher_->publish(ExplorationMapWithUnknownRobotCell());
+  odometry_publisher_->publish(Odometry());
+  tf_publisher_->publish(MapFromOdom());
+  task_publisher_->publish(StartTask());
+
+  EXPECT_TRUE(WaitFor([this] { return server_->goal_count() == 1U; }));
 }
 
 TEST_F(IncrementalExplorationNodeTest,

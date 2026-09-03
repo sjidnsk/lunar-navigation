@@ -5,7 +5,6 @@
 #include <memory>
 #include <string>
 
-#include <lunar_pure_exploration_core/boundary_guidance.hpp>
 #include <lunar_pure_exploration_core/candidate_generator.hpp>
 #include <lunar_pure_exploration_core/candidate_ranker.hpp>
 #include <lunar_pure_exploration_core/failure_memory.hpp>
@@ -25,7 +24,6 @@ struct IncrementalExplorationNodeParameters final {
   lunar::pure_exploration::CandidateParameters candidate_parameters;
   lunar::pure_exploration::CandidateGenerator::Limits candidate_limits;
   lunar::pure_exploration::TaskRaster::Limits task_raster_limits;
-  lunar::pure_exploration::BoundaryGuidance::Limits boundary_guidance_limits;
   lunar::pure_exploration::SensorModel sensor_model;
   lunar::pure_exploration::InformationGainEvaluator::Limits
       information_gain_limits;
@@ -33,7 +31,6 @@ struct IncrementalExplorationNodeParameters final {
   lunar::pure_exploration::FailureMemoryLimits failure_memory_limits;
   double minimum_frontier_length_m;
   double coverage_target;
-  double goal_yaw_tolerance_rad{0.19634954084936207};
   std::string exploration_map_topic;
   std::string odometry_topic;
   std::string tf_topic;
