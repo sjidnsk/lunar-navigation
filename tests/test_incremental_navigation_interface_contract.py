@@ -19,6 +19,15 @@ EXPLORATION_SOURCE = (
     ROOT
     / "ros2_ws/src/lunar_pure_exploration_ros/src/incremental_exploration_node.cpp"
 )
+EXPLORATION_MAP_PROJECTOR = (
+    ROOT
+    / "ros2_ws/src/lunar_incremental_navigation_ros/src/exploration_map_projector.cpp"
+)
+EXPLORATION_MAP_PUBLISHER = (
+    ROOT
+    / "ros2_ws/src/lunar_incremental_navigation_ros/src/incremental_map_publisher.cpp"
+)
+EXPLORATION_MANIFEST = ROOT / "ros2_ws/src/lunar_pure_exploration_ros/package.xml"
 MESSAGE_ROOT = ROOT / "ros2_ws/src/lunar_planning_msgs"
 
 
@@ -89,8 +98,27 @@ def test_single_stack_config_has_only_shared_mode_platform_and_node_defaults() -
 
     assert set(config) == {"stack", "common", "exploration", "navigation"}
     assert config["stack"] == {"mode": "incremental_v2"}
-    assert config["common"]["platform_type"] == "wheel"
-    assert config["navigation"]["coarse_resolution_m"] == 1.0
+    common = config["common"]
+    assert common["platform_type"] == "wheel"
+    assert common["coarse_resolution_m"] == 1.0
+    assert common["navigation_action"] == "/Car/T4/navigation/navigate_to_pose"
+    assert common["local_map_topic"] == "/Car/T3/mapping/grid_map"
+    assert common["exploration_map_topic"] == "/Car/T4/mapping/exploration_map"
+    assert common["odometry_topic"] == "/Car/T3/localization/odometry"
+    assert common["tf_topic"] == "/tf"
+    assert common["frames"] == {
+        "map": "map",
+        "odom": "odom",
+        "base_link": "base_footprint",
+    }
+    assert common["exploration_map_qos"] == {
+        "reliability": "reliable",
+        "durability": "transient_local",
+        "history": "keep_last",
+        "depth": 1,
+    }
+    assert not {"coarse_resolution_m", "local_map_topic", "exploration_map_topic", "action_name", "navigation_action"} & set(config["exploration"])
+    assert not {"coarse_resolution_m", "local_map_topic", "exploration_map_topic", "action_name", "navigation_action"} & set(config["navigation"])
     text = STACK_CONFIG.read_text(encoding="utf-8").lower()
     assert "fine_resolution" not in text
     assert "motion_primitives" not in text
@@ -109,6 +137,57 @@ def test_incremental_source_keeps_navigation_and_exploration_interfaces_separate
     assert "MotionReference" not in exploration
     assert "PathReference" not in exploration
     assert "create_publisher<lunar_planning_msgs::msg::PathReference>" in navigation
+
+
+def test_stack_config_launch_and_cpp_keep_the_exploration_map_contract_closed() -> None:
+    """Reject endpoint, QoS, value, publisher, or consumer drift across stack layers."""
+    config = _yaml(STACK_CONFIG)
+    interfaces = _yaml(INCREMENTAL_INTERFACES)
+    common = config["common"]
+    navigation = NAVIGATION_SOURCE.read_text(encoding="utf-8")
+    exploration = EXPLORATION_SOURCE.read_text(encoding="utf-8")
+    projector = EXPLORATION_MAP_PROJECTOR.read_text(encoding="utf-8")
+    publisher = EXPLORATION_MAP_PUBLISHER.read_text(encoding="utf-8")
+
+    assert common["exploration_map_topic"] == interfaces["outputs"]["exploration_map"]["name"]
+    assert common["navigation_action"] == interfaces["action"]["name"]
+    assert common["odometry_topic"] == interfaces["inputs"]["odometry"]["name"]
+    assert common["tf_topic"] == interfaces["inputs"]["tf"]["name"]
+    assert common["local_map_topic"] == interfaces["inputs"]["grid_map"]["name"]
+    assert common["exploration_map_qos"] == interfaces["outputs"]["exploration_map"]["qos"]
+    assert '"/Car/T4/mapping/exploration_map"' in navigation
+    assert '"/Car/T4/mapping/exploration_map"' in exploration
+    assert '"/Car/T4/navigation/navigate_to_pose"' in navigation
+    assert '"/Car/T4/navigation/navigate_to_pose"' in exploration
+    assert "std::vector<std::int8_t>(coarse_geometry.CellCount(), -1)" in projector
+    assert "result.data[output_index] = 0;" in projector
+    assert "result.data[output_index] = 100;" in projector
+    assert "rclcpp::KeepLast{1}" in publisher
+    assert ".reliable().transient_local()" in publisher
+    assert publisher.count("create_publisher<nav_msgs::msg::OccupancyGrid>") == 1
+    assert navigation.count(
+        "exploration_map_publisher(node, parameters.exploration_map_topic)"
+    ) == 1
+    assert exploration.count("create_subscription<nav_msgs::msg::OccupancyGrid>(") == 1
+    assert "rclcpp::QoS{1}.reliable().transient_local()" in exploration
+
+
+def test_stack_config_and_launch_exclude_legacy_or_pose_topic_inputs() -> None:
+    """Reject an incremental_v2 dependency on a legacy map or standalone pose topic."""
+    stack = STACK_CONFIG.read_text(encoding="utf-8").lower()
+    launch = (ROOT / "launch/exploration_navigation.launch.py").read_text(encoding="utf-8").lower()
+
+    for forbidden in ("global_overview", "current_pose"):
+        assert forbidden not in stack
+        assert forbidden not in launch
+
+
+def test_top_level_launch_package_declares_its_incremental_runtime_dependencies() -> None:
+    """Reject an installed launch whose manifest cannot provide its imports and node package."""
+    manifest = EXPLORATION_MANIFEST.read_text(encoding="utf-8")
+
+    assert "<exec_depend>lunar_incremental_navigation_ros</exec_depend>" in manifest
+    assert "<exec_depend>python3-yaml</exec_depend>" in manifest
 
 
 def test_incremental_action_is_additive_and_legacy_plan_motion_is_unchanged() -> None:

@@ -3,11 +3,103 @@
 from __future__ import annotations
 
 import ast
+import importlib.util
 from pathlib import Path
+import sys
+import types
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
 LAUNCH = ROOT / "launch" / "exploration_navigation.launch.py"
+STACK_CONFIG = ROOT / "config" / "exploration_navigation.yaml"
+
+
+class _Context:
+    def __init__(self, configurations: dict[str, str]) -> None:
+        self.launch_configurations = configurations
+
+
+def _launch_module(monkeypatch: pytest.MonkeyPatch):
+    """Load the real launch source with minimal action doubles, not ROS runtime."""
+    class LaunchConfiguration:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def perform(self, context: _Context) -> str:
+            return context.launch_configurations.get(self.name, "")
+
+    class ParameterValue:
+        def __init__(self, value: str, *, value_type: type[bool]) -> None:
+            self.value = value_type(value.lower() == "true")
+
+    class Node:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+    class IncludeLaunchDescription:
+        def __init__(self, source: object, *, launch_arguments: object) -> None:
+            self.source = source
+            self.launch_arguments = dict(launch_arguments)
+
+    class PythonLaunchDescriptionSource:
+        def __init__(self, path: str) -> None:
+            self.path = path
+
+    class LaunchDescription:
+        def __init__(self, actions: list[object]) -> None:
+            self.actions = actions
+
+    class DeclareLaunchArgument:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.args = args
+            self.kwargs = kwargs
+
+    class OpaqueFunction:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+    packages = types.ModuleType("ament_index_python.packages")
+    packages.get_package_share_directory = lambda package: str(ROOT / "ros2_ws/src" / package)
+    ament_index = types.ModuleType("ament_index_python")
+    launch = types.ModuleType("launch")
+    launch.LaunchDescription = LaunchDescription
+    launch_actions = types.ModuleType("launch.actions")
+    launch_actions.DeclareLaunchArgument = DeclareLaunchArgument
+    launch_actions.IncludeLaunchDescription = IncludeLaunchDescription
+    launch_actions.OpaqueFunction = OpaqueFunction
+    launch_sources = types.ModuleType("launch.launch_description_sources")
+    launch_sources.PythonLaunchDescriptionSource = PythonLaunchDescriptionSource
+    launch_substitutions = types.ModuleType("launch.substitutions")
+    launch_substitutions.LaunchConfiguration = LaunchConfiguration
+    launch_ros = types.ModuleType("launch_ros")
+    launch_ros_actions = types.ModuleType("launch_ros.actions")
+    launch_ros_actions.Node = Node
+    launch_ros_parameters = types.ModuleType("launch_ros.parameter_descriptions")
+    launch_ros_parameters.ParameterValue = ParameterValue
+    for name, module in {
+        "ament_index_python": ament_index,
+        "ament_index_python.packages": packages,
+        "launch": launch,
+        "launch.actions": launch_actions,
+        "launch.launch_description_sources": launch_sources,
+        "launch.substitutions": launch_substitutions,
+        "launch_ros": launch_ros,
+        "launch_ros.actions": launch_ros_actions,
+        "launch_ros.parameter_descriptions": launch_ros_parameters,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+
+    spec = importlib.util.spec_from_file_location("task5_stack_launch", LAUNCH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module, Node, IncludeLaunchDescription
+
+
+def _compose(module: object, **overrides: str) -> list[object]:
+    return module._compose(_Context({"config_file": str(STACK_CONFIG), **overrides}))
 
 
 def _tree() -> ast.Module:
@@ -50,27 +142,66 @@ def test_launch_declares_the_single_entrypoint_arguments_and_incremental_default
     }
 
     assert set(arguments) == {"stack_mode", "platform_type", "config_file", "use_sim_time"}
-    assert arguments["stack_mode"] == "incremental_v2"
-    assert arguments["platform_type"] == "wheel"
-    assert arguments["use_sim_time"] == "false"
+    assert arguments["stack_mode"] == ""
+    assert arguments["platform_type"] == ""
+    assert arguments["use_sim_time"] == ""
     assert arguments["config_file"] is None
 
 
-def test_incremental_mode_constructs_only_its_navigation_and_exploration_nodes() -> None:
-    """Reject starting the legacy PlanMotion server beside NavigateToPose."""
-    compose = _function("_compose")
-    nodes = [node for node in ast.walk(compose) if isinstance(node, ast.Call) and _call_name(node) == "Node"]
-    packages = {_keyword_value(node, "package") for node in nodes}
-    executables = {_keyword_value(node, "executable") for node in nodes}
+def test_yaml_defaults_construct_only_incremental_action_server_and_share_endpoints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject dead YAML defaults or endpoint drift between the two v2 nodes."""
+    module, Node, IncludeLaunchDescription = _launch_module(monkeypatch)
+    actions = _compose(module)
 
-    assert packages == {
-        "lunar_incremental_navigation_ros",
-        "lunar_pure_exploration_ros",
-    }
-    assert executables == {
+    assert all(isinstance(action, Node) for action in actions)
+    assert not any(isinstance(action, IncludeLaunchDescription) for action in actions)
+    assert [action.kwargs["executable"] for action in actions] == [
         "lunar_incremental_navigation_node",
         "incremental_exploration_node",
+    ]
+    navigation, exploration = [action.kwargs["parameters"][0] for action in actions]
+    assert navigation["platform_type"] == exploration["platform_selector"] == "wheel"
+    assert navigation["action_name"] == exploration["navigation_action"] == "/Car/T4/navigation/navigate_to_pose"
+    assert navigation["exploration_map_topic"] == exploration["exploration_map_topic"] == "/Car/T4/mapping/exploration_map"
+    assert navigation["use_sim_time"].value is False
+    assert exploration["use_sim_time"].value is False
+
+
+def test_explicit_mode_platform_and_time_override_yaml_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject an override layer that cannot supersede the centralized defaults."""
+    module, Node, IncludeLaunchDescription = _launch_module(monkeypatch)
+    incremental = _compose(
+        module, stack_mode="incremental_v2", platform_type="legged", use_sim_time="true"
+    )
+    legacy = _compose(module, stack_mode="legacy", platform_type="wheel")
+
+    assert all(isinstance(action, Node) for action in incremental)
+    incremental_navigation, incremental_exploration = [
+        action.kwargs["parameters"][0] for action in incremental
+    ]
+    assert incremental_navigation["platform_type"] == "legged"
+    assert incremental_exploration["platform_selector"] == "legged"
+    assert incremental_navigation["use_sim_time"].value is True
+    assert all(isinstance(action, IncludeLaunchDescription) for action in legacy)
+    assert not any(isinstance(action, Node) for action in legacy)
+    assert {action.source.path.rsplit("/", 1)[-1] for action in legacy} == {
+        "pure_planner.launch.py",
+        "pure_exploration.launch.py",
     }
+
+
+def test_invalid_mode_does_not_construct_another_action_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject implicit mode selection or an automatic recovery branch."""
+    module, _, _ = _launch_module(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="unsupported stack_mode"):
+        _compose(module, stack_mode="invalid")
 
 
 def test_legacy_mode_includes_only_existing_planner_and_explorer_with_verified_capacities() -> None:

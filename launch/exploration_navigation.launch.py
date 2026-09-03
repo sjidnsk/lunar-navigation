@@ -41,29 +41,86 @@ def _load_config(path: str) -> dict[str, object]:
     return document
 
 
-def _incremental_parameters(
-    config: dict[str, object], platform_type: str, platform_config: str, use_sim_time: str
-) -> tuple[dict[str, object], dict[str, object]]:
-    common = dict(config["common"])
-    common.pop("platform_type", None)
-    common.pop("frames", None)
-    common["platform_config"] = platform_config
-    common["use_sim_time"] = ParameterValue(use_sim_time, value_type=bool)
+def _require_common(config: dict[str, object]) -> dict[str, object]:
+    common = config["common"]
+    if not isinstance(common, dict) or common.get("frames") != {
+        "map": "map", "odom": "odom", "base_link": "base_footprint"
+    }:
+        raise RuntimeError("exploration_navigation common frame contract is invalid")
+    if common.get("local_map_qos") != {
+        "reliability": "reliable", "durability": "transient_local"
+    } or common.get("exploration_map_qos") != {
+        "reliability": "reliable",
+        "durability": "transient_local",
+        "history": "keep_last",
+        "depth": 1,
+    }:
+        raise RuntimeError("exploration_navigation common QoS contract is invalid")
+    return common
 
-    navigation = {**common, **dict(config["navigation"]), "platform_type": platform_type}
+
+def _resolved_value(override: str, configured: object, name: str) -> str:
+    value = override or configured
+    if not isinstance(value, str) or not value:
+        raise RuntimeError(f"exploration_navigation {name} is invalid")
+    return value
+
+
+def _resolved_bool(override: str, configured: object) -> str:
+    if override:
+        return override
+    if not isinstance(configured, bool):
+        raise RuntimeError("exploration_navigation use_sim_time is invalid")
+    return "true" if configured else "false"
+
+
+def _incremental_parameters(
+    config: dict[str, object], common: dict[str, object], platform_type: str,
+    platform_config: str, use_sim_time: str,
+) -> tuple[dict[str, object], dict[str, object]]:
+    navigation = {
+        **dict(config["navigation"]),
+        "platform_type": platform_type,
+        "platform_config": platform_config,
+        "coarse_resolution_m": common["coarse_resolution_m"],
+        "local_map_topic": common["local_map_topic"],
+        "local_map_qos_reliability": common["local_map_qos"]["reliability"],
+        "local_map_qos_durability": common["local_map_qos"]["durability"],
+        "odometry_topic": common["odometry_topic"],
+        "tf_topic": common["tf_topic"],
+        "action_name": common["navigation_action"],
+        "exploration_map_topic": common["exploration_map_topic"],
+        "use_sim_time": ParameterValue(use_sim_time, value_type=bool),
+    }
     exploration = {
-        **common,
         **dict(config["exploration"]),
         "platform_selector": platform_type,
+        "platform_config": platform_config,
+        "odometry_topic": common["odometry_topic"],
+        "tf_topic": common["tf_topic"],
+        "navigation_action": common["navigation_action"],
+        "exploration_map_topic": common["exploration_map_topic"],
+        "use_sim_time": ParameterValue(use_sim_time, value_type=bool),
     }
     return navigation, exploration
 
 
 def _compose(context):
-    stack_mode = LaunchConfiguration("stack_mode").perform(context).strip()
-    platform_type = LaunchConfiguration("platform_type").perform(context).strip()
     config_file = LaunchConfiguration("config_file").perform(context).strip()
-    use_sim_time = LaunchConfiguration("use_sim_time").perform(context)
+    config = _load_config(config_file)
+    common = _require_common(config)
+    stack_mode = _resolved_value(
+        LaunchConfiguration("stack_mode").perform(context).strip(),
+        config["stack"].get("mode"), "stack_mode",
+    )
+    platform_type = _resolved_value(
+        LaunchConfiguration("platform_type").perform(context).strip(),
+        common.get("platform_type"), "platform_type",
+    )
+    use_sim_time = _resolved_bool(
+        LaunchConfiguration("use_sim_time").perform(context).strip(),
+        common.get("use_sim_time"),
+    )
 
     navigation_share = Path(
         get_package_share_directory("lunar_incremental_navigation_ros")
@@ -76,7 +133,7 @@ def _compose(context):
 
     if stack_mode == "incremental_v2":
         navigation, exploration = _incremental_parameters(
-            _load_config(config_file), platform_type, platform_config, use_sim_time
+            config, common, platform_type, platform_config, use_sim_time
         )
         return [
             Node(
@@ -125,13 +182,13 @@ def generate_launch_description() -> LaunchDescription:
     navigation_share = get_package_share_directory("lunar_incremental_navigation_ros")
     return LaunchDescription(
         [
-            DeclareLaunchArgument("stack_mode", default_value="incremental_v2"),
-            DeclareLaunchArgument("platform_type", default_value="wheel"),
+            DeclareLaunchArgument("stack_mode", default_value=""),
+            DeclareLaunchArgument("platform_type", default_value=""),
             DeclareLaunchArgument(
                 "config_file",
                 default_value=f"{navigation_share}/config/exploration_navigation.yaml",
             ),
-            DeclareLaunchArgument("use_sim_time", default_value="false"),
+            DeclareLaunchArgument("use_sim_time", default_value=""),
             OpaqueFunction(function=_compose),
         ]
     )
