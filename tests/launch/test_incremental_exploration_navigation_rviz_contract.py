@@ -123,6 +123,18 @@ def test_scenario_publishes_only_rolling_local_elevation_evidence() -> None:
     assert "global_overview" not in combined
 
 
+def test_no_path_probe_uses_the_scenario_owned_recovery_barrier() -> None:
+    node = _source(SCENARIO_NODE)
+    probe = _source(PROBE)
+
+    assert "LUNAR_DEMO_REQUIRE_NO_PATH_RECOVERY" in node
+    assert "ApplyNoPathRecoveryBarrier" in node
+    assert "no_path_recovery_barrier_injected_" in node
+    assert "no_path_recovery_barrier_cycles_remaining_" in node
+    assert 'launch_environment["LUNAR_DEMO_REQUIRE_NO_PATH_RECOVERY"] = "1"' in probe
+    assert 'create_publisher(\n        GridMap,\n        "/planning_demo/grid_map"' not in probe
+
+
 def test_ground_truth_is_visualization_only_and_never_a_production_input() -> None:
     launch = _source(LAUNCH)
     scenario_node = _source(SCENARIO_NODE)

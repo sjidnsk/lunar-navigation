@@ -170,6 +170,13 @@ source "$INCREMENTAL_BUILD_DIR/install/setup.bash"
 ros2 launch lunar_incremental_navigation_ros incremental_exploration_navigation_rviz.launch.py \
   platform_type:=wheel fine_resolution_m:=0.2 task_size_m:=24.0 \
   start_rviz:=true show_ground_truth:=false
+
+# 只用于隔离演示/自动回归：首个 ACTIVE 段后注入一次短时局部障碍，
+# 验证 NO_PATH 后由 explorer 换候选；不是生产输入或 A* 参数。
+LUNAR_DEMO_REQUIRE_NO_PATH_RECOVERY=1 \
+  ros2 launch lunar_incremental_navigation_ros incremental_exploration_navigation_rviz.launch.py \
+  platform_type:=wheel fine_resolution_m:=0.2 task_size_m:=24.0 \
+  start_rviz:=true show_ground_truth:=false
 ```
 
 RViz Fixed Frame 为 `map`。显示布局包括任务边界、三态任务图、16 m 局部观测窗口、frontier、唯一洋红

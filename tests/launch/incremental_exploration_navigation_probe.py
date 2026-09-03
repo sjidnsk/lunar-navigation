@@ -44,9 +44,8 @@ def main() -> int:
     from grid_map_msgs.msg import GridMap
     from lunar_planning_msgs.msg import PathReference
     from lunar_pure_exploration_msgs.msg import PureExplorationStatus, PureExplorationTask
-    from nav_msgs.msg import OccupancyGrid, Odometry
+    from nav_msgs.msg import OccupancyGrid
     from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-    from std_msgs.msg import Float32MultiArray, MultiArrayDimension
     from visualization_msgs.msg import MarkerArray
 
     log_path = Path(tempfile.mkstemp(prefix="incremental-demo-probe-", suffix=".log")[1])
@@ -62,13 +61,19 @@ def main() -> int:
         "start_rviz:=false",
         "show_ground_truth:=false",
     ]
+    launch_environment = os.environ.copy()
+    if arguments.expect_no_path_recovery:
+        # The scenario owns a deterministic local obstacle barrier after its
+        # first ACTIVE path. This avoids a second GridMap publisher racing the
+        # rolling scenario input while preserving the production demo path.
+        launch_environment["LUNAR_DEMO_REQUIRE_NO_PATH_RECOVERY"] = "1"
     process = subprocess.Popen(
         command,
         stdout=log_stream,
         stderr=subprocess.STDOUT,
         text=True,
         start_new_session=True,
-        env=os.environ.copy(),
+        env=launch_environment,
     )
 
     rclpy.init()
@@ -101,7 +106,6 @@ def main() -> int:
         "navigation_action_active": False,
         "navigation_action_status_after_cancel": False,
         "navigation_action_quiescent_since": None,
-        "odometry_xy": (0.0, 0.0),
         "planning_reasons": [],
     }
 
@@ -145,12 +149,6 @@ def main() -> int:
         observations["latest_goal"] = (
             message.pose.position.x,
             message.pose.position.y,
-        )
-
-    def on_odometry(message: Odometry) -> None:
-        observations["odometry_xy"] = (
-            message.pose.pose.position.x,
-            message.pose.pose.position.y,
         )
 
     def on_path(message: PathReference) -> None:
@@ -249,12 +247,6 @@ def main() -> int:
         reliable,
     )
     node.create_subscription(
-        Odometry,
-        "/planning_demo/odometry",
-        on_odometry,
-        reliable,
-    )
-    node.create_subscription(
         PureExplorationTask,
         "/planning_demo/exploration/task",
         on_task,
@@ -271,55 +263,7 @@ def main() -> int:
         "/planning_demo/exploration/task",
         reliable,
     )
-    obstacle_publisher = node.create_publisher(
-        GridMap,
-        "/planning_demo/grid_map",
-        latched,
-    )
-
-    def blocking_observation(goal_xy) -> GridMap:
-        resolution = float(arguments.fine_resolution)
-        width = round(16.0 / resolution)
-        center_x, center_y = observations["odometry_xy"]
-        goal_x, goal_y = goal_xy
-        logical = [math.nan] * (width * width)
-        for y in range(width):
-            for x in range(width):
-                world_x = center_x - 8.0 + (x + 0.5) * resolution
-                world_y = center_y - 8.0 + (y + 0.5) * resolution
-                if math.hypot(world_x - goal_x, world_y - goal_y) <= 1.25:
-                    logical[y * width + x] = 0.9
-        physical = [math.nan] * len(logical)
-        for y in range(width):
-            for x in range(width):
-                physical[(width - 1 - y) * width + (width - 1 - x)] = logical[
-                    y * width + x
-                ]
-        layer = Float32MultiArray()
-        layer.layout.dim = [
-            MultiArrayDimension(
-                label="column_index", size=width, stride=width * width
-            ),
-            MultiArrayDimension(label="row_index", size=width, stride=width),
-        ]
-        layer.data = physical
-        message = GridMap()
-        message.header.stamp = node.get_clock().now().to_msg()
-        message.header.frame_id = "odom"
-        message.info.resolution = resolution
-        message.info.length_x = 16.0
-        message.info.length_y = 16.0
-        message.info.pose.position.x = center_x
-        message.info.pose.position.y = center_y
-        message.info.pose.orientation.w = 1.0
-        message.layers = ["elevation"]
-        message.basic_layers = ["elevation"]
-        message.data = [layer]
-        return message
-
-    obstacle_updates = 0
     blocked_goal = None
-    blocked_goal_xy = None
     no_path_seen_after_block = False
     candidate_replaced_after_no_path = False
     node_destroyed = False
@@ -334,14 +278,9 @@ def main() -> int:
                 arguments.expect_no_path_recovery
                 and observations["active_path"]
                 and observations["latest_goal"] is not None
-                and obstacle_updates < 120
-                and not no_path_seen_after_block
+                and blocked_goal is None
             ):
-                if blocked_goal is None:
-                    blocked_goal = observations["latest_goal_key"]
-                    blocked_goal_xy = observations["latest_goal"]
-                obstacle_publisher.publish(blocking_observation(blocked_goal_xy))
-                obstacle_updates += 1
+                blocked_goal = observations["latest_goal_key"]
 
             base_ready = all(
                 observations[name]

@@ -1,11 +1,14 @@
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <geometry_msgs/msg/pose_stamped.hpp>
@@ -30,6 +33,35 @@ rclcpp::QoS LatchedQos() {
   return rclcpp::QoS{rclcpp::KeepLast{1}}.reliable().transient_local();
 }
 
+[[nodiscard]] bool RequireNoPathRecoveryDemo() {
+  const char* value = std::getenv("LUNAR_DEMO_REQUIRE_NO_PATH_RECOVERY");
+  return value != nullptr && std::string_view{value} == "1";
+}
+
+void ApplyNoPathRecoveryBarrier(grid_map_msgs::msg::GridMap& observation) {
+  const std::size_t width = static_cast<std::size_t>(std::llround(
+      observation.info.length_x / observation.info.resolution));
+  const std::size_t height = static_cast<std::size_t>(std::llround(
+      observation.info.length_y / observation.info.resolution));
+  auto& elevation = observation.data.front().data;
+  for (std::size_t y = 0U; y < height; ++y) {
+    for (std::size_t x = 0U; x < width; ++x) {
+      const double local_x = (static_cast<double>(x) + 0.5) *
+                                 observation.info.resolution -
+                             observation.info.length_x / 2.0;
+      const double local_y = (static_cast<double>(y) + 0.5) *
+                                 observation.info.resolution -
+                             observation.info.length_y / 2.0;
+      if (std::hypot(local_x, local_y) < 2.0) {
+        continue;
+      }
+      const std::size_t physical_row = width - 1U - x;
+      const std::size_t physical_column = height - 1U - y;
+      elevation[physical_column * width + physical_row] = 0.9F;
+    }
+  }
+}
+
 class IncrementalDemoScenarioNode final : public rclcpp::Node {
  public:
   IncrementalDemoScenarioNode()
@@ -37,6 +69,7 @@ class IncrementalDemoScenarioNode final : public rclcpp::Node {
         platform_type_(declare_parameter<std::string>("platform_type", "wheel")),
         show_ground_truth_(
             declare_parameter<bool>("show_ground_truth", false)),
+        require_no_path_recovery_(RequireNoPathRecoveryDemo()),
         scenario_(IncrementalDemoScenarioConfig{
             .fine_resolution_m =
                 declare_parameter<double>("fine_resolution_m", 0.2),
@@ -87,12 +120,21 @@ class IncrementalDemoScenarioNode final : public rclcpp::Node {
             "/planning_demo/planning/path_reference", LatchedQos(),
             [this](
                 const lunar_planning_msgs::msg::PathReference::SharedPtr path) {
+              const bool active =
+                  path->state ==
+                      lunar_planning_msgs::msg::PathReference::ACTIVE &&
+                  !path->path.poses.empty();
+              if (active && require_no_path_recovery_) {
+                std::scoped_lock lock{mutex_};
+                if (!no_path_recovery_barrier_injected_) {
+                  no_path_recovery_barrier_injected_ = true;
+                  no_path_recovery_barrier_cycles_remaining_ = 15U;
+                }
+              }
               nav_msgs::msg::Path visualization;
               visualization.header.frame_id = "map";
               visualization.header.stamp = now();
-              if (path->state ==
-                      lunar_planning_msgs::msg::PathReference::ACTIVE &&
-                  !path->path.poses.empty()) {
+              if (active) {
                 visualization = path->path;
                 visualization.header.frame_id = "map";
               }
@@ -106,15 +148,23 @@ class IncrementalDemoScenarioNode final : public rclcpp::Node {
   void Publish() {
     const auto stamp = now();
     IncrementalDemoPose pose;
+    bool apply_no_path_recovery_barrier{};
     {
       std::scoped_lock lock{mutex_};
       if (!pose_) {
         return;
       }
       pose = *pose_;
+      if (no_path_recovery_barrier_cycles_remaining_ > 0U) {
+        apply_no_path_recovery_barrier = true;
+        --no_path_recovery_barrier_cycles_remaining_;
+      }
     }
 
     auto observation = scenario_.MakeLocalObservation(pose);
+    if (apply_no_path_recovery_barrier) {
+      ApplyNoPathRecoveryBarrier(observation);
+    }
     observation.header.stamp = stamp;
     grid_map_publisher_->publish(observation);
 
@@ -202,6 +252,9 @@ class IncrementalDemoScenarioNode final : public rclcpp::Node {
 
   std::string platform_type_;
   bool show_ground_truth_{};
+  bool require_no_path_recovery_{};
+  bool no_path_recovery_barrier_injected_{};
+  std::size_t no_path_recovery_barrier_cycles_remaining_{};
   IncrementalDemoScenario scenario_;
   std::mutex mutex_;
   std::optional<IncrementalDemoPose> pose_;

@@ -2,10 +2,10 @@
 
 - 日期：2026-09-03
 - 集成分支：`feat/incremental-exploration-navigation`
-- 实现基线：`1cde6ce feat: add incremental exploration rviz demo`（本文档提交前）
-- 最终审查修复：`fix/incremental-exploration-navigation-review`（本次单一修复提交）
+- 实现基线：`77102c5 docs: record incremental exploration navigation validation`（最终审查修复前）
+- 最终审查修复：`fix/incremental-exploration-navigation-review`（接口契约修复与后续 demo 回归稳定化提交）
 - 环境：本机 Ubuntu / ROS 2 Jazzy
-- 最终审查临时构建根：`/tmp/lunar-review-final-FyZP96`
+- 最终审查临时构建根：`/tmp/lunar-final-verify2-ZXzCb8`
 
 ## 范围与结论边界
 
@@ -113,33 +113,49 @@ python3 -m pytest -q \
 
 ### 最终审查修复重跑
 
-在新的 `/tmp/lunar-review-final-FyZP96` Jazzy 闭包中，以
-`ROS_LOCALHOST_ONLY=1`、独立 `ROS_DOMAIN_ID=118` 重跑 core、导航 ROS、探索 core 与探索 ROS 的 CTest，
-结果分别为 `13/13`、`9/9`、`13/13`、`12/12` passed。新增的 core 回归实际构造并规划
-`0.1 m`、`64 m`、`640 × 640` 局部窗口：wheel 一次局部规划测得 `1.4502 ms`（expanded `640`），legged
-一次测得 `13.3973 ms`（expanded `1`）。这些是单次核心容量回归的观测值，不是整栈实时性或 Orin 性能结论。
+最终使用新的 `/tmp/lunar-final-verify2-ZXzCb8` Jazzy 依赖闭包重建 8 个包；唯一 stderr 是
+`lunar_pure_planner_ros` 既有的 C++ explicit-constructor warning，构建退出码为 0。以
+`ROS_LOCALHOST_ONLY=1` 和隔离 `ROS_DOMAIN_ID` 分包重跑 CTest，结果为：
 
-同一闭包的 fresh install 归属检查确认顶层 YAML/launch 仅存在于
-`lunar_pure_exploration_ros`，在 `lunar_incremental_navigation_ros` 与
-`lunar_pure_planner_ros` 均不存在。静态 interface/launch 合同为 `20 passed`，覆盖：缺少增量导航包与缺失
-配置时的显式 legacy、仍依赖该包的 incremental_v2、默认 YAML 安装归属、`49/50/101` 三态图拒绝及
-`base_footprint` odometry 拒绝。
+| 包 | CTest 结果 |
+| --- | --- |
+| `lunar_incremental_navigation_core` | `13/13` passed |
+| `lunar_incremental_navigation_ros` | `9/9` passed |
+| `lunar_pure_exploration_core` | `13/13` passed |
+| `lunar_pure_exploration_ros` | `12/12` passed |
 
-完整相关 pytest 收集 `36` 项，实跑得到 `35 passed, 1 failed`：既有
-`test_no_path_feedback_replaces_the_candidate` 的 headless demo probe 在本次闭包中未观测到
-`NO_PATH`（输出 `no_path_observed=false`、`candidate_replaced=false`）。该失败未改动轮式/足式 A*、探索器或
-控制器，作为 demo 回归待后续单独处理；不得以历史的 NO_PATH probe 通过记录替代本次结果。Humble/Orin 未运行。
+新增 core 回归实际构造 `local_window_size_m=64.0`：`0.2 m -> 320 × 320`、
+`0.1 m -> 640 × 640`，并验证超容量返回 `LOCAL_WINDOW_CAPACITY_EXCEEDED`；wheel/legged 的 640-cell
+工作区回归也已覆盖。这是容量/正确性证据，不是整栈实时性或 Orin 性能结论。
+
+首轮 aggregate CTest 曾各出现一次既有 legacy 并发测试和新三态测试的状态时序现象。legacy
+`FineMapValidationOverBudgetFailsClosedWithoutLeavingFinalRankBusy` 未改源码，隔离环境连续 3 次通过；
+新三态回归改为记录状态历史而不是读取可能被后续回调覆盖的最后状态，连续 3 次通过，并在最终包 CTest
+中通过。这里不把偶发时序现象隐去，也不将其归因于轮式/足式 A*。
+
+同一 fresh install 的归属检查确认 `exploration_navigation.yaml` 和顶层
+`exploration_navigation.launch.py` 仅存在于 `lunar_pure_exploration_ros`，在
+`lunar_incremental_navigation_ros` 与 `lunar_pure_planner_ros` 均不存在。已 source 此闭包后，接口、launch
+和 RViz 合同实跑 `37 passed in 24.46s`：覆盖缺少增量导航包/缺失配置时的显式 legacy、仍依赖该包的
+incremental_v2、默认 YAML 归属、`49/50/101` 三态图拒绝、`base_footprint` odometry 拒绝，以及四个
+headless demo 场景。
+
+NO_PATH 场景使用已有的 `LUNAR_DEMO_REQUIRE_NO_PATH_RECOVERY=1` 测试开关：场景节点在首个 ACTIVE path
+后仅 15 个 200 ms 周期叠加局部障碍带，然后恢复常规局部图。因此首候选得到 `NO_PATH`，explorer 可提交
+不同候选；探针不再创建与 scenario 竞争的第二个 `GridMap` publisher。该场景连续 3 次得到
+`no_path_observed=true`、`candidate_replaced=true` 和 `clean_shutdown=true`。它只用于隔离 demo/自动回归，
+不是生产输入、地图源或 A* 参数。Humble/Orin 未运行。
 
 ## Jazzy 无 RViz 闭环与运行时图
 
-以下是实现基线 `1cde6ce` 的历史 headless probe 记录，不替代上述最终审查修复后的结果：
+以下为最终 Jazzy 闭包的 headless probe 记录：
 
 | 重启场景 | 实测结果 |
 | --- | --- |
 | wheel + `0.2 m` | 收到 `GridMap`、探索图、frontier、唯一 goal 与非空 ACTIVE path；诊断记录 `PLAN_FOUND`；resolution 断言为真。 |
 | wheel + `0.1 m` | 同上，`fine_resolution_m=0.1` 且 resolution 断言为真；没有重采样参数。该 demo 的输入观测仅 16 m，不能证明 64 m 局部规划窗口性能。 |
 | legged + `0.2 m` | 同上，`platform=legged`，未用 wheel 配置替代。 |
-| wheel + `0.2 m`，向当前候选注入局部 elevation 阻断 | `no_path_observed=true`、`candidate_replaced=true`、`unique_goals=3`；关闭前导航 Action 已无 active goal。 |
+| wheel + `0.2 m`，首个 ACTIVE path 后短时局部障碍带 | `no_path_observed=true`、`candidate_replaced=true`、`unique_goals=2`；关闭前导航 Action 已无 active goal。 |
 
 四次 probe 均报告 `global_overview_publishers=0`、`ground_truth_algorithm_subscribers=0`、
 `control_topic_present=false` 和 `clean_shutdown=true`。它们在关闭时先发布任务 `CANCEL`，再确认 explorer

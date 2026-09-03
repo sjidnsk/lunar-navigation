@@ -1,5 +1,6 @@
 #include "lunar_pure_exploration_ros/incremental_exploration_node.hpp"
 
+#include <algorithm>
 #include <gtest/gtest.h>
 
 #include <atomic>
@@ -11,6 +12,7 @@
 #include <numbers>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -246,6 +248,7 @@ class IncrementalExplorationNodeTest : public ::testing::Test {
         [this](Status::SharedPtr status) {
           std::scoped_lock lock{status_mutex_};
           last_status_ = *status;
+          statuses_.push_back(*status);
         });
     task_map_subscription_ = observer_->create_subscription<
         visualization_msgs::msg::MarkerArray>(
@@ -319,6 +322,20 @@ class IncrementalExplorationNodeTest : public ::testing::Test {
     return last_status_;
   }
 
+  std::size_t StatusCount() const {
+    std::scoped_lock lock{status_mutex_};
+    return statuses_.size();
+  }
+
+  bool HasStatusReasonPrefixSince(const std::size_t first,
+                                  const std::string_view prefix) const {
+    std::scoped_lock lock{status_mutex_};
+    return std::any_of(statuses_.begin() + std::min(first, statuses_.size()),
+                       statuses_.end(), [prefix](const Status& status) {
+                         return status.reason_code.rfind(prefix, 0U) == 0U;
+                       });
+  }
+
   std::optional<visualization_msgs::msg::MarkerArray> LastTaskMap() const {
     std::scoped_lock lock{task_map_mutex_};
     return last_task_map_;
@@ -356,6 +373,7 @@ class IncrementalExplorationNodeTest : public ::testing::Test {
       task_map_subscription_;
   mutable std::mutex status_mutex_;
   std::optional<Status> last_status_;
+  std::vector<Status> statuses_;
   mutable std::mutex task_map_mutex_;
   std::optional<visualization_msgs::msg::MarkerArray> last_task_map_;
   std::size_t task_map_message_count_{0U};
@@ -386,11 +404,12 @@ TEST_F(IncrementalExplorationNodeTest,
                                           std::int8_t{101}}) {
     auto invalid_map = ExplorationMap(false);
     invalid_map.data.at(1U) = invalid_value;
+    const auto statuses_before_map = StatusCount();
     map_publisher_->publish(std::move(invalid_map));
 
-    ASSERT_TRUE(WaitFor([this] {
-      const auto status = LastStatus();
-      return status && status->reason_code.rfind("INVALID_EXPLORATION_MAP:", 0U) == 0U;
+    ASSERT_TRUE(WaitFor([this, statuses_before_map] {
+      return HasStatusReasonPrefixSince(statuses_before_map,
+                                        "INVALID_EXPLORATION_MAP:");
     }));
     EXPECT_EQ(server_->goal_count(), 0U);
   }
