@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -eo pipefail
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 source /opt/ros/humble/setup.bash
+set -u
 cd "$repository_root/ros2_ws"
 colcon build --merge-install --packages-up-to \
   lunar_incremental_navigation_ros lunar_pure_exploration_ros \

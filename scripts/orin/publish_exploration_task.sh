@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -eo pipefail
 
 if [[ $# -ne 5 ]]; then
   echo "用法：$0 <task-id> <min-x-m> <min-y-m> <max-x-m> <max-y-m>" >&2
@@ -15,6 +15,7 @@ repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 source /opt/ros/humble/setup.bash
 source "$repository_root/ros2_ws/install/setup.bash"
+set -u
 
 task="{header: {frame_id: map}, task_id: $task_id, command: 1, boundary: {points: [\
 {x: $min_x, y: $min_y, z: 0.0}, \

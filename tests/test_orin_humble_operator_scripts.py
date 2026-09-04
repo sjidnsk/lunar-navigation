@@ -7,6 +7,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts" / "orin"
@@ -26,7 +28,9 @@ def _launch_arguments() -> set[str]:
     return result
 
 
-def _fake_environment(tmp_path: Path) -> tuple[dict[str, str], Path]:
+def _fake_environment(
+    tmp_path: Path, *, emulate_ament_trace_setup: bool = False
+) -> tuple[dict[str, str], Path]:
     bin_dir = tmp_path / "bin"
     log_dir = tmp_path / "logs"
     bin_dir.mkdir()
@@ -44,18 +48,37 @@ def _fake_environment(tmp_path: Path) -> tuple[dict[str, str], Path]:
         executable.chmod(0o755)
 
     bash_env = tmp_path / "bash_env"
-    bash_env.write_text("source() { :; }\n", encoding="utf-8")
+    if emulate_ament_trace_setup:
+        bash_env.write_text(
+            "source() {\n"
+            "  if [[ \"$-\" == *u* && -z \"${AMENT_TRACE_SETUP_FILES+x}\" ]]; then\n"
+            "    printf '%s\\n' 'AMENT_TRACE_SETUP_FILES: unbound variable' >&2\n"
+            "    return 1\n"
+            "  fi\n"
+            "}\n",
+            encoding="utf-8",
+        )
+    else:
+        bash_env.write_text("source() { :; }\n", encoding="utf-8")
     environment = os.environ.copy()
+    environment.pop("AMENT_TRACE_SETUP_FILES", None)
     environment["BASH_ENV"] = str(bash_env)
     environment["LUNAR_ORIN_TEST_LOG_DIR"] = str(log_dir)
     environment["PATH"] = f"{bin_dir}{os.pathsep}{environment['PATH']}"
     return environment, log_dir
 
 
-def _run(tmp_path: Path, script_name: str, *arguments: str) -> tuple[list[str], Path]:
+def _run(
+    tmp_path: Path,
+    script_name: str,
+    *arguments: str,
+    emulate_ament_trace_setup: bool = False,
+) -> tuple[list[str], Path]:
     script = SCRIPTS / script_name
     assert script.is_file(), f"missing operator script: {script.relative_to(ROOT)}"
-    environment, log_dir = _fake_environment(tmp_path)
+    environment, log_dir = _fake_environment(
+        tmp_path, emulate_ament_trace_setup=emulate_ament_trace_setup
+    )
     result = subprocess.run(
         [str(script), *arguments],
         cwd=ROOT,
@@ -126,6 +149,28 @@ def test_build_script_uses_the_fixed_workspace_outputs(tmp_path: Path) -> None:
     assert "--install-base" not in command
     assert "--log-base" not in command
     assert "mktemp" not in command
+
+
+@pytest.mark.parametrize(
+    ("script_name", "arguments"),
+    [
+        ("build.sh", ()),
+        ("start_navigation.sh", ("wheel", "false")),
+        ("start_exploration.sh", ("wheel", "false")),
+        ("publish_navigation_goal.sh", ("0.0", "0.0")),
+        ("publish_exploration_task.sh", ("task", "0", "0", "1", "1")),
+    ],
+)
+def test_ros_setup_is_loaded_before_enabling_nounset(
+    tmp_path: Path, script_name: str, arguments: tuple[str, ...]
+) -> None:
+    """Catch any Humble setup source that runs while nounset is active."""
+    _run(
+        tmp_path,
+        script_name,
+        *arguments,
+        emulate_ament_trace_setup=True,
+    )
 
 
 def test_fixed_workspace_outputs_are_gitignored() -> None:
