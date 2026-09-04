@@ -761,6 +761,62 @@ TEST(LeggedLocalPlannerV2,
 }
 
 TEST(LeggedLocalPlannerV2,
+     SpinSummaryDeduplicatesCircularAndNonAdjacentDeltasInInputOrder) {
+  constexpr double kNearPi = std::numbers::pi - 2.5e-13;
+  LeggedCapability dedupe_capability = Capability();
+  dedupe_capability.motion_primitives = {
+      {.primitive_id = "near-positive-pi",
+       .kind = LeggedPrimitiveKind::kSpin,
+       .yaw_change_rad = kNearPi},
+      {.primitive_id = "filtered-zero",
+       .kind = LeggedPrimitiveKind::kSpin,
+       .yaw_change_rad = 0.0},
+      {.primitive_id = "wrapped-near-duplicate",
+       .kind = LeggedPrimitiveKind::kSpin,
+       .yaw_change_rad = -std::numbers::pi + 2.5e-13},
+      {.primitive_id = "non-adjacent-near-duplicate",
+       .kind = LeggedPrimitiveKind::kSpin,
+       .yaw_change_rad = std::numbers::pi - 5.0e-13},
+  };
+  const Fixture fixture = MakeFixture();
+  const Pose2 start = PoseAt({.x = 2, .y = 4});
+
+  const LocalPlanResult deduplicated =
+      LeggedLocalPlanner(dedupe_capability,
+                         {.terminal_yaw_tolerance_rad = 1.0e-12})
+          .Plan(*fixture.view, start,
+                TargetAt(start.position_m, true, std::numbers::pi / 2.0),
+                SteadyClock::time_point::max(), {});
+  EXPECT_EQ(deduplicated.status, LocalPlanResult::Status::kNoPath);
+  // One unique wrapped-pi spin is expanded twice; the other eight checks are
+  // the start state's translation-range rejects for its grid neighbors.
+  EXPECT_EQ(deduplicated.statistics.evaluated_transitions, 10U);
+
+  LeggedCapability ordered_capability = Capability();
+  ordered_capability.motion_primitives = {
+      {.primitive_id = "first-in-input",
+       .kind = LeggedPrimitiveKind::kSpin,
+       .yaw_change_rad = 2.0},
+      {.primitive_id = "target-second-in-input",
+       .kind = LeggedPrimitiveKind::kSpin,
+       .yaw_change_rad = 0.5},
+  };
+  const LocalPlanResult ordered =
+      LeggedLocalPlanner(ordered_capability,
+                         {.terminal_yaw_tolerance_rad = 1.0e-12})
+          .Plan(*fixture.view, start,
+                TargetAt(start.position_m, true, 0.5),
+                SteadyClock::time_point::max(), {});
+  ASSERT_EQ(ordered.status, LocalPlanResult::Status::kPlanFound);
+  ASSERT_EQ(ordered.path.size(), 2U);
+  EXPECT_EQ(ordered.statistics.evaluated_transitions, 10U);
+  EXPECT_NEAR(ordered.path.back().pose.orientation.w, std::cos(0.25),
+              1.0e-12);
+  EXPECT_NEAR(ordered.path.back().pose.orientation.z, std::sin(0.25),
+              1.0e-12);
+}
+
+TEST(LeggedLocalPlannerV2,
      PlansThe64MeterPointOneMeterWindowWithoutReducingItsCellResolution) {
   LeggedCapability capability = Capability();
   capability.motion_primitives = {capability.motion_primitives.front()};

@@ -449,6 +449,36 @@ TEST(GlobalRoutePlannerV2Test,
 }
 
 TEST(GlobalRoutePlannerV2Test,
+     EqualRevisionIndependentSnapshotRechecksRouteTerrainRisk) {
+  std::map<GridIndex, CellValue> free_line;
+  for (std::int64_t x = 0; x < 4; ++x) {
+    free_line[{.x = x, .y = 0}] = {
+        .state = GuidanceCellState::kCandidate};
+  }
+  const auto first = MakeSnapshot(4, 1, free_line, 1U, "wheel-profile");
+  auto changed_risk = free_line;
+  changed_risk[{.x = 2, .y = 0}].risk = 7.0;
+  const auto independent =
+      MakeSnapshot(4, 1, changed_risk, 1U, "wheel-profile");
+  GlobalRoutePlanner planner(
+      GlobalRoutePlannerConfig{.global_detour_margin_m = 0.0,
+                               .unknown_step_risk = 2.0});
+  const Point2 start = CellPoint(0, 0);
+  const Point2 goal = CellPoint(3, 0);
+  ASSERT_EQ(planner.Plan(*first, start, goal, GenerousDeadline(), StopToken{})
+                .status,
+            GuidanceStatus::kAvailable);
+
+  const GlobalRouteResult result = planner.Plan(
+      *independent, start, goal, GenerousDeadline(), StopToken{});
+
+  EXPECT_EQ(result.status, GuidanceStatus::kAvailable);
+  EXPECT_TRUE(result.route.has_value());
+  EXPECT_FALSE(result.reused_cache);
+  EXPECT_GT(result.statistics.expanded_states, 0U);
+}
+
+TEST(GlobalRoutePlannerV2Test,
      ReusesSuccessorWhenSameTileChangeIsBeyondExactRouteHalo) {
   const auto first_snapshot = MakeSnapshot(256, 3);
   GlobalRoutePlanner planner(
