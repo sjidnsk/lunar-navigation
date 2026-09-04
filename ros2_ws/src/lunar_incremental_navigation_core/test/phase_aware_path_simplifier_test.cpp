@@ -17,12 +17,9 @@ namespace {
 }
 
 [[nodiscard]] std::shared_ptr<const FineTraversabilitySnapshot> MakeFine(
+    const GridGeometry& geometry,
     std::vector<std::pair<GridIndex, FineCellState>> cells) {
   PersistentElevationMap map;
-  const GridGeometry geometry{.frame_id = "map",
-                              .width = 8U,
-                              .height = 4U,
-                              .resolution_m = 1.0};
   const std::vector<float> elevation(geometry.CellCount(), 0.0F);
   if (map.Apply({.geometry = geometry,
                  .elevation_m = elevation,
@@ -47,6 +44,15 @@ namespace {
       TraversalCostWeights{}, raw, std::move(directory),
       std::vector<TileIndex>{}, std::vector<TileIndex>{},
       FineSnapshotMetrics{});
+}
+
+[[nodiscard]] std::shared_ptr<const FineTraversabilitySnapshot> MakeFine(
+    std::vector<std::pair<GridIndex, FineCellState>> cells) {
+  return MakeFine(GridGeometry{.frame_id = "map",
+                               .width = 8U,
+                               .height = 4U,
+                               .resolution_m = 1.0},
+                  std::move(cells));
 }
 
 [[nodiscard]] PathPoint P(const double x, const double y,
@@ -243,6 +249,39 @@ TEST(PhaseAwareSimplifier,
   // after that, this three-segment fixture needs only a small fixed number
   // of LOS safety probes rather than rescanning all raw candidates.
   EXPECT_LT(clock_checks, raw.size() + 50U);
+}
+
+TEST(PhaseAwareSimplifier,
+     PrecompressedEdgesRemainCertifiedAtSmallValidResolution) {
+  constexpr double kResolutionM = 1.0e-8;
+  std::vector<std::pair<GridIndex, FineCellState>> cells;
+  for (std::int64_t y = 0; y < 3; ++y) {
+    for (std::int64_t x = 0; x < 4; ++x) {
+      cells.emplace_back(GridIndex{.x = x, .y = y}, FineCellState::kFree);
+    }
+  }
+  cells.emplace_back(GridIndex{.x = 1, .y = 1}, FineCellState::kBlocked);
+  const auto fine = MakeFine(
+      GridGeometry{.frame_id = "map",
+                   .width = 4U,
+                   .height = 3U,
+                   .resolution_m = kResolutionM},
+      std::move(cells));
+  const RequestLocalPlanningView view(
+      fine,
+      {.position_m = {.x = 0.5 * kResolutionM,
+                      .y = 0.5 * kResolutionM}},
+      0.0, {});
+  const std::vector<PathPoint> raw{
+      P(0.5 * kResolutionM, 0.5 * kResolutionM, StartPhase::kNormal),
+      P(2.5 * kResolutionM, 0.5 * kResolutionM, StartPhase::kNormal),
+      P(3.5 * kResolutionM, 2.5 * kResolutionM, StartPhase::kNormal)};
+
+  const auto simplified = SimplifyPhaseAwarePath(view, raw);
+
+  ASSERT_GT(simplified.size(), 2U);
+  EXPECT_EQ(simplified.front().pose, raw.front().pose);
+  EXPECT_EQ(simplified.back().pose, raw.back().pose);
 }
 
 TEST(PhaseAwareSimplifier,
