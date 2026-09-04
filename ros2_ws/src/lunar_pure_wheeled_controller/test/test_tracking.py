@@ -111,6 +111,19 @@ def test_reached_goal_requires_position_and_yaw_tolerances() -> None:
     assert not not_aligned.complete
 
 
+def test_path_at_terminal_position_spins_until_terminal_yaw_is_aligned() -> None:
+    command = track_path(
+        ((1.0, 0.0, math.pi / 2.0),),
+        state(1.0, 0.0, 0.0),
+        policy(),
+    )
+
+    assert not command.complete
+    assert command.failure_reason is None
+    assert command.linear_x_mps == 0.0
+    assert 0.0 < command.angular_z_radps <= policy().max_angular_radps
+
+
 def test_large_cross_track_error_stops() -> None:
     command = track_path(
         ((0.0, 0.0, 0.0), (3.0, 0.0, 0.0)),

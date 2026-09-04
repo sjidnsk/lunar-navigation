@@ -220,8 +220,12 @@ def track_path(path: PathXYYaw, state: TrackingState, policy: TrackingPolicy) ->
     yaw = float(state.yaw_rad)
     goal_x, goal_y, goal_yaw = points[-1]
     goal_distance = math.hypot(goal_x - x, goal_y - y)
-    if goal_distance <= policy.goal_position_tolerance_m and _angle_error(goal_yaw, yaw) <= policy.goal_yaw_tolerance_rad:
-        return TrackingCommand(0.0, 0.0, True, None)
+    if goal_distance <= policy.goal_position_tolerance_m:
+        yaw_error = _normalized_yaw_error(goal_yaw, yaw)
+        if abs(yaw_error) <= policy.goal_yaw_tolerance_rad:
+            return TrackingCommand(0.0, 0.0, True, None)
+        angular = _clip(policy.spin_kp * yaw_error, policy.max_angular_radps)
+        return TrackingCommand(0.0, angular, False, None)
 
     distances = [math.hypot(point[0] - x, point[1] - y) for point in points]
     nearest_index = min(range(len(points)), key=distances.__getitem__)

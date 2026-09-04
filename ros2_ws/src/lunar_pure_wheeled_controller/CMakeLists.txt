@@ -7,6 +7,7 @@ find_package(rclpy REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(tf2_msgs REQUIRED)
 find_package(lunar_planning_msgs REQUIRED)
 
 ament_python_install_package(${PROJECT_NAME}
@@ -22,6 +23,7 @@ install(DIRECTORY launch
 if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
   ament_add_pytest_test(${PROJECT_NAME}_reference_test test/test_reference.py)
+  ament_add_pytest_test(${PROJECT_NAME}_incremental_path_test test/test_incremental_path.py)
   ament_add_pytest_test(${PROJECT_NAME}_tracking_test test/test_tracking.py)
   ament_add_pytest_test(${PROJECT_NAME}_node_test test/test_node.py)
 endif()

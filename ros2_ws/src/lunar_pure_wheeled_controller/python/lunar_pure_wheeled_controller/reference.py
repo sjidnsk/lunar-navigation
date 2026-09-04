@@ -5,6 +5,8 @@ import math
 
 from lunar_planning_msgs.msg import MotionReference
 
+from .geometry import yaw_from_quaternion
+
 
 @dataclass(frozen=True)
 class TrajectorySample:
@@ -28,20 +30,8 @@ class ParsedReference:
 
 
 def _yaw_from_quaternion(qx: float, qy: float, qz: float, qw: float) -> float | None:
-    if not all(math.isfinite(value) for value in (qx, qy, qz, qw)):
-        return None
-    quaternion_norm = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
-    if not math.isfinite(quaternion_norm) or quaternion_norm == 0.0:
-        return None
-    qx /= quaternion_norm
-    qy /= quaternion_norm
-    qz /= quaternion_norm
-    qw /= quaternion_norm
-    yaw = math.atan2(
-        2.0 * (qw * qz + qx * qy),
-        1.0 - 2.0 * (qy * qy + qz * qz),
-    )
-    return yaw if math.isfinite(yaw) else None
+    """Keep the legacy private helper while sharing quaternion validation."""
+    return yaw_from_quaternion(qx, qy, qz, qw)
 
 
 def _invalid_reference() -> ParsedReference:

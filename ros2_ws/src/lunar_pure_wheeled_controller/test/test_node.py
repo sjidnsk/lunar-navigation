@@ -7,14 +7,20 @@ import math
 
 import pytest
 import rclpy
-from geometry_msgs.msg import PoseStamped, Transform, Twist
+from geometry_msgs.msg import PoseStamped, Transform, TransformStamped, Twist
 from lunar_planning_msgs.msg import MotionReference
 from nav_msgs.msg import Odometry, Path
 from rclpy.executors import SingleThreadedExecutor
+from rclpy.qos import DurabilityPolicy, ReliabilityPolicy
 from std_msgs.msg import String
+from tf2_msgs.msg import TFMessage
 from trajectory_msgs.msg import MultiDOFJointTrajectoryPoint
 
-from lunar_pure_wheeled_controller.node import PureWheeledControllerNode, _yaw
+from lunar_pure_wheeled_controller.node import (
+    PureWheeledControllerNode,
+    _yaw,
+    incremental_path_qos,
+)
 
 
 def make_reference(*, goal_x: float = 2.0) -> MotionReference:
@@ -83,6 +89,37 @@ def make_odometry(*, x: float, y: float = 0.0, yaw: float = 0.0) -> Odometry:
     return odometry
 
 
+def make_path(*, frame_id: str, points: list[tuple[float, float, float]]) -> Path:
+    path = Path()
+    path.header.frame_id = frame_id
+    for x, y, yaw in points:
+        pose = PoseStamped()
+        pose.pose.position.x = x
+        pose.pose.position.y = y
+        pose.pose.orientation.z = math.sin(yaw / 2.0)
+        pose.pose.orientation.w = math.cos(yaw / 2.0)
+        path.poses.append(pose)
+    return path
+
+
+def make_direct_map_from_odom(
+    *,
+    x: float = 0.0,
+    y: float = 0.0,
+    yaw: float = 0.0,
+) -> TFMessage:
+    message = TFMessage()
+    transform = TransformStamped()
+    transform.header.frame_id = "map"
+    transform.child_frame_id = "odom"
+    transform.transform.translation.x = x
+    transform.transform.translation.y = y
+    transform.transform.rotation.z = math.sin(yaw / 2.0)
+    transform.transform.rotation.w = math.cos(yaw / 2.0)
+    message.transforms.append(transform)
+    return message
+
+
 def wait_for_twists(
     controller: PureWheeledControllerNode,
     observer: rclpy.node.Node,
@@ -127,6 +164,29 @@ def controller_with_observer():
         rclpy.shutdown()
 
 
+@pytest.fixture
+def incremental_controller_with_observer():
+    rclpy.init(args=["--ros-args", "-p", "input_mode:=incremental_path"])
+    controller = PureWheeledControllerNode()
+    observer = rclpy.create_node("incremental_path_controller_command_observer")
+    received: list[Twist] = []
+    observer.create_subscription(Twist, "/Car/T5/Car_Cmd_Vel", received.append, 10)
+    controller_alive = True
+
+    def destroy_controller() -> None:
+        nonlocal controller_alive
+        if controller_alive:
+            controller.destroy_node()
+            controller_alive = False
+
+    try:
+        yield controller, observer, received
+    finally:
+        observer.destroy_node()
+        destroy_controller()
+        rclpy.shutdown()
+
+
 def test_reference_and_odometry_publish_forward_twist(controller_with_observer) -> None:
     """A tracker mutation that drops positive linear output must fail this test."""
     controller, observer, received, _ = controller_with_observer
@@ -138,6 +198,67 @@ def test_reference_and_odometry_publish_forward_twist(controller_with_observer) 
 
     assert received[-1].linear.x > 0.0
     assert received[-1].angular.z == 0.0
+
+
+def test_incremental_path_mode_tracks_map_path_after_direct_tf_arrives(
+    incremental_controller_with_observer,
+) -> None:
+    controller, observer, received = incremental_controller_with_observer
+
+    controller._on_path(
+        make_path(frame_id="map", points=[(10.0, 0.0, 0.0), (11.0, 0.0, 0.0)])
+    )
+    controller._on_odometry(make_odometry(x=0.0))
+    controller._on_tf(make_direct_map_from_odom(x=10.0))
+    controller._tick()
+    wait_for_twists(controller, observer, received)
+
+    assert received[-1].linear.x > 0.0
+
+
+def test_incremental_empty_path_stops_and_missing_tf_preserves_latest_path(
+    incremental_controller_with_observer,
+) -> None:
+    controller, observer, received = incremental_controller_with_observer
+
+    controller._on_path(
+        make_path(frame_id="map", points=[(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)])
+    )
+    controller._on_odometry(make_odometry(x=0.0))
+    controller._tick()
+    wait_for_twists(controller, observer, received)
+    assert controller._active is not None
+    assert received[-1].linear.x == 0.0
+
+    before = len(received)
+    controller._on_path(Path())
+    wait_for_twists(controller, observer, received, count=before + 1)
+    assert controller._active is None
+    assert received[-1].linear.x == 0.0
+
+
+def test_incremental_malformed_path_stops_and_clears_active_path(
+    incremental_controller_with_observer,
+) -> None:
+    controller, observer, received = incremental_controller_with_observer
+
+    controller._on_path(
+        make_path(frame_id="map", points=[(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)])
+    )
+    before = len(received)
+    controller._on_path(make_path(frame_id="odom", points=[(0.0, 0.0, 0.0)]))
+    wait_for_twists(controller, observer, received, count=before + 1)
+
+    assert controller._active is None
+    assert received[-1].linear.x == 0.0
+
+
+def test_incremental_path_qos_is_reliable_transient_local_keep_last_one() -> None:
+    qos = incremental_path_qos()
+
+    assert qos.reliability == ReliabilityPolicy.RELIABLE
+    assert qos.durability == DurabilityPolicy.TRANSIENT_LOCAL
+    assert qos.depth == 1
 
 
 def test_reverse_trajectory_publishes_negative_linear_twist(controller_with_observer) -> None:
@@ -451,6 +572,33 @@ def test_node_uses_spec_goal_tolerance_parameter_names() -> None:
 def test_relative_topic_parameter_is_rejected(parameter_override: str, parameter_name: str) -> None:
     """A topic-validation mutation that accepts relative public topics must fail this test."""
     rclpy.init(args=["--ros-args", "-p", parameter_override])
+    node = None
+    try:
+        with pytest.raises(ValueError, match=parameter_name):
+            node = PureWheeledControllerNode()
+    finally:
+        if node is not None:
+            node.destroy_node()
+        rclpy.shutdown()
+
+
+@pytest.mark.parametrize(
+    "parameter_override, parameter_name",
+    [
+        ("input_mode:=unsupported", "input_mode"),
+        ("path_topic:=relative_path", "path_topic"),
+        ("tf_topic:=relative_tf", "tf_topic"),
+    ],
+)
+def test_input_mode_and_incremental_topics_are_validated(
+    parameter_override: str,
+    parameter_name: str,
+) -> None:
+    """Mode and active-mode topics must reject unsupported public settings."""
+    extra_overrides = []
+    if parameter_override.startswith("path_topic") or parameter_override.startswith("tf_topic"):
+        extra_overrides = ["-p", "input_mode:=incremental_path"]
+    rclpy.init(args=["--ros-args", "-p", parameter_override, *extra_overrides])
     node = None
     try:
         with pytest.raises(ValueError, match=parameter_name):

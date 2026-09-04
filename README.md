@@ -154,6 +154,25 @@ Action Result `GOAL_REACHED` 为准。Action accepted、单独 RViz 线条或 `P
 revision；控制器只需跟踪非空路径并在收到空路径时清空跟踪目标。它不是带速度或时间的轨迹，也不能替代
 diagnostics、`PathReference` 或 Action Result 的规划/任务成功判据。
 
+#### 显式启动轮式局部路径控制器
+
+控制器不属于 `exploration_navigation.launch.py` 的启动范围。只有在已完成获授权的车辆控制与急停流程、
+并确认它将是 `/Car/T5/Car_Cmd_Vel` 的唯一命令发布者（其他 teleop 或控制器均已停止）后，才可在已 source
+同一 ROS overlay 的独立终端显式启动：
+
+```bash
+ros2 launch lunar_pure_wheeled_controller pure_wheeled_controller.launch.py \
+  input_mode:=incremental_path \
+  path_topic:=/Car/T4/planning/local_path \
+  odometry_topic:=/Car/T3/localization/odometry \
+  tf_topic:=/tf
+```
+
+该模式只接受 `map` frame 的非空局部路径，并使用 `/tf` 中直接的 `map ← odom` 变换把实时 odometry 转为
+同一坐标系；不遍历 TF 图、不做历史变换或时间同步。空路径或非法路径会清空目标并发布零速；暂时缺少里程计或
+该直接变换时也只发布零速，保留最近有效路径等待输入恢复。它不读取 `/Car/T4/planning/global_route`，也不构成
+Humble、Orin、DDS 或实车闭环就绪证明。
+
 ### Jazzy 隔离 RViz 演示
 
 以下命令只用于本机 ROS 2 Jazzy 演示；所有算法接口位于 `/planning_demo/*`（`/tf` 例外），不发布

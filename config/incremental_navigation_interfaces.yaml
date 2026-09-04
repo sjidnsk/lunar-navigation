@@ -44,6 +44,16 @@ outputs:
     type: lunar_planning_msgs/msg/PathReference
     owner: lunar_incremental_navigation_ros
     frame: map
+  local_path:
+    name: /Car/T4/planning/local_path
+    type: nav_msgs/msg/Path
+    owner: lunar_incremental_navigation_ros
+    frame: map
+    qos:
+      reliability: reliable
+      durability: transient_local
+      history: keep_last
+      depth: 1
   global_route:
     name: /Car/T4/planning/global_route
     type: nav_msgs/msg/Path

@@ -6,10 +6,14 @@ from math import atan2, isfinite, sqrt
 
 from geometry_msgs.msg import Twist
 from lunar_planning_msgs.msg import MotionReference
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import Odometry, Path
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
+from tf2_msgs.msg import TFMessage
 
+from .frame import MapFromOdom, map_tracking_state, parse_map_from_odom
+from .incremental_path import ParsedIncrementalPath, parse_incremental_path
 from .reference import ParsedReference, parse_reference
 from .tracking import TrackingPolicy, TrackingState, track_path, track_trajectory
 
@@ -43,16 +47,28 @@ def _yaw(odometry: Odometry) -> float | None:
     return yaw if isfinite(yaw) else None
 
 
+def incremental_path_qos() -> QoSProfile:
+    """Match the incremental navigator's durable local-path contract."""
+    return QoSProfile(
+        depth=1,
+        reliability=ReliabilityPolicy.RELIABLE,
+        durability=DurabilityPolicy.TRANSIENT_LOCAL,
+    )
+
+
 class PureWheeledControllerNode(Node):
     """Publishes bounded wheel commands for the latest valid reference."""
 
     def __init__(self) -> None:
         super().__init__("lunar_pure_wheeled_controller")
         defaults = {
+            "input_mode": "motion_reference",
             "reference_topic": "/Car/T4/planning/wheeled_reference",
+            "path_topic": "/Car/T4/planning/local_path",
             "odometry_topic": "/Car/T3/localization/odometry",
             "command_topic": "/Car/T5/Car_Cmd_Vel",
             "execution_cancel_topic": "/Car/T4/execution/cancel",
+            "tf_topic": "/tf",
             "control_rate_hz": 20.0,
             "lookahead_m": 0.5,
             "max_linear_mps": 0.2,
@@ -65,14 +81,20 @@ class PureWheeledControllerNode(Node):
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
+        input_mode = self.get_parameter("input_mode").value
+        if input_mode not in {"motion_reference", "incremental_path"}:
+            raise ValueError(
+                "input_mode must be motion_reference or incremental_path"
+            )
+        self._input_mode = input_mode
+        topic_parameters = ["odometry_topic", "command_topic"]
+        if self._input_mode == "motion_reference":
+            topic_parameters.extend(["reference_topic", "execution_cancel_topic"])
+        else:
+            topic_parameters.extend(["path_topic", "tf_topic"])
         topics = {
             name: self._absolute_topic_name(name, self.get_parameter(name).value)
-            for name in (
-                "reference_topic",
-                "odometry_topic",
-                "command_topic",
-                "execution_cancel_topic",
-            )
+            for name in topic_parameters
         }
         self._policy = TrackingPolicy(**{
             name: float(self.get_parameter(name).value)
@@ -90,17 +112,12 @@ class PureWheeledControllerNode(Node):
         control_rate_hz = float(self.get_parameter("control_rate_hz").value)
         if not isfinite(control_rate_hz) or control_rate_hz <= 0.0:
             raise ValueError("control_rate_hz must be finite and greater than zero")
-        self._active: ParsedReference | None = None
+        self._active: ParsedReference | ParsedIncrementalPath | None = None
         self._trajectory_cursor = 0
         self._odometry: Odometry | None = None
+        self._map_from_odom: MapFromOdom | None = None
         self._commands = self.create_publisher(
             Twist, topics["command_topic"], 10
-        )
-        self.create_subscription(
-            MotionReference,
-            topics["reference_topic"],
-            self._on_reference,
-            10,
         )
         self.create_subscription(
             Odometry,
@@ -108,12 +125,32 @@ class PureWheeledControllerNode(Node):
             self._on_odometry,
             10,
         )
-        self.create_subscription(
-            String,
-            topics["execution_cancel_topic"],
-            self._on_cancel,
-            10,
-        )
+        if self._input_mode == "motion_reference":
+            self.create_subscription(
+                MotionReference,
+                topics["reference_topic"],
+                self._on_reference,
+                10,
+            )
+            self.create_subscription(
+                String,
+                topics["execution_cancel_topic"],
+                self._on_cancel,
+                10,
+            )
+        else:
+            self.create_subscription(
+                Path,
+                topics["path_topic"],
+                self._on_path,
+                incremental_path_qos(),
+            )
+            self.create_subscription(
+                TFMessage,
+                topics["tf_topic"],
+                self._on_tf,
+                10,
+            )
         self.create_timer(1.0 / control_rate_hz, self._tick)
 
     @staticmethod
@@ -125,18 +162,33 @@ class PureWheeledControllerNode(Node):
     def _on_reference(self, reference: MotionReference) -> None:
         parsed = parse_reference(reference)
         if parsed.reason is not None:
-            self._active = None
-            self._trajectory_cursor = 0
-            self._publish_twist()
+            self._clear_active_and_stop()
             return
         self._active = parsed
         self._trajectory_cursor = 0
 
     def _on_cancel(self, message: String) -> None:
-        if self._active is not None and message.data == self._active.plan_id:
-            self._active = None
-            self._trajectory_cursor = 0
-            self._publish_twist()
+        if (
+            self._input_mode == "motion_reference"
+            and isinstance(self._active, ParsedReference)
+            and message.data == self._active.plan_id
+        ):
+            self._clear_active_and_stop()
+
+    def _on_path(self, path: Path) -> None:
+        parsed = parse_incremental_path(path)
+        if parsed.clear or parsed.reason is not None:
+            self._clear_active_and_stop()
+            return
+        self._active = parsed
+        self._trajectory_cursor = 0
+
+    def _on_tf(self, message: TFMessage) -> None:
+        update = parse_map_from_odom(message)
+        if update.found:
+            self._map_from_odom = update.transform
+            if update.transform is None:
+                self._publish_twist()
 
     def _on_odometry(self, odometry: Odometry) -> None:
         if _yaw(odometry) is None:
@@ -147,6 +199,33 @@ class PureWheeledControllerNode(Node):
 
     def _tick(self) -> None:
         if self._active is None or self._odometry is None:
+            self._publish_twist()
+            return
+        if self._input_mode == "incremental_path":
+            self._tick_incremental_path()
+            return
+        self._tick_motion_reference()
+
+    def _tick_incremental_path(self) -> None:
+        if (
+            not isinstance(self._active, ParsedIncrementalPath)
+            or self._odometry is None
+            or self._map_from_odom is None
+        ):
+            self._publish_twist()
+            return
+        state = map_tracking_state(self._odometry, self._map_from_odom)
+        if state is None:
+            self._odometry = None
+            self._publish_twist()
+            return
+        command = track_path(self._active.path_xy_yaw, state, self._policy)
+        self._publish_twist(command.linear_x_mps, command.angular_z_radps)
+        if command.complete or command.failure_reason is not None:
+            self._clear_active()
+
+    def _tick_motion_reference(self) -> None:
+        if not isinstance(self._active, ParsedReference) or self._odometry is None:
             self._publish_twist()
             return
         yaw = _yaw(self._odometry)
@@ -173,8 +252,15 @@ class PureWheeledControllerNode(Node):
             )
         self._publish_twist(command.linear_x_mps, command.angular_z_radps)
         if command.complete or command.failure_reason is not None:
-            self._active = None
-            self._trajectory_cursor = 0
+            self._clear_active()
+
+    def _clear_active(self) -> None:
+        self._active = None
+        self._trajectory_cursor = 0
+
+    def _clear_active_and_stop(self) -> None:
+        self._clear_active()
+        self._publish_twist()
 
     def _publish_twist(self, linear: float = 0.0, angular: float = 0.0) -> None:
         message = Twist()
