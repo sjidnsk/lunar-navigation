@@ -7,10 +7,13 @@ from launch_ros.actions import Node
 
 
 _PARAMETERS = {
+    "input_mode": "motion_reference",
     "reference_topic": "/Car/T4/planning/wheeled_reference",
+    "path_topic": "/Car/T4/planning/local_path",
     "odometry_topic": "/Car/T3/localization/odometry",
     "command_topic": "/Car/T5/Car_Cmd_Vel",
     "execution_cancel_topic": "/Car/T4/execution/cancel",
+    "tf_topic": "/tf",
     "control_rate_hz": "20.0",
     "lookahead_m": "0.5",
     "max_linear_mps": "0.2",
