@@ -148,6 +148,12 @@ ros2 launch lunar_pure_exploration_ros exploration_navigation.launch.py \
 Action Result `GOAL_REACHED` 为准。Action accepted、单独 RViz 线条或 `PathReference` 存在都不是
 导航完成证据。
 
+供只做路径跟踪的控制器使用，导航器同时发布
+`/Car/T4/planning/local_path`（`nav_msgs/msg/Path`，Reliable、Transient Local、KeepLast(1)）。它逐字镜像
+`PathReference.path`：活跃段为非空局部几何路径，路径失效时为空路径。该标准话题不含 session、状态或
+revision；控制器只需跟踪非空路径并在收到空路径时清空跟踪目标。它不是带速度或时间的轨迹，也不能替代
+diagnostics、`PathReference` 或 Action Result 的规划/任务成功判据。
+
 ### Jazzy 隔离 RViz 演示
 
 以下命令只用于本机 ROS 2 Jazzy 演示；所有算法接口位于 `/planning_demo/*`（`/tf` 例外），不发布

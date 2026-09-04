@@ -80,6 +80,7 @@ struct RuntimeParameters final {
   std::string tf_topic;
   std::string action_name;
   std::string path_reference_topic;
+  std::string local_path_topic;
   std::string global_route_topic;
   std::string diagnostics_topic;
   std::string exploration_map_topic;
@@ -169,6 +170,8 @@ struct RuntimeParameters final {
           "action_name", "/Car/T4/navigation/navigate_to_pose"),
       .path_reference_topic = node.declare_parameter<std::string>(
           "path_reference_topic", "/Car/T4/planning/path_reference"),
+      .local_path_topic = node.declare_parameter<std::string>(
+          "local_path_topic", "/Car/T4/planning/local_path"),
       .global_route_topic = node.declare_parameter<std::string>(
           "global_route_topic", "/Car/T4/planning/global_route"),
       .diagnostics_topic = node.declare_parameter<std::string>(
@@ -515,6 +518,8 @@ struct IncrementalNavigationNode::Impl final {
     path_publisher =
         node.create_publisher<lunar_planning_msgs::msg::PathReference>(
             parameters.path_reference_topic, PathReferenceQos());
+    local_path_publisher = node.create_publisher<nav_msgs::msg::Path>(
+        parameters.local_path_topic, PathReferenceQos());
     global_route_publisher = node.create_publisher<nav_msgs::msg::Path>(
         parameters.global_route_topic, PathReferenceQos());
     diagnostics_publisher =
@@ -1111,7 +1116,9 @@ struct IncrementalNavigationNode::Impl final {
   }
 
   void PublishPath(const core::PathReference& reference) {
-    path_publisher->publish(ConvertPathReference(reference));
+    const auto converted = ConvertPathReference(reference);
+    path_publisher->publish(converted);
+    local_path_publisher->publish(converted.path);
     last_reference = reference;
     if (reference.state == core::PathState::kActive) {
       active_reference = reference;
@@ -1375,6 +1382,7 @@ struct IncrementalNavigationNode::Impl final {
   rclcpp::Subscription<tf2_msgs::msg::TFMessage>::SharedPtr tf_subscription;
   rclcpp::Publisher<lunar_planning_msgs::msg::PathReference>::SharedPtr
       path_publisher;
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr local_path_publisher;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr global_route_publisher;
   rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr
       diagnostics_publisher;

@@ -421,6 +421,8 @@ struct TimingOverrides final {
                         "/test/" + suffix + "/navigate_to_pose"},
       rclcpp::Parameter{"path_reference_topic",
                         "/test/" + suffix + "/path_reference"},
+      rclcpp::Parameter{"local_path_topic",
+                        "/test/" + suffix + "/local_path"},
       rclcpp::Parameter{"global_route_topic",
                         "/test/" + suffix + "/global_route"},
       rclcpp::Parameter{"diagnostics_topic",
@@ -519,6 +521,12 @@ class RunningSystem final {
               std::scoped_lock lock{mutex_};
               paths_.push_back(path);
             });
+    local_path_subscription_ = client_node_->create_subscription<nav_msgs::msg::Path>(
+        "/test/" + suffix_ + "/local_path", PathReferenceQos(),
+        [this](const nav_msgs::msg::Path& path) {
+          std::scoped_lock lock{mutex_};
+          local_paths_.push_back(path);
+        });
     global_subscription_ = client_node_->create_subscription<nav_msgs::msg::Path>(
         "/test/" + suffix_ + "/global_route", PathReferenceQos(),
         [this](const nav_msgs::msg::Path& path) {
@@ -610,6 +618,10 @@ class RunningSystem final {
     std::scoped_lock lock{mutex_};
     return globals_;
   }
+  [[nodiscard]] std::vector<nav_msgs::msg::Path> LocalPaths() const {
+    std::scoped_lock lock{mutex_};
+    return local_paths_;
+  }
   [[nodiscard]] std::vector<diagnostic_msgs::msg::DiagnosticArray> Diagnostics()
       const {
     std::scoped_lock lock{mutex_};
@@ -642,6 +654,8 @@ class RunningSystem final {
   rclcpp_action::Client<Action>::SharedPtr client_;
   rclcpp::Subscription<lunar_planning_msgs::msg::PathReference>::SharedPtr
       path_subscription_;
+  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr
+      local_path_subscription_;
   rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr global_subscription_;
   rclcpp::Subscription<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr
       diagnostics_subscription_;
@@ -655,6 +669,7 @@ class RunningSystem final {
 #endif
   mutable std::mutex mutex_;
   std::vector<lunar_planning_msgs::msg::PathReference> paths_;
+  std::vector<nav_msgs::msg::Path> local_paths_;
   std::vector<nav_msgs::msg::Path> globals_;
   std::vector<diagnostic_msgs::msg::DiagnosticArray> diagnostics_;
 #if defined(LUNAR_BUILD_DEMO)
@@ -968,6 +983,42 @@ TEST(IncrementalNavigationNode, GoalTolerancesAreFrozenPerPlatformProfile) {
   EXPECT_DOUBLE_EQ(legged.preferred_clearance_m, 0.3);
   EXPECT_DOUBLE_EQ(wheel.clearance_weight, 0.0);
   EXPECT_DOUBLE_EQ(legged.clearance_weight, 0.0);
+}
+
+TEST(IncrementalNavigationNode,
+     ActiveLocalPathIsRepublishedAsStandardControllerPath) {
+  auto control = std::make_shared<FakeControl>();
+  const auto fine = MakeFine();
+  RunningSystem system("standard_local_path", IncrementalNavigationNodeDependencies{
+      .ports_factory = FakePorts(control),
+      .snapshots = core::SnapshotBundle{.fine = fine},
+      .state = core::StateInput{.base_link_pose = {
+          .position_m = {.x = 0.5, .y = 0.5}}},
+  });
+
+  auto handle = system.Send(3.5, 0.5);
+  ASSERT_TRUE(handle);
+  ASSERT_TRUE(WaitFor([&] {
+    return !system.Paths().empty() && !system.LocalPaths().empty();
+  }));
+
+  const auto reference = system.Paths().back();
+  const auto path = system.LocalPaths().back();
+  ASSERT_EQ(reference.state, lunar_planning_msgs::msg::PathReference::ACTIVE);
+  ASSERT_FALSE(reference.path.poses.empty());
+  EXPECT_EQ(path.header.frame_id, "map");
+  ASSERT_EQ(path.poses.size(), reference.path.poses.size());
+  EXPECT_DOUBLE_EQ(path.poses.front().pose.position.x,
+                   reference.path.poses.front().pose.position.x);
+  EXPECT_DOUBLE_EQ(path.poses.front().pose.position.y,
+                   reference.path.poses.front().pose.position.y);
+  EXPECT_DOUBLE_EQ(path.poses.back().pose.position.x,
+                   reference.path.poses.back().pose.position.x);
+  EXPECT_DOUBLE_EQ(path.poses.back().pose.position.y,
+                   reference.path.poses.back().pose.position.y);
+  EXPECT_DOUBLE_EQ(path.poses.back().pose.orientation.w,
+                   reference.path.poses.back().pose.orientation.w);
+  system.Cancel(handle);
 }
 
 TEST(IncrementalNavigationNode, PlanningDiagnosticsUseMeasuredSolverStatistics) {
