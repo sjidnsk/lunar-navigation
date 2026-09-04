@@ -1,9 +1,15 @@
 import math
 
 import pytest
-from geometry_msgs.msg import PoseStamped
-from nav_msgs.msg import Path
+from geometry_msgs.msg import PoseStamped, TransformStamped
+from nav_msgs.msg import Odometry, Path
+from tf2_msgs.msg import TFMessage
 
+from lunar_pure_wheeled_controller.frame import (
+    MapFromOdomUpdate,
+    map_tracking_state,
+    parse_map_from_odom,
+)
 from lunar_pure_wheeled_controller.incremental_path import parse_incremental_path
 
 
@@ -49,3 +55,59 @@ def test_nonempty_path_with_wrong_frame_or_bad_quaternion_is_rejected() -> None:
     malformed = make_path(frame_id="map", points=[(0.0, 0.0, 0.0)])
     malformed.poses[0].pose.orientation.w = 0.0
     assert parse_incremental_path(malformed).reason == "INVALID_PATH"
+
+
+def make_odometry(*, x: float, y: float, yaw: float) -> Odometry:
+    odometry = Odometry()
+    odometry.pose.pose.position.x = x
+    odometry.pose.pose.position.y = y
+    odometry.pose.pose.orientation.z = math.sin(yaw / 2.0)
+    odometry.pose.pose.orientation.w = math.cos(yaw / 2.0)
+    return odometry
+
+
+def make_tf_message(
+    *,
+    parent: str,
+    child: str,
+    x: float = 0.0,
+    y: float = 0.0,
+    yaw: float = 0.0,
+) -> TFMessage:
+    message = TFMessage()
+    transform = TransformStamped()
+    transform.header.frame_id = parent
+    transform.child_frame_id = child
+    transform.transform.translation.x = x
+    transform.transform.translation.y = y
+    transform.transform.rotation.z = math.sin(yaw / 2.0)
+    transform.transform.rotation.w = math.cos(yaw / 2.0)
+    message.transforms.append(transform)
+    return message
+
+
+def test_direct_map_from_odom_transforms_position_and_yaw() -> None:
+    update = parse_map_from_odom(
+        make_tf_message(
+            parent="map",
+            child="odom",
+            x=10.0,
+            y=20.0,
+            yaw=math.pi / 2.0,
+        )
+    )
+
+    assert update.found and update.transform is not None
+    state = map_tracking_state(make_odometry(x=2.0, y=0.0, yaw=0.0), update.transform)
+    assert state is not None
+    assert state.x_m == pytest.approx(10.0)
+    assert state.y_m == pytest.approx(22.0)
+    assert state.yaw_rad == pytest.approx(math.pi / 2.0)
+
+
+def test_unrelated_or_invalid_tf_cannot_create_a_map_transform() -> None:
+    assert parse_map_from_odom(TFMessage()) == MapFromOdomUpdate(False, None)
+
+    invalid = make_tf_message(parent="map", child="odom")
+    invalid.transforms[0].transform.rotation.w = 0.0
+    assert parse_map_from_odom(invalid) == MapFromOdomUpdate(True, None)
