@@ -63,11 +63,11 @@
 - Modify: `ros2_ws/src/lunar_incremental_navigation_core/src/legged/legged_local_planner.cpp`
 - Test: `ros2_ws/src/lunar_incremental_navigation_core/test/legged_local_planner_v2_test.cpp`
 
-- [ ] RED: add a deterministic large-grid test proving far terminal probes and non-improving/closed neighbors do not multiply primitive evaluation work while the returned path remains executable.
-- [ ] GREEN: precompute legal translation/spin capability summaries, range-reject impossible terminal edges, construct/check neighbor state and a geometric lower bound before calling the existing directed-edge cache, and use allocation-free visitation for short neighbor segments where semantics remain identical.
-- [ ] Run all legged directed-edge, start-prefix, terminal-yaw, planner, and complex-terrain scenario tests.
-- [ ] Compare frozen versus optimized 640 `legged-step-gap` legged p50, evaluated transitions, expanded/generated states, raw/final point counts, and status. Retain only if the gate passes.
-- [ ] Commit the legged optimization and regression test with explicit paths.
+- [x] RED: add a deterministic large-grid test proving far terminal probes and non-improving/closed neighbors do not multiply primitive evaluation work while the returned path remains executable.
+- [x] GREEN: precompute legal translation/spin capability summaries, range-reject impossible terminal edges, construct/check neighbor state and a geometric lower bound before calling the existing directed-edge cache, and use allocation-free visitation for short neighbor segments where semantics remain identical.
+- [x] Run all legged directed-edge, start-prefix, terminal-yaw, planner, and complex-terrain scenario tests.
+- [x] Compare frozen versus optimized 640 `legged-step-gap` legged p50, evaluated transitions, expanded/generated states, raw/final point counts, and status. Retain only if the gate passes.
+- [x] Commit the legged optimization and regression test with explicit paths.
 
 ### Task 4: Reuse a validated global-route suffix for moved starts
 

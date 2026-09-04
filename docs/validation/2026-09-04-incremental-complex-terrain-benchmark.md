@@ -320,6 +320,26 @@ UNKNOWN/blocked/clearance 计算与增量 influence halo 均未改变。新增�
 来自消除重复 LOS candidate 扫描，不是减少搜索、降低分辨率或放宽安全条件。simplifier、wheel planner
 和 complex scenario CTest 为 3/3 通过，达到保留门槛。
 
+### P0-C：足式边认证前置门控（保留）
+
+每次 `Plan()` 在 deadline/stop 保护下构建一次合法平移上界和去重 spin delta 摘要；远超运动基元能力的
+终点连接不再创建 edge-cache entry，邻居先检查 closed 与几何代价下界，只有可能改善 g 的边才进入原
+`LeggedDirectedEdgeCache` 完整认证。短 segment 使用 16 格内联 buffer，超过容量才退化为动态 vector。
+方向性、step/gap、高程、assumed start-prefix、连续终点和 terminal yaw 检查均保留。大量 primitive 的
+摘要扫描仍受原 deadline/stop 中断，并由既有回归覆盖。
+
+640 step/gap 场景结果：
+
+| 指标 | before 三次 | after 三次 | p50/固定值变化 |
+| --- | --- | --- | ---: |
+| legged total (ms) | 2650.50 / 2669.71 / 2666.73 | 1050.51 / 1007.48 / 1026.82 | 2666.73 → 1026.82，-61.50%，2.60× |
+| legged postprocess (ms) | 51.511 / 52.911 / 53.600 | 51.019 / 49.867 / 50.440 | 52.911 → 50.440，-4.67% |
+| evaluated transitions | 4999407（每次） | 965377（每次） | -80.69%，5.18× fewer |
+
+三次均为 `PLAN_FOUND`，expanded/generated 固定为 352216/619965，raw/final 固定为 49211/5071。
+新增长距离回归在优化前为 1252 次 transition evaluation，超过“可能松弛边”上界；优化后通过该上界。
+23 项足式回归及 complex scenario 测试全部通过，达到 wall-clock 与确定性工作量双门槛。
+
 ## Fresh 构建与回归
 
 在仓库外新建 `/tmp/lunar-complex-final.uyoh2c/build`，从当前源码重新配置并构建 Jazzy

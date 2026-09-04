@@ -709,6 +709,33 @@ TEST(LeggedLocalPlannerV2,
 }
 
 TEST(LeggedLocalPlannerV2,
+     LongOpenPlanCertifiesOnlyEdgesThatCanImproveAState) {
+  const LeggedCapability capability = Capability();
+  const Fixture fixture = MakeLargeDerivedFixture(96U, 96U, capability);
+  const Pose2 start = PoseAt({.x = 8, .y = 8});
+  const LocalTarget target =
+      TargetAt(PoseAt({.x = 87, .y = 87}).position_m, true);
+
+  const LocalPlanResult result = LeggedLocalPlanner(capability).Plan(
+      *fixture.view, start, target, SteadyClock::time_point::max(), {});
+
+  ASSERT_EQ(result.status, LocalPlanResult::Status::kPlanFound);
+  ASSERT_FALSE(result.path.empty());
+  EXPECT_DOUBLE_EQ(result.path.front().pose.position_m.x,
+                   start.position_m.x);
+  EXPECT_DOUBLE_EQ(result.path.front().pose.position_m.y,
+                   start.position_m.y);
+  EXPECT_DOUBLE_EQ(result.path.front().pose.position_m.z, 0.0);
+  EXPECT_DOUBLE_EQ(result.path.back().pose.position_m.x, target.center.x);
+  EXPECT_DOUBLE_EQ(result.path.back().pose.position_m.y, target.center.y);
+  // This fixture permits at most a small set of forward relaxations per
+  // expansion plus one pass of path-edge simplification. Far terminal probes
+  // must not add a full primitive scan for every expanded state.
+  EXPECT_LE(result.statistics.evaluated_transitions,
+            result.statistics.expanded_states * 7U + 32U);
+}
+
+TEST(LeggedLocalPlannerV2,
      PlansThe64MeterPointOneMeterWindowWithoutReducingItsCellResolution) {
   LeggedCapability capability = Capability();
   capability.motion_primitives = {capability.motion_primitives.front()};
