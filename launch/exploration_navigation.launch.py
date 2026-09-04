@@ -74,17 +74,20 @@ def _resolved_value(override: str, configured: object, name: str) -> str:
     return value
 
 
-def _resolved_bool(override: str, configured: object) -> str:
-    if override:
-        return override
+def _resolved_bool(override: str, configured: object) -> bool:
+    value = override.strip().lower()
+    if value:
+        if value not in {"true", "false"}:
+            raise RuntimeError("exploration_navigation use_sim_time is invalid")
+        return value == "true"
     if not isinstance(configured, bool):
         raise RuntimeError("exploration_navigation use_sim_time is invalid")
-    return "true" if configured else "false"
+    return configured
 
 
 def _incremental_parameters(
     config: dict[str, object], common: dict[str, object], platform_type: str,
-    platform_config: str, use_sim_time: str,
+    platform_config: str, use_sim_time: bool,
 ) -> tuple[dict[str, object], dict[str, object]]:
     navigation = {
         **dict(config["navigation"]),

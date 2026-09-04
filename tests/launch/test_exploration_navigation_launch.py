@@ -36,17 +36,20 @@ def _launch_module(
             return context.launch_configurations.get(self.name, "")
 
     class ParameterValue:
-        def __init__(self, value: str, *, value_type: type[bool]) -> None:
-            self.value = value_type(value.lower() == "true")
+        def __init__(self, value: object, *, value_type: type[bool]) -> None:
+            if not isinstance(value, value_type):
+                raise TypeError(f"value={value!r} is not a {value_type!r}")
+            self.value = value
 
     class Node:
         def __init__(self, **kwargs: object) -> None:
             self.kwargs = kwargs
 
     class IncludeLaunchDescription:
-        def __init__(self, source: object, *, launch_arguments: object) -> None:
+        def __init__(self, source: object, **kwargs: object) -> None:
             self.source = source
-            self.launch_arguments = dict(launch_arguments)
+            self.launch_arguments = dict(kwargs["launch_arguments"])
+            self.kwargs = kwargs
 
     class PythonLaunchDescriptionSource:
         def __init__(self, path: str) -> None:
@@ -65,6 +68,10 @@ def _launch_module(
         def __init__(self, **kwargs: object) -> None:
             self.kwargs = kwargs
 
+    class IfCondition:
+        def __init__(self, predicate: object) -> None:
+            self.predicate = predicate
+
     def package_share(package: str) -> str:
         if package in unavailable:
             raise LookupError(f"package unavailable: {package}")
@@ -79,6 +86,8 @@ def _launch_module(
     launch_actions.DeclareLaunchArgument = DeclareLaunchArgument
     launch_actions.IncludeLaunchDescription = IncludeLaunchDescription
     launch_actions.OpaqueFunction = OpaqueFunction
+    launch_conditions = types.ModuleType("launch.conditions")
+    launch_conditions.IfCondition = IfCondition
     launch_sources = types.ModuleType("launch.launch_description_sources")
     launch_sources.PythonLaunchDescriptionSource = PythonLaunchDescriptionSource
     launch_substitutions = types.ModuleType("launch.substitutions")
@@ -93,6 +102,7 @@ def _launch_module(
         "ament_index_python.packages": packages,
         "launch": launch,
         "launch.actions": launch_actions,
+        "launch.conditions": launch_conditions,
         "launch.launch_description_sources": launch_sources,
         "launch.substitutions": launch_substitutions,
         "launch_ros": launch_ros,
@@ -151,10 +161,19 @@ def test_launch_declares_the_single_entrypoint_arguments_and_incremental_default
         if call.args and isinstance(call.args[0], ast.Constant)
     }
 
-    assert set(arguments) == {"stack_mode", "platform_type", "config_file", "use_sim_time"}
+    assert set(arguments) == {
+        "stack_mode",
+        "platform_type",
+        "config_file",
+        "use_sim_time",
+        "start_navigation",
+        "start_exploration",
+    }
     assert arguments["stack_mode"] == ""
     assert arguments["platform_type"] == ""
     assert arguments["use_sim_time"] == ""
+    assert arguments["start_navigation"] == "true"
+    assert arguments["start_exploration"] == "true"
     assert arguments["config_file"] is None
 
 
@@ -203,6 +222,16 @@ def test_explicit_mode_platform_and_time_override_yaml_defaults(
         "pure_planner.launch.py",
         "pure_exploration.launch.py",
     }
+
+
+def test_incremental_time_override_must_resolve_to_a_bool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject string launch values reaching a bool ParameterValue."""
+    module, _, _ = _launch_module(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="use_sim_time is invalid"):
+        _compose(module, use_sim_time="not-a-bool")
 
 
 def test_legacy_mode_ignores_invalid_incremental_only_common_contracts(
