@@ -117,6 +117,20 @@ def test_navigation_start_script_launches_only_navigation(tmp_path: Path) -> Non
     assert "start_exploration:=false" in command
 
 
+def test_rviz_goal_bridge_start_script_launches_the_incremental_bridge(
+    tmp_path: Path,
+) -> None:
+    """Catch accidentally launching the legacy PlanMotion RViz bridge."""
+    _run(tmp_path, "start_rviz_goal_bridge.sh")
+    command = _command(tmp_path / "logs", "ros2")
+
+    assert command[1:4] == [
+        "launch",
+        "lunar_incremental_navigation_ros",
+        "incremental_rviz_goal_bridge.launch.py",
+    ]
+
+
 def test_exploration_start_script_launches_only_exploration(tmp_path: Path) -> None:
     """Catch an exploration command that also recreates the navigation node."""
     _run(tmp_path, "start_exploration.sh", "wheel", "true")
@@ -156,6 +170,7 @@ def test_build_script_uses_the_fixed_workspace_outputs(tmp_path: Path) -> None:
     [
         ("build.sh", ()),
         ("start_navigation.sh", ("wheel", "false")),
+        ("start_rviz_goal_bridge.sh", ()),
         ("start_exploration.sh", ("wheel", "false")),
         ("publish_navigation_goal.sh", ("0.0", "0.0")),
         ("publish_exploration_task.sh", ("task", "0", "0", "1", "1")),

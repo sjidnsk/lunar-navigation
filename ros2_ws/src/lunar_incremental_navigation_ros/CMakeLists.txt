@@ -31,6 +31,7 @@ set(LUNAR_INCREMENTAL_NAVIGATION_ROS_SOURCES
   src/message_conversion.cpp
   src/platform_config.cpp
   src/request_diagnostics.cpp
+  src/rviz_goal_bridge.cpp
   src/state_adapter.cpp
   src/traversability_qos.cpp
   src/planning_debug_publisher.cpp
@@ -67,6 +68,12 @@ target_compile_features(lunar_incremental_navigation_node PUBLIC cxx_std_20)
 target_link_libraries(lunar_incremental_navigation_node ${PROJECT_NAME})
 ament_target_dependencies(lunar_incremental_navigation_node rclcpp)
 
+add_executable(lunar_incremental_rviz_goal_bridge
+  src/incremental_rviz_goal_bridge_main.cpp)
+target_compile_features(lunar_incremental_rviz_goal_bridge PUBLIC cxx_std_20)
+target_link_libraries(lunar_incremental_rviz_goal_bridge ${PROJECT_NAME})
+ament_target_dependencies(lunar_incremental_rviz_goal_bridge rclcpp)
+
 add_executable(incremental_demo_scenario_node
   src/incremental_demo_scenario_node.cpp)
 target_compile_features(incremental_demo_scenario_node PUBLIC cxx_std_20)
@@ -91,6 +98,7 @@ install(
   INCLUDES DESTINATION include)
 install(
   TARGETS lunar_incremental_navigation_node
+    lunar_incremental_rviz_goal_bridge
     incremental_demo_scenario_node
     incremental_demo_motion_emulator_node
   RUNTIME DESTINATION lib/${PROJECT_NAME})
@@ -119,7 +127,8 @@ install(
   DIRECTORY "${LUNAR_INCREMENTAL_NAVIGATION_LAUNCH_SOURCE_DIR}/"
   DESTINATION share/${PROJECT_NAME}/launch
   FILES_MATCHING
-    PATTERN "incremental_exploration_navigation_rviz.launch.py")
+    PATTERN "incremental_exploration_navigation_rviz.launch.py"
+    PATTERN "incremental_rviz_goal_bridge.launch.py")
 install(
   DIRECTORY "${LUNAR_INCREMENTAL_NAVIGATION_RVIZ_SOURCE_DIR}/"
   DESTINATION share/${PROJECT_NAME}/rviz
@@ -162,6 +171,8 @@ if(BUILD_TESTING)
   lunar_add_ros_gtest(state_adapter_test test/state_adapter_test.cpp)
   lunar_add_ros_gtest(traversability_qos_test
     test/traversability_qos_test.cpp)
+  lunar_add_ros_gtest(rviz_goal_bridge_test
+    test/rviz_goal_bridge_test.cpp)
 endif()
 
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
