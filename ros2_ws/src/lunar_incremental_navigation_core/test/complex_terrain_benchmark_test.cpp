@@ -66,6 +66,11 @@ TEST(ComplexTerrainBenchmark,
   }
   EXPECT_EQ(FindStage(records, "global_plan")->status, "AVAILABLE");
   EXPECT_TRUE(FindStage(records, "global_cache_exact")->cache_reused);
+  EXPECT_TRUE(
+      FindStage(records, "global_replan_moved_start")->cache_reused);
+  EXPECT_EQ(FindStage(records, "global_replan_moved_start")
+                ->statistics.expanded_states,
+            0U);
   EXPECT_EQ(FindStage(records, "wheel_plan")->status, "PLAN_FOUND");
   EXPECT_EQ(FindStage(records, "legged_plan")->status, "PLAN_FOUND");
   EXPECT_EQ(FindStage(records, "elevation_apply_incremental_single_cell")

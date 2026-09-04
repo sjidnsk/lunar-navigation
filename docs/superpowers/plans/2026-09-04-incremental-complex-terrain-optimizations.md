@@ -76,11 +76,11 @@
 - Test: `ros2_ws/src/lunar_incremental_navigation_core/test/global_route_planner_v2_test.cpp`
 - Test: `ros2_ws/src/lunar_incremental_navigation_core/test/complex_terrain_benchmark_test.cpp`
 
-- [ ] RED: change/add cache tests so a moved start on the cached route must reuse the suffix with zero expanded states, while off-route start and on-route revision changes still force search.
-- [ ] GREEN: after matching goal/profile/geometry and validating revision influence, locate the new start in cached cells and build from that suffix; keep the full-search fallback unchanged.
-- [ ] Run global route/cache tests plus complex-terrain benchmark tests.
-- [ ] Compare frozen versus optimized 640 `dead-ends` moved-start p50, `cache_reused`, expanded states, and route endpoints. Retain only if the gate passes.
-- [ ] Commit the cache optimization and regression test with explicit paths.
+- [x] RED: change/add cache tests so a moved start on the cached route must reuse the suffix with zero expanded states, while off-route start and on-route revision changes still force search.
+- [x] GREEN: after matching goal/profile/geometry and validating revision influence, locate the new start in cached cells and build from that suffix; keep the full-search fallback unchanged.
+- [x] Run global route/cache tests plus complex-terrain benchmark tests.
+- [x] Compare frozen versus optimized 640 `dead-ends` moved-start p50, `cache_reused`, expanded states, and route endpoints. Retain only if the gate passes.
+- [x] Commit the cache optimization and regression test with explicit paths.
 
 ### Task 5: Integrated validation and evidence update
 

@@ -340,6 +340,26 @@ UNKNOWN/blocked/clearance 计算与增量 influence halo 均未改变。新增�
 新增长距离回归在优化前为 1252 次 transition evaluation，超过“可能松弛边”上界；优化后通过该上界。
 23 项足式回归及 complex scenario 测试全部通过，达到 wall-clock 与确定性工作量双门槛。
 
+### P1：moved-start 缓存路径后缀复用（保留）
+
+缓存匹配 goal/profile/geometry 后，以可中断的线性查找确认新 start cell 位于缓存 route；同 revision，或
+successor revision 的完整 route influence fingerprint 仍匹配时，从该 cell 构造后缀。缓存路径之外的
+起点、跳跃 revision、profile/geometry/goal 变化和 route influence 不匹配仍进入原完整搜索。
+
+640 窄通道/死胡同场景的缓存四阶段对照：
+
+| 阶段 | before p50 (ms) | after p50 (ms) | after 语义 |
+| --- | ---: | ---: | --- |
+| cold global | 78.991 | 76.511 | AVAILABLE；cache=false；63075 expanded |
+| exact cache | 1.894 | 1.966 | AVAILABLE；cache=true；0 expanded |
+| off-route revision update | 8.727 | 8.681 | AVAILABLE；cache=true；0 expanded |
+| on-route revision update | 20.491 | 19.763 | NO_ROUTE；cache=false；31617 expanded |
+| moved-start | 78.548 | 1.044 | AVAILABLE；cache=true；0 expanded；50789 points |
+
+moved-start 目标阶段降低 98.67%，为 75.23×；三次 after 为 1.0441 / 1.0454 / 1.0439 ms。
+新增单元回归同时验证路径从新连续起点开始、终点不变、后缀长度正确，以及偏离缓存 route 的起点不复用；
+global route 与 benchmark integration CTest 为 2/2 通过。
+
 ## Fresh 构建与回归
 
 在仓库外新建 `/tmp/lunar-complex-final.uyoh2c/build`，从当前源码重新配置并构建 Jazzy
