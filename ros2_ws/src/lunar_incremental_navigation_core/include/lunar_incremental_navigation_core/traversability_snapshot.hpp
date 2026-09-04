@@ -32,6 +32,7 @@ struct TraversalCostWeights final {
 struct FineSnapshotMetrics final {
   std::size_t updated_cells{};
   std::size_t elevation_cells_examined{};
+  std::size_t elevation_cache_tiles{};
   std::size_t allocated_cells{};
   std::size_t allocated_bytes{};
   double derivation_ms{};

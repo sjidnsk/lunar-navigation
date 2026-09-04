@@ -1,6 +1,8 @@
 #include "lunar_incremental_navigation_core/fine_traversability_builder.hpp"
 
 #include <algorithm>
+#include <array>
+#include <bitset>
 #include <cmath>
 #include <limits>
 #include <map>
@@ -321,6 +323,11 @@ MakePlatformElevationEvaluator(const PlatformCapability& capability) {
 }
 
 struct FineCellEvaluator::Impl final {
+  struct IntrinsicCacheTile final {
+    std::array<IntrinsicTraversalEvaluation, kGridTileCellCount> evaluations;
+    std::bitset<kGridTileCellCount> populated;
+  };
+
   Impl(const ElevationRangeView& elevation_value,
        PlatformCapability capability_value,
        TraversabilityProfile profile_value)
@@ -340,11 +347,23 @@ struct FineCellEvaluator::Impl final {
 
   [[nodiscard]] const IntrinsicTraversalEvaluation& IntrinsicAt(
       const GridIndex index) {
-    const auto [found, inserted] = intrinsic_cache.try_emplace(index);
-    if (inserted) {
-      found->second = intrinsic_evaluator->Evaluate(elevation, index);
+    const TileIndex tile_index = TileForCell(index);
+    if (last_cache_tile == nullptr || tile_index != last_cache_tile_index) {
+      auto [found, inserted] = intrinsic_cache.try_emplace(tile_index);
+      if (inserted) {
+        found->second = std::make_unique<IntrinsicCacheTile>();
+      }
+      last_cache_tile_index = tile_index;
+      last_cache_tile = found->second.get();
     }
-    return found->second;
+    const std::size_t offset = TileCellOffset(index);
+    if (!last_cache_tile->populated.test(offset)) {
+      last_cache_tile->evaluations[offset] =
+          intrinsic_evaluator->Evaluate(elevation, index);
+      last_cache_tile->populated.set(offset);
+      ++evaluated_elevation_cell_count;
+    }
+    return last_cache_tile->evaluations[offset];
   }
 
   [[nodiscard]] FineCellEvaluation Evaluate(const GridIndex candidate) {
@@ -422,7 +441,10 @@ struct FineCellEvaluator::Impl final {
   TraversabilityProfile profile;
   std::unique_ptr<const PlatformElevationEvaluator> intrinsic_evaluator;
   double hard_radius_m{};
-  std::map<GridIndex, IntrinsicTraversalEvaluation> intrinsic_cache;
+  std::map<TileIndex, std::unique_ptr<IntrinsicCacheTile>> intrinsic_cache;
+  TileIndex last_cache_tile_index;
+  IntrinsicCacheTile* last_cache_tile{};
+  std::size_t evaluated_elevation_cell_count{};
 };
 
 FineCellEvaluator::FineCellEvaluator(
@@ -445,6 +467,10 @@ double FineCellEvaluator::hard_inflation_radius_m() const noexcept {
 }
 
 std::size_t FineCellEvaluator::evaluated_elevation_cells() const noexcept {
+  return impl_->evaluated_elevation_cell_count;
+}
+
+std::size_t FineCellEvaluator::cached_elevation_tiles() const noexcept {
   return impl_->intrinsic_cache.size();
 }
 

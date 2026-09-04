@@ -282,6 +282,26 @@ evaluated transitions 和 p50 同时下降。先看计数下降，再解释 wall
 `alternating_wall_maze` 数据不用于长路径简化的正式对照，因为该热点的既定代表场景是
 `narrow_passages_and_dead_ends`。
 
+## 逐项优化实测
+
+### P0-A：fine intrinsic tile scratch cache（保留）
+
+将一次 derive 内的 `std::map<GridIndex, IntrinsicTraversalEvaluation>` 改为懒分配的 tile array +
+populated bitmap，并保留最近 tile 指针；`FineTraversabilityBuilder` 和 evaluator 职责、每格物理评估、
+UNKNOWN/blocked/clearance 计算与增量 influence halo 均未改变。新增回归验证 520×16 稠密输入只使用
+3 个 scratch tile，同时仍精确评估 8320 个唯一高程格。
+
+同一冻结 before 二进制与当前 after 二进制在 640 risk/UNKNOWN 场景的三次结果为：
+
+| 阶段 | before 三次 (ms) | after 三次 (ms) | p50 变化 | 工作量合同 |
+| --- | --- | --- | ---: | --- |
+| full fine | 6811.47 / 6675.13 / 6599.48 | 2246.62 / 2269.61 / 2252.26 | 6675.13 → 2252.26，-66.26%，2.96× | 409600 updated / 409600 examined，完全一致 |
+| 单格 incremental fine | 3.829 / 3.781 / 3.844 | 2.195 / 2.192 / 2.213 | 3.829 → 2.195，-42.69%，1.75× | 293 / 1301，完全一致 |
+| 32×32 patch fine | 57.505 / 56.623 / 57.932 | 42.204 / 42.272 / 42.839 | 57.505 → 42.272，-26.49%，1.36× | 2432 / 4556，完全一致 |
+
+相关 fine builder 与 complex scenario CTest 为 2/2 通过，达到 10% 保留门槛。由于仅数据布局已经获得
+显著收益，本轮不继续加入固定 stencil offset 或距离变换，避免扩大浮点边界与 cell-area 几何风险。
+
 ## Fresh 构建与回归
 
 在仓库外新建 `/tmp/lunar-complex-final.uyoh2c/build`，从当前源码重新配置并构建 Jazzy

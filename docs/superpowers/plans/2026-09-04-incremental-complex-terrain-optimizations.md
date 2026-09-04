@@ -27,7 +27,7 @@
 - [x] Re-run package CTest against the frozen fresh build and verify the worktree diff.
 - [x] Collect three-run 640x640/0.1 baseline CSV for `risk-unknown`, `dead-ends`, and `legged-step-gap` without parallel test load.
 - [x] Extract targeted p50 and correctness counters into a machine-readable scratch summary outside the repository.
-- [ ] Commit only the already-validated benchmark harness and its documentation with explicit paths.
+- [x] Commit only the already-validated benchmark harness and its documentation with explicit paths.
 
 ### Task 1: Replace fine-cell ordered-map scratch cache
 
@@ -38,11 +38,11 @@
 - Modify: `ros2_ws/src/lunar_incremental_navigation_core/src/map/fine_traversability_builder.cpp`
 - Test: `ros2_ws/src/lunar_incremental_navigation_core/test/fine_traversability_builder_test.cpp`
 
-- [ ] RED: add a behavior/metric test proving one dense derive reuses a bounded number of request-local cache tiles while examining the same unique elevation cells.
-- [ ] GREEN: replace per-cell `std::map<GridIndex, IntrinsicTraversalEvaluation>` lookups with lazily allocated tile-indexed scratch storage and a populated bitmap; retain exact evaluator calls and state/cost behavior.
-- [ ] Run fine builder tests plus complex-terrain scenario tests.
-- [ ] Compare frozen versus optimized `risk-unknown` full/single-cell/patch p50 and updated/examined-cell counts. Retain only if the gate passes.
-- [ ] Commit the fine optimization and its regression test with explicit paths.
+- [x] RED: add a behavior/metric test proving one dense derive reuses a bounded number of request-local cache tiles while examining the same unique elevation cells.
+- [x] GREEN: replace per-cell `std::map<GridIndex, IntrinsicTraversalEvaluation>` lookups with lazily allocated tile-indexed scratch storage and a populated bitmap; retain exact evaluator calls and state/cost behavior.
+- [x] Run fine builder tests plus complex-terrain scenario tests.
+- [x] Compare frozen versus optimized `risk-unknown` full/single-cell/patch p50 and updated/examined-cell counts. Retain only if the gate passes.
+- [x] Commit the fine optimization and its regression test with explicit paths.
 
 ### Task 2: Compress collinear vertices before phase-aware LOS simplification
 
