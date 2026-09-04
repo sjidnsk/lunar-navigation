@@ -8,7 +8,6 @@
 #include <optional>
 #include <stop_token>
 #include <stdexcept>
-#include <thread>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -736,6 +735,32 @@ TEST(LeggedLocalPlannerV2,
 }
 
 TEST(LeggedLocalPlannerV2,
+     LargeUniqueSpinCapabilityDoesNotAddPerRequestQuadraticPreprocessing) {
+  LeggedCapability capability = Capability();
+  capability.motion_primitives.clear();
+  constexpr std::size_t kPrimitiveCount = 30000U;
+  capability.motion_primitives.reserve(kPrimitiveCount);
+  for (std::size_t index = 0U; index < kPrimitiveCount; ++index) {
+    capability.motion_primitives.push_back(
+        LeggedBodyPrimitive{.primitive_id =
+                                "spin-" + std::to_string(index),
+                            .kind = LeggedPrimitiveKind::kSpin,
+                            .yaw_change_rad =
+                                1.0e-5 * static_cast<double>(index + 1U)});
+  }
+  LeggedLocalPlanner planner(capability);
+  const Fixture fixture = MakeFixture();
+  const Pose2 start = PoseAt({.x = 2, .y = 4});
+
+  const LocalPlanResult result = planner.Plan(
+      *fixture.view, start, TargetAt(start.position_m),
+      SteadyClock::now() + std::chrono::milliseconds(50), {});
+
+  EXPECT_EQ(result.status, LocalPlanResult::Status::kPlanFound);
+  EXPECT_EQ(result.statistics.expanded_states, 1U);
+}
+
+TEST(LeggedLocalPlannerV2,
      PlansThe64MeterPointOneMeterWindowWithoutReducingItsCellResolution) {
   LeggedCapability capability = Capability();
   capability.motion_primitives = {capability.motion_primitives.front()};
@@ -789,7 +814,8 @@ TEST(LeggedLocalPlannerV2,
             LocalPlanResult::Status::kPlanFound);
 }
 
-TEST(LeggedLocalPlannerV2, DeadlineAndStopInterruptPrimitiveCertification) {
+TEST(LeggedLocalPlannerV2,
+     PrecomputedCapabilityStillHonorsExpiredDeadlineAndRequestedStop) {
   const Fixture fixture = MakeFixture();
   LeggedCapability capability = Capability();
   capability.motion_primitives.assign(
@@ -803,24 +829,17 @@ TEST(LeggedLocalPlannerV2, DeadlineAndStopInterruptPrimitiveCertification) {
 
   const LocalPlanResult timeout = planner.Plan(
       *fixture.view, PoseAt({.x = 2, .y = 4}), unreachable,
-      SteadyClock::now() + std::chrono::milliseconds(1), {});
+      SteadyClock::time_point::min(), {});
   EXPECT_EQ(timeout.status, LocalPlanResult::Status::kTimeout);
-  EXPECT_GT(timeout.statistics.evaluated_transitions, 0U);
-  EXPECT_LT(timeout.statistics.evaluated_transitions,
-            capability.motion_primitives.size());
+  EXPECT_EQ(timeout.statistics.evaluated_transitions, 0U);
 
   std::stop_source stop_source;
-  std::jthread stopper([&stop_source] {
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    stop_source.request_stop();
-  });
+  stop_source.request_stop();
   const LocalPlanResult canceled = planner.Plan(
       *fixture.view, PoseAt({.x = 2, .y = 4}), unreachable,
       SteadyClock::time_point::max(), stop_source.get_token());
   EXPECT_EQ(canceled.status, LocalPlanResult::Status::kCanceled);
-  EXPECT_GT(canceled.statistics.evaluated_transitions, 0U);
-  EXPECT_LT(canceled.statistics.evaluated_transitions,
-            capability.motion_primitives.size());
+  EXPECT_EQ(canceled.statistics.evaluated_transitions, 0U);
 }
 
 }  // namespace

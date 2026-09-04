@@ -7,10 +7,12 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <limits>
 #include <numbers>
 #include <optional>
 #include <queue>
+#include <set>
 #include <span>
 #include <stdexcept>
 #include <unordered_map>
@@ -461,25 +463,18 @@ class SegmentCellSequence final {
 
 struct LeggedMotionSummary final {
   double maximum_translation_m{};
-  std::vector<double> spin_deltas_rad;
+  std::span<const double> spin_deltas_rad;
 };
 
-[[nodiscard]] WorkStatus BuildMotionSummary(
-    const LeggedCapability& capability, const SearchDeadline deadline,
-    const StopToken& stop, SearchStatistics& statistics,
-    LeggedMotionSummary& summary) {
-  summary = {};
-  summary.spin_deltas_rad.reserve(std::min(
-      capability.motion_primitives.size(), kMaximumTerminalSpinStates));
-  std::size_t primitive_checks = 0U;
+void BuildMotionSummary(const LeggedCapability& capability,
+                        double& maximum_translation_m,
+                        std::vector<double>& spin_deltas_rad) {
+  maximum_translation_m = 0.0;
+  spin_deltas_rad.clear();
+  spin_deltas_rad.reserve(std::min(capability.motion_primitives.size(),
+                                   kMaximumTerminalSpinStates));
+  std::set<double> unique_spin_deltas;
   for (const LeggedBodyPrimitive& primitive : capability.motion_primitives) {
-    ++primitive_checks;
-    if (const WorkStatus status = CheckWork(deadline, stop);
-        status != WorkStatus::kReady) {
-      statistics.evaluated_transitions += primitive_checks;
-      summary = {};
-      return status;
-    }
     if (std::abs(primitive.body_frame_displacement_m.z) >
         capability.maximum_step_height_m + kComparisonTolerance) {
       continue;
@@ -488,23 +483,35 @@ struct LeggedMotionSummary final {
         primitive.body_frame_displacement_m.x,
         primitive.body_frame_displacement_m.y);
     if (translation_m > kGeometryTolerance) {
-      summary.maximum_translation_m =
-          std::max(summary.maximum_translation_m, translation_m);
+      maximum_translation_m =
+          std::max(maximum_translation_m, translation_m);
       continue;
     }
     const double spin_delta = NormalizeYaw(primitive.yaw_change_rad);
-    if (std::abs(spin_delta) <= kGeometryTolerance ||
-        std::any_of(summary.spin_deltas_rad.begin(),
-                    summary.spin_deltas_rad.end(),
-                    [&](const double known) {
-                      return AngleError(known, spin_delta) <=
-                             kGeometryTolerance;
-                    })) {
+    if (std::abs(spin_delta) <= kGeometryTolerance) {
       continue;
     }
-    summary.spin_deltas_rad.push_back(spin_delta);
+    const auto next = unique_spin_deltas.lower_bound(spin_delta);
+    bool duplicate =
+        next != unique_spin_deltas.end() &&
+        AngleError(*next, spin_delta) <= kGeometryTolerance;
+    if (!duplicate && next != unique_spin_deltas.begin()) {
+      duplicate = AngleError(*std::prev(next), spin_delta) <=
+                  kGeometryTolerance;
+    }
+    if (!duplicate && !unique_spin_deltas.empty()) {
+      duplicate =
+          AngleError(*unique_spin_deltas.begin(), spin_delta) <=
+              kGeometryTolerance ||
+          AngleError(*unique_spin_deltas.rbegin(), spin_delta) <=
+              kGeometryTolerance;
+    }
+    if (duplicate) {
+      continue;
+    }
+    unique_spin_deltas.insert(spin_delta);
+    spin_deltas_rad.push_back(spin_delta);
   }
-  return WorkStatus::kReady;
 }
 
 [[nodiscard]] bool TranslationWithinCapability(
@@ -953,6 +960,7 @@ LeggedLocalPlanner::LeggedLocalPlanner(LeggedCapability capability,
       config_.terminal_yaw_tolerance_rad < 0.0) {
     throw std::invalid_argument("legged local planner configuration is invalid");
   }
+  BuildMotionSummary(capability_, maximum_translation_m_, spin_deltas_rad_);
 }
 
 LocalPlanResult LeggedLocalPlanner::Plan(
@@ -991,12 +999,9 @@ LocalPlanResult LeggedLocalPlanner::Plan(
     return {};
   }
   SearchStatistics statistics;
-  LeggedMotionSummary motion_summary;
-  if (const WorkStatus status = BuildMotionSummary(
-          capability_, deadline, stop, statistics, motion_summary);
-      status != WorkStatus::kReady) {
-    return StoppedResult(status, statistics);
-  }
+  const LeggedMotionSummary motion_summary{
+      .maximum_translation_m = maximum_translation_m_,
+      .spin_deltas_rad = spin_deltas_rad_};
   const StartPhase initial_phase =
       view.Source(*start_cell) == LocalCellSource::kStartAssumedFree
           ? StartPhase::kStartPrefix
