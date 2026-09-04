@@ -199,6 +199,22 @@ def test_yaml_defaults_construct_only_incremental_action_server_and_share_endpoi
     assert exploration["use_sim_time"].value is False
 
 
+def test_incremental_launch_passes_local_path_but_starts_no_controller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The controller remains an explicit operation outside stack startup."""
+    module, Node, _ = _launch_module(monkeypatch)
+    actions = _compose(module)
+
+    assert all(isinstance(action, Node) for action in actions)
+    navigation = actions[0].kwargs["parameters"][0]
+    assert navigation["local_path_topic"] == "/Car/T4/planning/local_path"
+    assert [action.kwargs["package"] for action in actions] == [
+        "lunar_incremental_navigation_ros",
+        "lunar_pure_exploration_ros",
+    ]
+
+
 def test_explicit_mode_platform_and_time_override_yaml_defaults(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

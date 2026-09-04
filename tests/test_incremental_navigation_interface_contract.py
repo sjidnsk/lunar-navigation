@@ -87,6 +87,7 @@ def test_incremental_interfaces_are_local_only_and_define_durable_exploration_ma
     assert set(interfaces["outputs"]) == {
         "exploration_map",
         "path_reference",
+        "local_path",
         "global_route",
         "diagnostics",
     }
@@ -96,6 +97,18 @@ def test_incremental_interfaces_are_local_only_and_define_durable_exploration_ma
         "owner": "lunar_incremental_navigation_ros",
         "frame": "map",
         "values": {"unknown": -1, "free": 0, "occupied": 100},
+        "qos": {
+            "reliability": "reliable",
+            "durability": "transient_local",
+            "history": "keep_last",
+            "depth": 1,
+        },
+    }
+    assert interfaces["outputs"]["local_path"] == {
+        "name": "/Car/T4/planning/local_path",
+        "type": "nav_msgs/msg/Path",
+        "owner": "lunar_incremental_navigation_ros",
+        "frame": "map",
         "qos": {
             "reliability": "reliable",
             "durability": "transient_local",
@@ -136,6 +149,7 @@ def test_single_stack_config_has_only_shared_mode_platform_and_node_defaults() -
     assert not {"coarse_resolution_m", "local_map_topic", "exploration_map_topic", "action_name", "navigation_action"} & set(config["exploration"])
     assert not {"coarse_resolution_m", "local_map_topic", "exploration_map_topic", "action_name", "navigation_action"} & set(config["navigation"])
     assert config["navigation"]["local_window_size_m"] == 64.0
+    assert config["navigation"]["local_path_topic"] == "/Car/T4/planning/local_path"
     assert "occupied_threshold" not in config["exploration"]
     text = STACK_CONFIG.read_text(encoding="utf-8").lower()
     assert "fine_resolution" not in text

@@ -43,5 +43,6 @@ navigation:
   global_subdeadline_ms: 500
   local_window_size_m: 64.0
   path_reference_topic: /Car/T4/planning/path_reference
+  local_path_topic: /Car/T4/planning/local_path
   global_route_topic: /Car/T4/planning/global_route
   diagnostics_topic: /Car/T4/planning/diagnostics
