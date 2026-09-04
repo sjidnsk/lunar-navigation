@@ -88,8 +88,8 @@
 - Modify: `docs/validation/2026-09-04-incremental-complex-terrain-benchmark.md`
 - Modify as needed: `README.md`, `docs/操作指令.md`
 
-- [ ] Run `git diff --check`, the package CTest suite serially, and relevant Python static contracts.
-- [ ] Repeat the complete 320 matrix and targeted 640 benchmarks from the final optimized binary.
-- [ ] Verify formal result/status contracts and report inherited unrelated failures separately.
-- [ ] Document each optimization's before/after p50, percentage, deterministic counters, and retained/reverted decision; mark Humble, Orin, DDS, rosbag, and vehicle validation `NOT_RUN`.
-- [ ] Review the final diff for boundary violations, then use `superpowers:finishing-a-development-branch` without merging or pushing unless the user explicitly requests it.
+- [x] Run `git diff --check`, the package CTest suite serially, and relevant Python static contracts.
+- [x] Repeat the complete 320 matrix and targeted 640 benchmarks from the final optimized binary.
+- [x] Verify formal result/status contracts and report inherited unrelated failures separately.
+- [x] Document each optimization's before/after p50, percentage, deterministic counters, and retained/reverted decision; mark Humble, Orin, DDS, rosbag, and vehicle validation `NOT_RUN`.
+- [x] Review the final diff for boundary violations, then use `superpowers:finishing-a-development-branch` without merging or pushing unless the user explicitly requests it.

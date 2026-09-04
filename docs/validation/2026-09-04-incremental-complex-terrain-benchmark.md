@@ -1,32 +1,29 @@
-# Incremental Navigation 复杂地形性能基准与优化建议
+# Incremental Navigation 复杂地形性能基准与优化结果
 
-- 日期：2026-09-04
+- 日期：2026-09-04 至 2026-09-05
 - 分支：`feat/incremental-complex-terrain-benchmarks`
 - 基线提交：`0211add55e2bfeb0d3808e041000ca24948056d2`
 - 环境：本机 x86_64、ROS 2 Jazzy、GCC 13.3、`RelWithDebInfo`
-- 范围：只新增测试场景、离线基准和文档；未修改生产规划算法、ROS 接口、launch、配置或控制器
+- 范围：新增复杂地形测试与离线基准，并在既有 core 模块内实施四项局部优化；未修改 ROS 接口、
+  launch、配置、coordinator 职责或控制器
 
 ## 结论
 
-简单稀疏障碍地图确实会掩盖当前瓶颈。新增复杂地形后，热点不是单一的 A*：
+简单稀疏障碍地图确实掩盖了多个热点，而不是单一的 A*。在冻结 before 二进制和最终 fresh after
+二进制上，以相同 `640 × 640`、`0.1 m`、三次串行运行的 p50 比较，四项优化均超过 10% 保留门槛：
 
-1. **首次或全量 fine traversability 派生**是 0.1 m、640 × 640 大片可行区域的首要热点；
-   风险/未知带场景一次观测为约 `6.84 s`。现有增量 halo 路径有效：同图单格更新只重算
-   `293` 个输出格、触及 `1301` 个高程格，约 `3.83 ms`；32 × 32 patch 更新重算
-   `2432` 个输出格，约 `57.47 ms`。因此应优化全量派生，但不能破坏已有增量边界。
-2. **轮式路径简化**在长蛇形通道中占主导：640 × 640 连续三次的局部规划 p50 为
-   `1534.35 ms`，其中 postprocess p50 为 `1501.47 ms`，约占 `97.9%`。搜索本身不是该场景的
-   主要问题。
-3. **足式有向边和终点认证**在大范围搜索中占主导：640 × 640 台阶/缺口场景连续三次
-   p50 为 `2688.80 ms`，每次固定记录 `4,999,407` 次 transition evaluation。
-4. **全局路线缓存只覆盖同起点**。精确缓存和不影响路线的 revision 更新很便宜，但起点沿路线移动
-   一个格仍重新搜索；窄通道场景的 moved-start 时间和冷启动基本相同。
-5. 目标选择全窗扫描和已发布路径 revision 复检目前不是优先项：本机扫描 409,600 格约
-   `2.4 ms`；320 × 320 路径复检约 `0.01–0.34 ms`。
+| 优化 | 代表阶段 before → after p50 | 变化 | 决策 |
+| --- | ---: | ---: | --- |
+| fine tile scratch cache | full derive `6675.13 → 2213.65 ms` | `-66.84%`，`3.02×` | 保留 |
+| phase 折点预压缩 + 逐段 LOS | wheel `1495.68 → 43.02 ms` | `-97.12%`，`34.77×` | 保留 |
+| 足式认证前门控 | legged `2666.73 → 1047.20 ms` | `-60.73%`，`2.55×` | 保留 |
+| moved-start 安全后缀复用 | global `78.548 → 1.040 ms` | `-98.68%`，`75.56×` | 保留 |
 
-建议先做三个局部、可回滚的实现优化：fine evaluator 稠密临时缓存，简化器折点预压缩，足式认证
-廉价前置门控；随后再扩展全局路线的同一路径后缀缓存。暂不引入 D* Lite、LPA*、多层新规划器或
-coordinator 重构。
+fine/wheel/legged 的状态、expanded/generated、raw/final path 点数和 fine 更新范围保持一致；global
+moved-start 按预期由 `63075 expanded/cache=false` 变为 `0/cache=true`。复核期间发现并修复了两个安全
+缺口：极小合法分辨率下的误共线会产生未认证 chord；独立地图可能复用相同数字 revision 的陈旧缓存。
+最终实现对预压缩边重新做 LOS，对不同持久化 tile root 的 equal-revision snapshot 重新验完整 route
+influence fingerprint。未引入 D* Lite、LPA*、多层新规划器或 coordinator 重构。
 
 ## 新增复杂场景
 
@@ -179,7 +176,7 @@ halo 约束，优化不得把局部 revision 更新退化成整图扫描。
 
 ### 1. Fine cell evaluator
 
-`platform_elevation_physics.cpp` 中，每个输出格先扫描 hard footprint 邻域；若没有 blocked/UNKNOWN
+基线 `platform_elevation_physics.cpp` 中，每个输出格先扫描 hard footprint 邻域；若没有 blocked/UNKNOWN
 提前返回，再扫描 `hard radius + preferred clearance` 的矩形邻域。`IntrinsicAt()` 虽避免重复计算
 坡度/起伏，但缓存为 `std::map<GridIndex, ...>`，每次邻域访问仍做树查找。大片 FREE/risk 地形几乎都走
 完整 clearance 扫描，所以比可早停的 dense rock 更慢。`fine_traversability_builder.cpp` 的全量分支还会
@@ -193,18 +190,18 @@ supercover line-of-sight。长蛇形路径会产生大量“很远但被墙阻�
 
 ### 3. Legged directed-edge certification
 
-`legged_local_planner.cpp` 在每个展开状态先尝试终点认证，再对八邻域逐边认证。终点即使远超任何运动基元
+基线 `legged_local_planner.cpp` 在每个展开状态先尝试终点认证，再对八邻域逐边认证。终点即使远超任何运动基元
 长度，也会进入 edge cache 和 `SupportsTranslation()` 的基元循环；邻居状态的 closed/现有 g 检查则在
 认证之后。`SegmentCells()` 每条边创建 `std::vector` 并用 `std::find` 去重。上述常数成本乘以数十万
 expanded state 后形成约 500 万次 transition evaluation。
 
 ### 4. Global route cache
 
-`global_route_planner.cpp` 只有缓存起点、终点、profile 和 geometry 全部相同时才进入 reuse 检查。
+基线 `global_route_planner.cpp` 只有缓存起点、终点、profile 和 geometry 全部相同时才进入 reuse 检查。
 因此 exact revision 和不影响 route influence 的新 revision 可复用，但机器人沿缓存路线移动一个 cell 后
 必然重新运行搜索。搜索记录本身还是 `std::map<GridIndex, Record>`，在数十万展开时也有优化空间。
 
-## 按收益和风险排序的优化方案
+## 按收益和风险排序的实施方案
 
 ### P0-A：Fine 派生的数据布局优化
 
@@ -242,7 +239,8 @@ expanded state 后形成约 500 万次 transition evaluation。
    step/gap、高程、start-prefix 或 terminal yaw 检查。
 
 验收：所有 legged directed-edge/terminal/start-prefix 回归不变；六场景结果不变；640 step/gap 的
-evaluated transitions 和 p50 同时下降。先看计数下降，再解释 wall-clock，避免只依赖偶然调度。
+p50 明显下降，expanded/generated 与路径合同不变。`evaluated_transitions` 若因摘要改变统计粒度，必须
+单独标注，不能把不同口径当作同一工作量直接比较。
 
 ### P1：沿缓存路线的 moved-start 后缀复用
 
@@ -295,26 +293,27 @@ UNKNOWN/blocked/clearance 计算与增量 influence halo 均未改变。新增�
 
 | 阶段 | before 三次 (ms) | after 三次 (ms) | p50 变化 | 工作量合同 |
 | --- | --- | --- | ---: | --- |
-| full fine | 6811.47 / 6675.13 / 6599.48 | 2246.62 / 2269.61 / 2252.26 | 6675.13 → 2252.26，-66.26%，2.96× | 409600 updated / 409600 examined，完全一致 |
-| 单格 incremental fine | 3.829 / 3.781 / 3.844 | 2.195 / 2.192 / 2.213 | 3.829 → 2.195，-42.69%，1.75× | 293 / 1301，完全一致 |
-| 32×32 patch fine | 57.505 / 56.623 / 57.932 | 42.204 / 42.272 / 42.839 | 57.505 → 42.272，-26.49%，1.36× | 2432 / 4556，完全一致 |
+| full fine | 6811.47 / 6675.13 / 6599.48 | 2213.65 / 2255.09 / 2208.51 | 6675.13 → 2213.65，-66.84%，3.02× | 409600 updated / 409600 examined，完全一致 |
+| 单格 incremental fine | 3.829 / 3.781 / 3.844 | 2.118 / 2.171 / 2.159 | 3.829 → 2.159，-43.63%，1.77× | 293 / 1301，完全一致 |
+| 32×32 patch fine | 57.505 / 56.623 / 57.932 | 41.794 / 43.276 / 41.955 | 57.505 → 41.955，-27.04%，1.37× | 2432 / 4556，完全一致 |
 
 相关 fine builder 与 complex scenario CTest 为 2/2 通过，达到 10% 保留门槛。由于仅数据布局已经获得
 显著收益，本轮不继续加入固定 stencil offset 或距离变换，避免扩大浮点边界与 cell-area 几何风险。
 
 ### P0-B：phase 内共线折点预压缩（保留）
 
-在每个 phase 内先线性移除“共线且同方向”的中间 raw vertex，再对折点序列执行原有最远可见 greedy；
-所有 shortcut 仍由原 supercover + `Allowed()` 检查认证，phase 边界、起终点、取消和 deadline 逻辑不变。
-专门的 U 形阻挡回归保留安全转折，且同一 clock/cancel 探测接口的调用从优化前 986 次降至 224 次；
-其中 201 次是为保证预处理仍可取消而逐 raw vertex 执行的线性检查。
+在每个 phase 内先线性移除“共线且同方向”的中间 raw vertex，再对折点序列执行原有最远可见 greedy。
+共线容差按 cross product 自身尺度计算，不再使用与地图尺度无关的绝对下限；压缩后的每条相邻边先经
+原 supercover + `Allowed()` 认证，失败则退回 raw run，raw run 也不安全或发生取消/deadline 时返回空，
+不发布部分路径。U 形阻挡和 `1e-8 m` 合法分辨率回归均保留安全转折；长折线回归还约束 LOS 工作为
+线性预处理加少量候选探测。
 
 640 窄通道/死胡同场景结果：
 
 | 指标 | before 三次 (ms) | after 三次 (ms) | p50 变化 |
 | --- | --- | --- | ---: |
-| wheel total | 1501.67 / 1485.02 / 1495.68 | 42.389 / 42.249 / 42.513 | 1495.68 → 42.389，-97.17%，35.28× |
-| wheel postprocess | 1469.24 / 1452.51 / 1464.17 | 8.347 / 8.420 / 8.468 | 1464.17 → 8.420，-99.42%，173.90× |
+| wheel total | 1501.67 / 1485.02 / 1495.68 | 43.015 / 43.516 / 42.375 | 1495.68 → 43.015，-97.12%，34.77× |
+| wheel postprocess | 1469.24 / 1452.51 / 1464.17 | 10.663 / 11.000 / 10.706 | 1464.17 → 10.706，-99.27%，136.76× |
 
 三次均为 `PLAN_FOUND`，expanded/generated 固定为 63075/63127，raw/final 固定为 50790/158；因此收益
 来自消除重复 LOS candidate 扫描，不是减少搜索、降低分辨率或放宽安全条件。simplifier、wheel planner
@@ -322,59 +321,77 @@ UNKNOWN/blocked/clearance 计算与增量 influence halo 均未改变。新增�
 
 ### P0-C：足式边认证前置门控（保留）
 
-每次 `Plan()` 在 deadline/stop 保护下构建一次合法平移上界和去重 spin delta 摘要；远超运动基元能力的
-终点连接不再创建 edge-cache entry，邻居先检查 closed 与几何代价下界，只有可能改善 g 的边才进入原
-`LeggedDirectedEdgeCache` 完整认证。短 segment 使用 16 格内联 buffer，超过容量才退化为动态 vector。
-方向性、step/gap、高程、assumed start-prefix、连续终点和 terminal yaw 检查均保留。大量 primitive 的
-摘要扫描仍受原 deadline/stop 中断，并由既有回归覆盖。
+planner 构造时对不可变 capability 一次性建立合法平移上界和 spin delta 摘要；有序集合只与相邻候选
+比较，在保持原容差去重语义的同时把最坏前处理从 `O(P²)` 限为 `O(P log P)`。每次 `Plan()` 只读取摘要，
+远超运动基元能力的终点连接不再创建 edge-cache entry；邻居先检查 closed 与几何代价下界，只有可能改善
+g 的边才进入原 `LeggedDirectedEdgeCache` 完整认证。短 segment 使用 16 格内联 buffer，超过容量才退化
+为动态 vector。方向性、step/gap、高程、assumed start-prefix、连续终点和 terminal yaw 检查均保留。
+30,000 个唯一 spin primitive 的回归证明简单位置请求不会再做每请求二次摘要扫描。基准按实际长期存活
+planner 用法在迭代外构造 planner，因此本表是请求延迟，不包含一次性构造成本。另有 `-π/+π` 环绕、
+非相邻近重复和输入顺序回归锁定 spin 摘要语义。
 
 640 step/gap 场景结果：
 
 | 指标 | before 三次 | after 三次 | p50/固定值变化 |
 | --- | --- | --- | ---: |
-| legged total (ms) | 2650.50 / 2669.71 / 2666.73 | 1050.51 / 1007.48 / 1026.82 | 2666.73 → 1026.82，-61.50%，2.60× |
-| legged postprocess (ms) | 51.511 / 52.911 / 53.600 | 51.019 / 49.867 / 50.440 | 52.911 → 50.440，-4.67% |
-| evaluated transitions | 4999407（每次） | 965377（每次） | -80.69%，5.18× fewer |
+| legged total (ms) | 2650.50 / 2669.71 / 2666.73 | 1066.10 / 1036.87 / 1047.20 | 2666.73 → 1047.20，-60.73%，2.55× |
+| legged postprocess (ms) | 51.511 / 52.911 / 53.600 | 52.122 / 50.151 / 51.615 | 52.911 → 51.615，-2.45% |
+| reported evaluated transitions | 4999407（每次） | 965377（每次） | 仅作 after 诊断，不作同口径倍率 |
 
 三次均为 `PLAN_FOUND`，expanded/generated 固定为 352216/619965，raw/final 固定为 49211/5071。
 新增长距离回归在优化前为 1252 次 transition evaluation，超过“可能松弛边”上界；优化后通过该上界。
-23 项足式回归及 complex scenario 测试全部通过，达到 wall-clock 与确定性工作量双门槛。
+需要注意，before 的 `evaluated_transitions` 包含逐 primitive 探测，after 的成功摘要构造发生在 planner
+构造期，Plan 内该计数主要是 capability 查询和 spin 转移，二者不是同一工作单位。因此保留依据是
+请求 wall-clock 降低 60.73%、expanded/generated 与路径完全一致，以及 25 项足式回归通过；不宣称
+`4999407 → 965377` 本身代表精确 5.18 倍工作量下降。
 
 ### P1：moved-start 缓存路径后缀复用（保留）
 
-缓存匹配 goal/profile/geometry 后，以可中断的线性查找确认新 start cell 位于缓存 route；同 revision，或
-successor revision 的完整 route influence fingerprint 仍匹配时，从该 cell 构造后缀。缓存路径之外的
-起点、跳跃 revision、profile/geometry/goal 变化和 route influence 不匹配仍进入原完整搜索。
+缓存匹配 goal/profile/geometry 后，以可中断的线性查找确认新 start cell 位于缓存 route；同 revision 且
+共享不可变 persistent tile root 时可直接复用，同 revision 但 root 不同、或 successor revision 时必须验证
+完整 route influence fingerprint，匹配后才从该 cell 构造后缀。blocked start/goal 在任何缓存路径之前
+拒绝。缓存路径之外的起点、跳跃 revision、profile/geometry/goal 变化和 route influence 不匹配仍进入
+原完整搜索。
 
 640 窄通道/死胡同场景的缓存四阶段对照：
 
 | 阶段 | before p50 (ms) | after p50 (ms) | after 语义 |
 | --- | ---: | ---: | --- |
-| cold global | 78.991 | 76.511 | AVAILABLE；cache=false；63075 expanded |
-| exact cache | 1.894 | 1.966 | AVAILABLE；cache=true；0 expanded |
-| off-route revision update | 8.727 | 8.681 | AVAILABLE；cache=true；0 expanded |
-| on-route revision update | 20.491 | 19.763 | NO_ROUTE；cache=false；31617 expanded |
-| moved-start | 78.548 | 1.044 | AVAILABLE；cache=true；0 expanded；50789 points |
+| cold global | 78.991 | 79.388 | AVAILABLE；cache=false；63075 expanded |
+| exact cache | 1.894 | 2.045 | AVAILABLE；cache=true；0 expanded |
+| off-route revision update | 8.727 | 8.554 | AVAILABLE；cache=true；0 expanded |
+| on-route revision update | 20.491 | 20.281 | NO_ROUTE；cache=false；31617 expanded |
+| moved-start | 78.548 | 1.040 | AVAILABLE；cache=true；0 expanded；50789 points |
 
-moved-start 目标阶段降低 98.67%，为 75.23×；三次 after 为 1.0441 / 1.0454 / 1.0439 ms。
-新增单元回归同时验证路径从新连续起点开始、终点不变、后缀长度正确，以及偏离缓存 route 的起点不复用；
-global route 与 benchmark integration CTest 为 2/2 通过。
+moved-start 目标阶段降低 98.68%，为 75.56×；三次 after 为 1.0337 / 1.0452 / 1.0396 ms。
+新增单元回归同时验证路径从新连续起点开始、终点不变、后缀长度正确、偏离缓存 route 的起点不复用，
+以及独立但 revision 相同的 snapshot 在 moved-start/route interior 被阻塞或 route terrain risk 改变时
+绝不陈旧复用。冷启动和 exact cache 不是本项优化目标，表中如实保留其小幅波动。
 
 ## Fresh 构建与回归
 
-在仓库外新建 `/tmp/lunar-complex-final.uyoh2c/build`，从当前源码重新配置并构建 Jazzy
-`RelWithDebInfo`。按包串行执行全部 core CTest：
+冻结 before build 为 `/tmp/lunar-complex-final.uyoh2c/build`；最终在仓库外新建
+`/tmp/lunar-complex-reviewed.RRAHfB/build`，从最终源码重新配置并构建 Jazzy `RelWithDebInfo`。
+按包串行执行全部 core CTest：
 
 ```text
-15/15 passed, 0 failed, 3.43 s
+15/15 passed, 0 failed, 3.17 s
 ```
 
-其中新增 `complex_terrain_scenarios_test` 和 `complex_terrain_benchmark_test` 分别通过；独立 benchmark
-可执行文件也由该 fresh build 生成，并完成 320 全矩阵、640 窄通道三次、640 足式三次及 640
-risk/UNKNOWN 定向复跑。两个新增 CTest 另以 `--repeat until-fail:3` 连续执行三次，均通过。
-`git diff --check` 与新增文件尾随空白检查均无输出。
+同一 fresh build 再以 `ctest --repeat until-fail:3 -j1` 串行复跑全部 15 个测试目标，三轮均通过，
+总计 `9.49 s`；最终 `git diff --check` 无输出。
 
-额外运行三个相关静态 Python 合同文件时为 `42 passed, 1 failed`。唯一失败来自既有
+该 fresh build 的独立 benchmark 完成 320 全矩阵三次、640 窄通道三次、640 足式三次及 640
+risk/UNKNOWN 三次定向复跑。320 矩阵中五个可达场景的 global 均为 `AVAILABLE`，wheel/legged/coordinator
+均为 `PLAN_FOUND`；封闭目标三次均为 global `NO_ROUTE`、wheel/legged/coordinator `NO_PATH`，未出现
+`TIMEOUT`、`CANCELED` 或空成功路径。最终原始 CSV 位于仓库外：
+
+- `/tmp/lunar-complex-perf-20260904/final-reviewed-all-320.csv`
+- `/tmp/lunar-complex-perf-20260904/final-reviewed-dead-ends.csv`
+- `/tmp/lunar-complex-perf-20260904/final-reviewed-legged-step-gap.csv`
+- `/tmp/lunar-complex-perf-20260904/final-reviewed-risk-unknown.csv`
+
+仓库根目录运行全部 Python 静态合同为 `111 passed, 1 failed`。唯一失败来自既有
 `test_isolation_contract.py` 仍断言 `config/` 只能含六个 YAML，但基线提交 `0211add` 已同时包含
 `exploration_navigation.yaml` 与 `incremental_navigation_interfaces.yaml`。本分支相对该基线对 `config/`
 和该测试的 diff 为空，因此未把旧合同修订混入本性能任务；该结果不计作本任务新增回归通过。
