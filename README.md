@@ -212,6 +212,12 @@ ros2 action info /planning_demo/navigation/navigate_to_pose
 `docs/validation/2026-09-03-incremental-exploration-navigation.md`。Jazzy 结果不等价于
 Humble、Jetson AGX Orin、DDS 跨机、rosbag、真实 mapper/TF 或实车验证；这些层级仍为 `NOT_RUN`。
 
+用于暴露简单 demo 地图无法覆盖的性能热点，core 另提供 `BUILD_TESTING` 下的六类确定性复杂地形和
+CSV 离线基准，分别测量首次/增量 fine 派生、全局缓存、目标选择、wheel/legged 搜索、路径简化及
+revision 复检。运行命令和当前瓶颈分析见
+`docs/validation/2026-09-04-incremental-complex-terrain-benchmark.md`；该本机 Jazzy 基准不启动 ROS 节点，
+也不是 Orin 性能结论。
+
 ## Jazzy 300 m 探索闭环（测试专用）
 
 这套入口在本机 ROS 2 Jazzy 中组合固定种子的 `300 m × 300 m` 月表、纯探索器、纯规划器、
