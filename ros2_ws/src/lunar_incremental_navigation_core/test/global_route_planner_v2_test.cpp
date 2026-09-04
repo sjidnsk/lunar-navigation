@@ -390,6 +390,65 @@ TEST(GlobalRoutePlannerV2Test,
 }
 
 TEST(GlobalRoutePlannerV2Test,
+     EqualRevisionIndependentSnapshotCannotReuseABlockedMovedStart) {
+  const std::map<GridIndex, CellValue> free_line{
+      {{.x = 0, .y = 0}, {.state = GuidanceCellState::kCandidate}},
+      {{.x = 1, .y = 0}, {.state = GuidanceCellState::kCandidate}},
+      {{.x = 2, .y = 0}, {.state = GuidanceCellState::kCandidate}}};
+  const auto first = MakeSnapshot(3, 1, free_line, 1U, "wheel-profile");
+  auto blocked_line = free_line;
+  blocked_line[{.x = 1, .y = 0}].state =
+      GuidanceCellState::kProvenBlocked;
+  const auto independent =
+      MakeSnapshot(3, 1, blocked_line, 1U, "wheel-profile");
+  GlobalRoutePlanner planner(
+      GlobalRoutePlannerConfig{.global_detour_margin_m = 0.0,
+                               .unknown_step_risk = 2.0});
+  const Point2 goal = CellPoint(2, 0);
+  ASSERT_EQ(planner.Plan(*first, CellPoint(0, 0), goal,
+                         GenerousDeadline(), StopToken{})
+                .status,
+            GuidanceStatus::kAvailable);
+
+  const GlobalRouteResult result = planner.Plan(
+      *independent, CellPoint(1, 0), goal, GenerousDeadline(), StopToken{});
+
+  EXPECT_EQ(result.status, GuidanceStatus::kNoRoute);
+  EXPECT_FALSE(result.route.has_value());
+  EXPECT_FALSE(result.reused_cache);
+}
+
+TEST(GlobalRoutePlannerV2Test,
+     EqualRevisionIndependentSnapshotCannotReuseABlockedRouteInterior) {
+  std::map<GridIndex, CellValue> free_line;
+  for (std::int64_t x = 0; x < 4; ++x) {
+    free_line[{.x = x, .y = 0}] = {
+        .state = GuidanceCellState::kCandidate};
+  }
+  const auto first = MakeSnapshot(4, 1, free_line, 1U, "wheel-profile");
+  auto blocked_line = free_line;
+  blocked_line[{.x = 2, .y = 0}].state =
+      GuidanceCellState::kProvenBlocked;
+  const auto independent =
+      MakeSnapshot(4, 1, blocked_line, 1U, "wheel-profile");
+  GlobalRoutePlanner planner(
+      GlobalRoutePlannerConfig{.global_detour_margin_m = 0.0,
+                               .unknown_step_risk = 2.0});
+  const Point2 start = CellPoint(0, 0);
+  const Point2 goal = CellPoint(3, 0);
+  ASSERT_EQ(planner.Plan(*first, start, goal, GenerousDeadline(), StopToken{})
+                .status,
+            GuidanceStatus::kAvailable);
+
+  const GlobalRouteResult result = planner.Plan(
+      *independent, start, goal, GenerousDeadline(), StopToken{});
+
+  EXPECT_EQ(result.status, GuidanceStatus::kNoRoute);
+  EXPECT_FALSE(result.route.has_value());
+  EXPECT_FALSE(result.reused_cache);
+}
+
+TEST(GlobalRoutePlannerV2Test,
      ReusesSuccessorWhenSameTileChangeIsBeyondExactRouteHalo) {
   const auto first_snapshot = MakeSnapshot(256, 3);
   GlobalRoutePlanner planner(
