@@ -4,6 +4,9 @@ build-*/
 install/
 install-*/
 log/
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
 .worktrees/
 
 # Python caches and test output

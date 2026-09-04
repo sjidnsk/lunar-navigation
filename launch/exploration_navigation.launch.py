@@ -9,6 +9,7 @@ import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -114,6 +115,8 @@ def _incremental_parameters(
 
 def _compose(context):
     requested_stack_mode = LaunchConfiguration("stack_mode").perform(context).strip()
+    start_navigation = LaunchConfiguration("start_navigation")
+    start_exploration = LaunchConfiguration("start_exploration")
     if requested_stack_mode == "legacy":
         # An explicit rollback must not need the optional incremental package
         # or its YAML. The legacy launch files retain their own defaults.
@@ -157,6 +160,7 @@ def _compose(context):
                     str(planner_share / "launch" / "pure_planner.launch.py")
                 ),
                 launch_arguments={"platform_type": platform_type}.items(),
+                condition=IfCondition(start_navigation),
             ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
@@ -170,6 +174,7 @@ def _compose(context):
                     "use_sim_time": use_sim_time,
                     **{name: str(value) for name, value in LEGACY_CAPACITIES.items()},
                 }.items(),
+                condition=IfCondition(start_exploration),
             ),
         ]
 
@@ -190,6 +195,7 @@ def _compose(context):
                 executable="lunar_incremental_navigation_node",
                 name="incremental_navigation",
                 parameters=[navigation],
+                condition=IfCondition(start_navigation),
                 output="screen",
             ),
             Node(
@@ -197,6 +203,7 @@ def _compose(context):
                 executable="incremental_exploration_node",
                 name="incremental_exploration",
                 parameters=[exploration],
+                condition=IfCondition(start_exploration),
                 output="screen",
             ),
         ]
@@ -215,6 +222,8 @@ def generate_launch_description() -> LaunchDescription:
                 default_value=f"{exploration_share}/config/exploration_navigation.yaml",
             ),
             DeclareLaunchArgument("use_sim_time", default_value=""),
+            DeclareLaunchArgument("start_navigation", default_value="true"),
+            DeclareLaunchArgument("start_exploration", default_value="true"),
             OpaqueFunction(function=_compose),
         ]
     )
