@@ -481,12 +481,16 @@ class LeggedDirectedEdgeCache final {
     const GridIndex source_cell =
         CellFromOffset(view.geometry(), SearchCellOffset(source_state));
     const LocalCellSource source_kind = view.Source(source_cell);
+    const bool source_is_start_prefix =
+        SearchPhase(source_state) == StartPhase::kStartPrefix;
     const bool source_assumed =
         source_kind == LocalCellSource::kStartAssumedFree;
-    const bool source_at_anchor = SearchAtStartAnchor(source_state);
+    const LocalCellSource target_kind = view.Source(target_cell);
     if ((source_kind != LocalCellSource::kEvidenceFree &&
-         !(source_assumed && source_at_anchor)) ||
-        !view.CanCertifyLeggedSupport(target_cell, false)) {
+         !(source_is_start_prefix && source_assumed)) ||
+        (target_kind != LocalCellSource::kEvidenceFree &&
+         !(source_is_start_prefix &&
+           target_kind == LocalCellSource::kStartAssumedFree))) {
       entries_.emplace(key, certificate);
       return {.certificate = certificate};
     }
@@ -527,7 +531,7 @@ class LeggedDirectedEdgeCache final {
         case LocalCellSource::kEvidenceFree:
           break;
         case LocalCellSource::kStartAssumedFree:
-          if (!(source_assumed && source_at_anchor && cell == source_cell)) {
+          if (!source_is_start_prefix) {
             entries_.emplace(key, certificate);
             return {.certificate = certificate};
           }
@@ -539,10 +543,10 @@ class LeggedDirectedEdgeCache final {
           return {.certificate = certificate};
       }
     }
-    if (!ElevationStepAndGapFeasible(
-            *view.base()->elevation(), cells, capability.maximum_step_height_m,
-            capability.maximum_gap_width_m,
-            source_assumed && source_at_anchor)) {
+    if (!uses_assumed_support && !ElevationStepAndGapFeasible(
+                                     *view.base()->elevation(), cells,
+                                     capability.maximum_step_height_m,
+                                     capability.maximum_gap_width_m, false)) {
       entries_.emplace(key, certificate);
       return {.certificate = certificate};
     }
@@ -668,10 +672,12 @@ class LeggedDirectedEdgeCache final {
   }
   const GridIndex source_cell =
       CellFromOffset(view.geometry(), SearchCellOffset(source_state));
+  const bool source_is_start_prefix =
+      SearchPhase(source_state) == StartPhase::kStartPrefix;
   const bool source_assumed =
       view.Source(source_cell) == LocalCellSource::kStartAssumedFree;
-  const bool source_at_anchor = SearchAtStartAnchor(source_state);
-  if (!view.CanCertifyLeggedSupport(source_cell, source_at_anchor)) {
+  if (view.Source(source_cell) != LocalCellSource::kEvidenceFree &&
+      !(source_is_start_prefix && source_assumed)) {
     return {};
   }
   const double distance = std::hypot(target.center.x - source_point.x,

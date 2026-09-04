@@ -367,12 +367,13 @@ TEST(LeggedLocalPlannerV2,
 }
 
 TEST(LeggedLocalPlannerV2,
-     StartPatchCertifiesOnlyTheInitialSupportAndDirectExit) {
+     StartPatchAllowsMultiCellTrustedPrefixBeforeEvidenceExit) {
   std::vector<FineCellState> states(kWidth * kHeight,
                                     FineCellState::kBlocked);
   std::vector<float> elevation(kWidth * kHeight, 0.0F);
   states[Offset({.x = 2, .y = 4})] = FineCellState::kUnknown;
   states[Offset({.x = 3, .y = 4})] = FineCellState::kUnknown;
+  states[Offset({.x = 4, .y = 4})] = FineCellState::kFree;
   states[Offset({.x = 5, .y = 4})] = FineCellState::kFree;
   elevation[Offset({.x = 2, .y = 4})] =
       std::numeric_limits<float>::quiet_NaN();
@@ -385,6 +386,41 @@ TEST(LeggedLocalPlannerV2,
        {.index = {.x = 3, .y = 4},
         .source = LocalCellSource::kStartAssumedFree}});
   LeggedCapability capability = Capability();
+  capability.maximum_gap_width_m = 0.0;
+  capability.motion_primitives = {capability.motion_primitives.front()};
+
+  const LocalPlanResult result = LeggedLocalPlanner(capability).Plan(
+      *fixture.view, PoseAt({.x = 2, .y = 4}),
+      TargetAt(PoseAt({.x = 5, .y = 4}).position_m),
+      SteadyClock::time_point::max(), {});
+
+  ASSERT_EQ(result.status, LocalPlanResult::Status::kPlanFound);
+  ASSERT_GE(result.raw_path.size(), 4U);
+  EXPECT_EQ(result.raw_path[0].phase, StartPhase::kStartPrefix);
+  EXPECT_EQ(result.raw_path[1].phase, StartPhase::kStartPrefix);
+  EXPECT_EQ(result.raw_path[2].phase, StartPhase::kNormal);
+  EXPECT_EQ(result.raw_path.back().phase, StartPhase::kNormal);
+}
+
+TEST(LeggedLocalPlannerV2, StartPatchCannotReenterAssumedCellsAfterEvidence) {
+  std::vector<FineCellState> states(kWidth * kHeight,
+                                    FineCellState::kBlocked);
+  std::vector<float> elevation(kWidth * kHeight, 0.0F);
+  states[Offset({.x = 2, .y = 4})] = FineCellState::kUnknown;
+  states[Offset({.x = 3, .y = 4})] = FineCellState::kFree;
+  states[Offset({.x = 4, .y = 4})] = FineCellState::kUnknown;
+  states[Offset({.x = 5, .y = 4})] = FineCellState::kFree;
+  elevation[Offset({.x = 2, .y = 4})] =
+      std::numeric_limits<float>::quiet_NaN();
+  elevation[Offset({.x = 4, .y = 4})] =
+      std::numeric_limits<float>::quiet_NaN();
+  const Fixture fixture = MakeFixture(
+      std::move(states), std::move(elevation), {},
+      {{.index = {.x = 2, .y = 4},
+        .source = LocalCellSource::kStartAssumedFree},
+       {.index = {.x = 4, .y = 4},
+        .source = LocalCellSource::kStartAssumedFree}});
+  LeggedCapability capability = Capability();
   capability.motion_primitives = {capability.motion_primitives.front()};
 
   EXPECT_EQ(LeggedLocalPlanner(capability)
@@ -393,26 +429,29 @@ TEST(LeggedLocalPlannerV2,
                       SteadyClock::time_point::max(), {})
                 .status,
             LocalPlanResult::Status::kNoPath);
+}
 
-  std::vector<FineCellState> direct_states(kWidth * kHeight,
-                                           FineCellState::kBlocked);
-  std::vector<float> direct_elevation(kWidth * kHeight, 0.0F);
-  direct_states[Offset({.x = 2, .y = 4})] = FineCellState::kUnknown;
-  direct_states[Offset({.x = 3, .y = 4})] = FineCellState::kFree;
-  direct_elevation[Offset({.x = 2, .y = 4})] =
+TEST(LeggedLocalPlannerV2, StartPatchDoesNotOverrideBlockedExit) {
+  std::vector<FineCellState> states(kWidth * kHeight,
+                                    FineCellState::kBlocked);
+  std::vector<float> elevation(kWidth * kHeight, 0.0F);
+  states[Offset({.x = 2, .y = 4})] = FineCellState::kUnknown;
+  states[Offset({.x = 4, .y = 4})] = FineCellState::kFree;
+  elevation[Offset({.x = 2, .y = 4})] =
       std::numeric_limits<float>::quiet_NaN();
-  const Fixture direct_exit = MakeFixture(
-      std::move(direct_states), std::move(direct_elevation), {},
+  const Fixture fixture = MakeFixture(
+      std::move(states), std::move(elevation), {},
       {{.index = {.x = 2, .y = 4},
         .source = LocalCellSource::kStartAssumedFree}});
-  const LocalPlanResult succeeds = LeggedLocalPlanner(capability).Plan(
-      *direct_exit.view, PoseAt({.x = 2, .y = 4}),
-      TargetAt(PoseAt({.x = 3, .y = 4}).position_m),
-      SteadyClock::time_point::max(), {});
-  ASSERT_EQ(succeeds.status, LocalPlanResult::Status::kPlanFound);
-  ASSERT_GE(succeeds.path.size(), 2U);
-  EXPECT_EQ(succeeds.path.front().phase, StartPhase::kStartPrefix);
-  EXPECT_EQ(succeeds.path.back().phase, StartPhase::kNormal);
+  LeggedCapability capability = Capability();
+  capability.motion_primitives = {capability.motion_primitives.front()};
+
+  EXPECT_EQ(LeggedLocalPlanner(capability)
+                .Plan(*fixture.view, PoseAt({.x = 2, .y = 4}),
+                      TargetAt(PoseAt({.x = 4, .y = 4}).position_m),
+                      SteadyClock::time_point::max(), {})
+                .status,
+            LocalPlanResult::Status::kNoPath);
 }
 
 TEST(LeggedLocalPlannerV2,
