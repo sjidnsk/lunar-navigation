@@ -49,8 +49,9 @@ ROS 适配层负责把 odometry 位姿由 `odom` 变换到 `Path.header.frame_id
    `TrackingState`，再调用现有 Pure Pursuit 跟踪函数。
 3. 线速度、角速度沿用现有可配置限幅和前视距离。路径末端位置已到、但 yaw 未在
    容差内时，保持 `linear.x=0`，以已有 `spin_kp` 和角速度上限完成原地转向。
-4. 收到空路径、无效路径、无有效 odometry、无可用 TF、路径偏离、路径完成、legacy
-   cancel（仅 legacy 模式）或节点销毁时，清空活动目标并发布零速度。
+4. 收到空路径、无效路径、路径偏离、路径完成、legacy cancel（仅 legacy 模式）或
+   节点销毁时，清空活动目标并发布零速度。odometry 或直接 TF 暂时不可用时只发布
+   零速度并保留最近有效路径；状态恢复后由下一控制周期继续跟踪。
 
 路径的 header 时间戳、规划时间、地图版本、会话 revision、协方差和新鲜度不进入
 控制器判定；这些不是该路径执行边界的输入。TF 查询使用当前可用的直接变换，不建立
