@@ -302,6 +302,24 @@ UNKNOWN/blocked/clearance 计算与增量 influence halo 均未改变。新增�
 相关 fine builder 与 complex scenario CTest 为 2/2 通过，达到 10% 保留门槛。由于仅数据布局已经获得
 显著收益，本轮不继续加入固定 stencil offset 或距离变换，避免扩大浮点边界与 cell-area 几何风险。
 
+### P0-B：phase 内共线折点预压缩（保留）
+
+在每个 phase 内先线性移除“共线且同方向”的中间 raw vertex，再对折点序列执行原有最远可见 greedy；
+所有 shortcut 仍由原 supercover + `Allowed()` 检查认证，phase 边界、起终点、取消和 deadline 逻辑不变。
+专门的 U 形阻挡回归保留安全转折，且同一 clock/cancel 探测接口的调用从优化前 986 次降至 224 次；
+其中 201 次是为保证预处理仍可取消而逐 raw vertex 执行的线性检查。
+
+640 窄通道/死胡同场景结果：
+
+| 指标 | before 三次 (ms) | after 三次 (ms) | p50 变化 |
+| --- | --- | --- | ---: |
+| wheel total | 1501.67 / 1485.02 / 1495.68 | 42.389 / 42.249 / 42.513 | 1495.68 → 42.389，-97.17%，35.28× |
+| wheel postprocess | 1469.24 / 1452.51 / 1464.17 | 8.347 / 8.420 / 8.468 | 1464.17 → 8.420，-99.42%，173.90× |
+
+三次均为 `PLAN_FOUND`，expanded/generated 固定为 63075/63127，raw/final 固定为 50790/158；因此收益
+来自消除重复 LOS candidate 扫描，不是减少搜索、降低分辨率或放宽安全条件。simplifier、wheel planner
+和 complex scenario CTest 为 3/3 通过，达到保留门槛。
+
 ## Fresh 构建与回归
 
 在仓库外新建 `/tmp/lunar-complex-final.uyoh2c/build`，从当前源码重新配置并构建 Jazzy

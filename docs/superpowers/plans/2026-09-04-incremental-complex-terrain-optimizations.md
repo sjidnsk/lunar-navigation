@@ -50,11 +50,11 @@
 - Modify: `ros2_ws/src/lunar_incremental_navigation_core/src/local/phase_aware_path_simplifier.cpp`
 - Test: `ros2_ws/src/lunar_incremental_navigation_core/test/phase_aware_path_simplifier_test.cpp`
 
-- [ ] RED: add a real-path test with long collinear runs and blocked shortcuts; assert endpoints, phase boundary, safe bend retention, and cancellation/deadline fail-closed behavior.
-- [ ] GREEN: within each phase, linearly remove only same-direction collinear middle vertices, then run the existing farthest-visible greedy and existing supercover/`Allowed()` certification.
-- [ ] Run simplifier and wheel planner tests plus complex-terrain scenario tests.
-- [ ] Compare frozen versus optimized 640 `dead-ends` wheel total/postprocess p50, raw/final point counts, and status. Retain only if the gate passes.
-- [ ] Commit the simplifier optimization and regression test with explicit paths.
+- [x] RED: add a real-path test with long collinear runs and blocked shortcuts; assert endpoints, phase boundary, safe bend retention, and cancellation/deadline fail-closed behavior.
+- [x] GREEN: within each phase, linearly remove only same-direction collinear middle vertices, then run the existing farthest-visible greedy and existing supercover/`Allowed()` certification.
+- [x] Run simplifier and wheel planner tests plus complex-terrain scenario tests.
+- [x] Compare frozen versus optimized 640 `dead-ends` wheel total/postprocess p50, raw/final point counts, and status. Retain only if the gate passes.
+- [x] Commit the simplifier optimization and regression test with explicit paths.
 
 ### Task 3: Add cheap gates before legged directed-edge certification
 

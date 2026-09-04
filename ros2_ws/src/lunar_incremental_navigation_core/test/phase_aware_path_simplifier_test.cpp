@@ -198,6 +198,54 @@ TEST(PhaseAwareSimplifier, FailedShortcutKeepsSafeRawSubpath) {
 }
 
 TEST(PhaseAwareSimplifier,
+     CollinearRunsAreReducedBeforeBlockedShortcutSearch) {
+  std::vector<std::pair<GridIndex, FineCellState>> cells;
+  for (std::int64_t y = 0; y <= 2; ++y) {
+    cells.emplace_back(GridIndex{.x = 0, .y = y}, FineCellState::kFree);
+    cells.emplace_back(GridIndex{.x = 6, .y = y}, FineCellState::kFree);
+  }
+  for (std::int64_t x = 0; x <= 6; ++x) {
+    cells.emplace_back(GridIndex{.x = x, .y = 2}, FineCellState::kFree);
+  }
+  for (std::int64_t x = 1; x < 6; ++x) {
+    cells.emplace_back(GridIndex{.x = x, .y = 0}, FineCellState::kBlocked);
+  }
+  const auto fine = MakeFine(std::move(cells));
+  const RequestLocalPlanningView view(
+      fine, {.position_m = {.x = 0.5, .y = 0.5}}, 0.0, {});
+  std::vector<PathPoint> raw;
+  for (std::size_t step = 0U; step <= 40U; ++step) {
+    raw.push_back(P(0.5, 0.5 + 2.0 * static_cast<double>(step) / 40.0,
+                    StartPhase::kNormal));
+  }
+  for (std::size_t step = 1U; step <= 120U; ++step) {
+    raw.push_back(P(0.5 + 6.0 * static_cast<double>(step) / 120.0, 2.5,
+                    StartPhase::kNormal));
+  }
+  for (std::size_t step = 1U; step <= 40U; ++step) {
+    raw.push_back(P(6.5, 2.5 - 2.0 * static_cast<double>(step) / 40.0,
+                    StartPhase::kNormal));
+  }
+  std::size_t clock_checks = 0U;
+  const SearchControl control{
+      .deadline = SteadyClock::time_point::max(),
+      .now = [&] {
+        ++clock_checks;
+        return SteadyClock::time_point{};
+      }};
+
+  const auto simplified = SimplifyPhaseAwarePath(view, raw, control);
+
+  ASSERT_GE(simplified.size(), 4U);
+  EXPECT_EQ(simplified.front().pose, raw.front().pose);
+  EXPECT_EQ(simplified.back().pose, raw.back().pose);
+  // One interruption check per raw vertex keeps preprocessing cancelable;
+  // after that, this three-segment fixture needs only a small fixed number
+  // of LOS safety probes rather than rescanning all raw candidates.
+  EXPECT_LT(clock_checks, raw.size() + 50U);
+}
+
+TEST(PhaseAwareSimplifier,
      PrefixShortcutCannotReenterAssumedCellsAfterCrossingEvidence) {
   const auto fine = MakeFine({{{.x = 1, .y = 0}, FineCellState::kFree}});
   const RequestLocalPlanningView view(
