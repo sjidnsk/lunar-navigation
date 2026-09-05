@@ -330,7 +330,8 @@ TEST(GlobalRoutePlannerV2Test,
 
   const GlobalRouteResult new_start_cell = planner.Plan(
       *route_change, CellPoint(2, 1), goal, GenerousDeadline(), StopToken{});
-  EXPECT_FALSE(new_start_cell.reused_cache);
+  EXPECT_TRUE(new_start_cell.reused_cache);
+  EXPECT_EQ(new_start_cell.statistics.expanded_states, 0U);
 
   const auto new_profile = MakeSnapshot(520, 3, {}, 4U, "legged-profile");
   const GlobalRouteResult profile_miss = planner.Plan(
@@ -349,6 +350,132 @@ TEST(GlobalRoutePlannerV2Test,
                    .Plan(*skipped_revision, start, goal, GenerousDeadline(),
                          StopToken{})
                    .reused_cache);
+}
+
+TEST(GlobalRoutePlannerV2Test,
+     CacheReusesAnOnRouteMovedStartSuffixButNotAnOffRouteStart) {
+  const auto snapshot = MakeSnapshot(64, 3);
+  GlobalRoutePlanner planner(
+      GlobalRoutePlannerConfig{.global_detour_margin_m = 0.0,
+                               .unknown_step_risk = 2.0});
+  const Point2 start = CellPoint(1, 1, 0.1, 0.2);
+  const Point2 goal = CellPoint(20, 1, 0.8, 0.7);
+  const GlobalRouteResult first = planner.Plan(
+      *snapshot, start, goal, GenerousDeadline(), StopToken{});
+  ASSERT_EQ(first.status, GuidanceStatus::kAvailable);
+  ASSERT_TRUE(first.route.has_value());
+
+  const Point2 moved_start = CellPoint(5, 1, 0.2, 0.3);
+  const GlobalRouteResult moved = planner.Plan(
+      *snapshot, moved_start, goal, GenerousDeadline(), StopToken{});
+
+  ASSERT_EQ(moved.status, GuidanceStatus::kAvailable);
+  ASSERT_TRUE(moved.route.has_value());
+  EXPECT_TRUE(moved.reused_cache);
+  EXPECT_EQ(moved.statistics.expanded_states, 0U);
+  EXPECT_DOUBLE_EQ(moved.route->poses_map.front().position_m.x,
+                   moved_start.x);
+  EXPECT_DOUBLE_EQ(moved.route->poses_map.front().position_m.y,
+                   moved_start.y);
+  EXPECT_DOUBLE_EQ(moved.route->poses_map.back().position_m.x, goal.x);
+  EXPECT_DOUBLE_EQ(moved.route->poses_map.back().position_m.y, goal.y);
+  EXPECT_EQ(moved.route->poses_map.size(),
+            first.route->poses_map.size() - 4U);
+
+  const GlobalRouteResult off_route = planner.Plan(
+      *snapshot, CellPoint(5, 0), goal, GenerousDeadline(), StopToken{});
+  EXPECT_EQ(off_route.status, GuidanceStatus::kAvailable);
+  EXPECT_FALSE(off_route.reused_cache);
+  EXPECT_GT(off_route.statistics.expanded_states, 0U);
+}
+
+TEST(GlobalRoutePlannerV2Test,
+     EqualRevisionIndependentSnapshotCannotReuseABlockedMovedStart) {
+  const std::map<GridIndex, CellValue> free_line{
+      {{.x = 0, .y = 0}, {.state = GuidanceCellState::kCandidate}},
+      {{.x = 1, .y = 0}, {.state = GuidanceCellState::kCandidate}},
+      {{.x = 2, .y = 0}, {.state = GuidanceCellState::kCandidate}}};
+  const auto first = MakeSnapshot(3, 1, free_line, 1U, "wheel-profile");
+  auto blocked_line = free_line;
+  blocked_line[{.x = 1, .y = 0}].state =
+      GuidanceCellState::kProvenBlocked;
+  const auto independent =
+      MakeSnapshot(3, 1, blocked_line, 1U, "wheel-profile");
+  GlobalRoutePlanner planner(
+      GlobalRoutePlannerConfig{.global_detour_margin_m = 0.0,
+                               .unknown_step_risk = 2.0});
+  const Point2 goal = CellPoint(2, 0);
+  ASSERT_EQ(planner.Plan(*first, CellPoint(0, 0), goal,
+                         GenerousDeadline(), StopToken{})
+                .status,
+            GuidanceStatus::kAvailable);
+
+  const GlobalRouteResult result = planner.Plan(
+      *independent, CellPoint(1, 0), goal, GenerousDeadline(), StopToken{});
+
+  EXPECT_EQ(result.status, GuidanceStatus::kNoRoute);
+  EXPECT_FALSE(result.route.has_value());
+  EXPECT_FALSE(result.reused_cache);
+}
+
+TEST(GlobalRoutePlannerV2Test,
+     EqualRevisionIndependentSnapshotCannotReuseABlockedRouteInterior) {
+  std::map<GridIndex, CellValue> free_line;
+  for (std::int64_t x = 0; x < 4; ++x) {
+    free_line[{.x = x, .y = 0}] = {
+        .state = GuidanceCellState::kCandidate};
+  }
+  const auto first = MakeSnapshot(4, 1, free_line, 1U, "wheel-profile");
+  auto blocked_line = free_line;
+  blocked_line[{.x = 2, .y = 0}].state =
+      GuidanceCellState::kProvenBlocked;
+  const auto independent =
+      MakeSnapshot(4, 1, blocked_line, 1U, "wheel-profile");
+  GlobalRoutePlanner planner(
+      GlobalRoutePlannerConfig{.global_detour_margin_m = 0.0,
+                               .unknown_step_risk = 2.0});
+  const Point2 start = CellPoint(0, 0);
+  const Point2 goal = CellPoint(3, 0);
+  ASSERT_EQ(planner.Plan(*first, start, goal, GenerousDeadline(), StopToken{})
+                .status,
+            GuidanceStatus::kAvailable);
+
+  const GlobalRouteResult result = planner.Plan(
+      *independent, start, goal, GenerousDeadline(), StopToken{});
+
+  EXPECT_EQ(result.status, GuidanceStatus::kNoRoute);
+  EXPECT_FALSE(result.route.has_value());
+  EXPECT_FALSE(result.reused_cache);
+}
+
+TEST(GlobalRoutePlannerV2Test,
+     EqualRevisionIndependentSnapshotRechecksRouteTerrainRisk) {
+  std::map<GridIndex, CellValue> free_line;
+  for (std::int64_t x = 0; x < 4; ++x) {
+    free_line[{.x = x, .y = 0}] = {
+        .state = GuidanceCellState::kCandidate};
+  }
+  const auto first = MakeSnapshot(4, 1, free_line, 1U, "wheel-profile");
+  auto changed_risk = free_line;
+  changed_risk[{.x = 2, .y = 0}].risk = 7.0;
+  const auto independent =
+      MakeSnapshot(4, 1, changed_risk, 1U, "wheel-profile");
+  GlobalRoutePlanner planner(
+      GlobalRoutePlannerConfig{.global_detour_margin_m = 0.0,
+                               .unknown_step_risk = 2.0});
+  const Point2 start = CellPoint(0, 0);
+  const Point2 goal = CellPoint(3, 0);
+  ASSERT_EQ(planner.Plan(*first, start, goal, GenerousDeadline(), StopToken{})
+                .status,
+            GuidanceStatus::kAvailable);
+
+  const GlobalRouteResult result = planner.Plan(
+      *independent, start, goal, GenerousDeadline(), StopToken{});
+
+  EXPECT_EQ(result.status, GuidanceStatus::kAvailable);
+  EXPECT_TRUE(result.route.has_value());
+  EXPECT_FALSE(result.reused_cache);
+  EXPECT_GT(result.statistics.expanded_states, 0U);
 }
 
 TEST(GlobalRoutePlannerV2Test,

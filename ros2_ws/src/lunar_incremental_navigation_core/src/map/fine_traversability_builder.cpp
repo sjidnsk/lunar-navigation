@@ -461,6 +461,7 @@ FineTraversabilityBuilder::Derive(
       .updated_cells = updated_cells,
       .elevation_cells_examined =
           cell_evaluator.evaluated_elevation_cells(),
+      .elevation_cache_tiles = cell_evaluator.cached_elevation_tiles(),
       .allocated_cells = directory.tile_count() * kGridTileCellCount,
       .allocated_bytes = directory.tile_count() *
                          (sizeof(FineCellState) + sizeof(double)) *

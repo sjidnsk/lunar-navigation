@@ -28,6 +28,8 @@ class LeggedLocalPlanner final {
  private:
   LeggedCapability capability_;
   LeggedLocalPlannerConfig config_;
+  double maximum_translation_m_{};
+  std::vector<double> spin_deltas_rad_;
   // The spatial state is a cell plus start-prefix and one-time continuous
   // start-anchor markers. It intentionally does not contain a discretized yaw
   // dimension.

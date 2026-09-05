@@ -11,6 +11,7 @@
 #include <optional>
 #include <queue>
 #include <set>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -250,7 +251,7 @@ struct OpenEntryLater final {
 }
 
 [[nodiscard]] std::optional<GlobalRoute> BuildRoute(
-    const SparseGridGeometry& geometry, const std::vector<GridIndex>& cells,
+    const SparseGridGeometry& geometry, const std::span<const GridIndex> cells,
     const Point2 start, const Point2 goal,
     const std::uint64_t expanded_states, const SearchDeadline deadline,
     const StopToken& stop, const NowFn& now) {
@@ -356,10 +357,10 @@ enum class InfluenceMatch : std::uint8_t {
 struct GlobalRoutePlanner::Impl final {
   struct CacheEntry final {
     std::uint64_t guidance_revision{};
-    GridIndex start_cell;
     GridIndex goal_cell;
     std::string platform_profile_hash;
     SparseGridGeometry geometry;
+    GlobalGuidanceTileDirectory tile_directory;
     std::vector<GridIndex> cells;
     std::vector<CellFingerprint> influence_fingerprint;
   };
@@ -403,44 +404,62 @@ GlobalRouteResult GlobalRoutePlanner::Plan(
   if (TimedOut(deadline, stop, impl_->config.now)) {
     return GlobalRouteResult{.status = GuidanceStatus::kTimeout};
   }
-
-  if (impl_->cache && impl_->cache->start_cell == *start_cell &&
-      impl_->cache->goal_cell == *goal_cell &&
-      impl_->cache->platform_profile_hash == snapshot.platform_profile_hash() &&
-      SameGeometry(impl_->cache->geometry, snapshot.geometry())) {
-    bool reusable = impl_->cache->guidance_revision ==
-                    snapshot.global_guidance_revision();
-    if (!reusable &&
-        impl_->cache->guidance_revision <
-            std::numeric_limits<std::uint64_t>::max() &&
-        snapshot.global_guidance_revision() ==
-            impl_->cache->guidance_revision + 1U) {
-      const InfluenceMatch match = MatchesRouteInfluence(
-          snapshot, impl_->cache->influence_fingerprint, deadline, stop,
-          impl_->config.now);
-      if (match == InfluenceMatch::kTimeout) {
-        return GlobalRouteResult{.status = GuidanceStatus::kTimeout};
-      }
-      reusable = match == InfluenceMatch::kMatch;
-    }
-    if (reusable) {
-      std::optional<GlobalRoute> route = BuildRoute(
-          snapshot.geometry(), impl_->cache->cells, start, goal, 0U,
-          deadline, stop, impl_->config.now);
-      if (!route) {
-        return GlobalRouteResult{.status = GuidanceStatus::kTimeout};
-      }
-      impl_->cache->guidance_revision = snapshot.global_guidance_revision();
-      return GlobalRouteResult{
-          .status = GuidanceStatus::kAvailable,
-          .route = std::move(route),
-          .reused_cache = true,
-      };
-    }
-  }
-
   if (IsBlocked(snapshot, *start_cell) || IsBlocked(snapshot, *goal_cell)) {
     return GlobalRouteResult{.status = GuidanceStatus::kNoRoute};
+  }
+
+  if (impl_->cache && impl_->cache->goal_cell == *goal_cell &&
+      impl_->cache->platform_profile_hash == snapshot.platform_profile_hash() &&
+      SameGeometry(impl_->cache->geometry, snapshot.geometry())) {
+    std::optional<std::size_t> start_offset;
+    for (std::size_t index = 0U; index < impl_->cache->cells.size(); ++index) {
+      if (TimedOut(deadline, stop, impl_->config.now)) {
+        return GlobalRouteResult{.status = GuidanceStatus::kTimeout};
+      }
+      if (impl_->cache->cells[index] == *start_cell) {
+        start_offset = index;
+        break;
+      }
+    }
+    if (start_offset.has_value()) {
+      const bool same_revision =
+          impl_->cache->guidance_revision ==
+          snapshot.global_guidance_revision();
+      const bool successor_revision =
+          impl_->cache->guidance_revision <
+              std::numeric_limits<std::uint64_t>::max() &&
+          snapshot.global_guidance_revision() ==
+              impl_->cache->guidance_revision + 1U;
+      bool reusable =
+          same_revision && impl_->cache->tile_directory.shares_root_with(
+                               snapshot.tile_directory());
+      if (!reusable && (same_revision || successor_revision)) {
+        const InfluenceMatch match = MatchesRouteInfluence(
+            snapshot, impl_->cache->influence_fingerprint, deadline, stop,
+            impl_->config.now);
+        if (match == InfluenceMatch::kTimeout) {
+          return GlobalRouteResult{.status = GuidanceStatus::kTimeout};
+        }
+        reusable = match == InfluenceMatch::kMatch;
+      }
+      if (reusable) {
+        const std::span<const GridIndex> cached_cells(impl_->cache->cells);
+        std::optional<GlobalRoute> route = BuildRoute(
+            snapshot.geometry(), cached_cells.subspan(*start_offset), start,
+            goal, 0U, deadline, stop, impl_->config.now);
+        if (!route) {
+          return GlobalRouteResult{.status = GuidanceStatus::kTimeout};
+        }
+        impl_->cache->guidance_revision =
+            snapshot.global_guidance_revision();
+        impl_->cache->tile_directory = snapshot.tile_directory();
+        return GlobalRouteResult{
+            .status = GuidanceStatus::kAvailable,
+            .route = std::move(route),
+            .reused_cache = true,
+        };
+      }
+    }
   }
 
   const SearchBounds bounds = MakeSearchBounds(
@@ -593,10 +612,10 @@ GlobalRouteResult GlobalRoutePlanner::Plan(
   }
   Impl::CacheEntry next_cache{
       .guidance_revision = snapshot.global_guidance_revision(),
-      .start_cell = *start_cell,
       .goal_cell = *goal_cell,
       .platform_profile_hash = snapshot.platform_profile_hash(),
       .geometry = snapshot.geometry(),
+      .tile_directory = snapshot.tile_directory(),
       .cells = std::move(cells),
       .influence_fingerprint = std::move(influence_fingerprint),
   };

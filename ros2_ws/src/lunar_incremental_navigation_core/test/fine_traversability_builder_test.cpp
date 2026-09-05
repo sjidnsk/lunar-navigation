@@ -201,6 +201,33 @@ TEST(FineTraversabilityGeometry,
       FineCellState::kUnknown);
 }
 
+TEST(FineTraversabilityBuilder,
+     DenseDeriveReportsTileBoundedIntrinsicScratchStorage) {
+  const GridGeometry geometry = Geometry(520U, 16U);
+  PersistentElevationMap map;
+  const auto raw = Snapshot(
+      map, geometry, std::vector<float>(geometry.CellCount(), 0.0F));
+  const TraversabilityProfile profile = Profile();
+  FineCellEvaluator evaluator(*raw, WheelCapability(), profile);
+
+  for (std::int64_t y = 0; y < static_cast<std::int64_t>(geometry.height);
+       ++y) {
+    for (std::int64_t x = 0; x < static_cast<std::int64_t>(geometry.width);
+         ++x) {
+      static_cast<void>(evaluator.Evaluate({.x = x, .y = y}));
+    }
+  }
+
+  EXPECT_EQ(evaluator.evaluated_elevation_cells(), geometry.CellCount());
+  EXPECT_EQ(evaluator.cached_elevation_tiles(), 3U);
+
+  const auto fine = FineTraversabilityBuilder().Derive(
+      raw, WheelCapability(), profile);
+  ASSERT_TRUE(fine);
+  EXPECT_EQ(fine->metrics().elevation_cells_examined, geometry.CellCount());
+  EXPECT_EQ(fine->metrics().elevation_cache_tiles, 3U);
+}
+
 TEST(FineTraversabilityBuilder, PreservesWheelAndLeggedPhysicsDifferences) {
   const GridGeometry geometry = Geometry(21U, 21U);
   std::vector<float> values(geometry.CellCount(), 0.0F);

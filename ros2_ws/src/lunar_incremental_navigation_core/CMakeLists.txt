@@ -59,6 +59,16 @@ ament_export_include_directories(include)
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
 
+  add_library(${PROJECT_NAME}_test_support STATIC
+    test/support/complex_terrain_benchmark.cpp
+    test/support/complex_terrain_scenarios.cpp)
+  target_compile_features(${PROJECT_NAME}_test_support PUBLIC cxx_std_20)
+  target_include_directories(${PROJECT_NAME}_test_support
+    PUBLIC test
+    PRIVATE src)
+  target_link_libraries(${PROJECT_NAME}_test_support PUBLIC ${PROJECT_NAME})
+  lunar_enable_sanitizers(${PROJECT_NAME}_test_support)
+
   function(lunar_add_core_gtest target source)
     ament_add_gtest(${target} ${source})
     target_include_directories(${target} PRIVATE src test)
@@ -105,6 +115,29 @@ if(BUILD_TESTING)
   lunar_add_core_gtest(
     lunar_incremental_navigation_core_planning_session_coordinator_test
     test/planning_session_coordinator_test.cpp)
+  lunar_add_core_gtest(
+    lunar_incremental_navigation_core_complex_terrain_scenarios_test
+    test/complex_terrain_scenarios_test.cpp)
+  target_link_libraries(
+    lunar_incremental_navigation_core_complex_terrain_scenarios_test
+    ${PROJECT_NAME}_test_support)
+  lunar_add_core_gtest(
+    lunar_incremental_navigation_core_complex_terrain_benchmark_test
+    test/complex_terrain_benchmark_test.cpp)
+  target_link_libraries(
+    lunar_incremental_navigation_core_complex_terrain_benchmark_test
+    ${PROJECT_NAME}_test_support)
+
+  add_executable(${PROJECT_NAME}_complex_terrain_benchmark
+    benchmark/complex_terrain_benchmark_main.cpp)
+  target_compile_features(
+    ${PROJECT_NAME}_complex_terrain_benchmark PRIVATE cxx_std_20)
+  target_include_directories(
+    ${PROJECT_NAME}_complex_terrain_benchmark PRIVATE test)
+  target_link_libraries(
+    ${PROJECT_NAME}_complex_terrain_benchmark
+    ${PROJECT_NAME}_test_support)
+  lunar_enable_sanitizers(${PROJECT_NAME}_complex_terrain_benchmark)
 endif()
 
 ament_package()

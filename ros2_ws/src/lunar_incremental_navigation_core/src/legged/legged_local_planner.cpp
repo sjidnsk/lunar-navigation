@@ -7,10 +7,13 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <limits>
 #include <numbers>
 #include <optional>
 #include <queue>
+#include <set>
+#include <span>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
@@ -30,6 +33,7 @@ constexpr double kComparisonTolerance = 1.0e-9;
 constexpr double kGeometryTolerance = 1.0e-12;
 constexpr std::size_t kMaximumTerminalSpinStates = 128U;
 constexpr std::size_t kMaximumTerminalSpinDepth = 32U;
+constexpr std::size_t kInlineSegmentCells = 16U;
 
 enum class WorkStatus : std::uint8_t {
   kReady,
@@ -249,7 +253,44 @@ struct SimplificationResult final {
   return result;
 }
 
-[[nodiscard]] std::vector<GridIndex> SegmentCells(
+class SegmentCellSequence final {
+ public:
+  [[nodiscard]] bool Append(const GridIndex cell) {
+    const std::span<const GridIndex> existing = Cells();
+    if (std::find(existing.begin(), existing.end(), cell) != existing.end()) {
+      return true;
+    }
+    if (!overflow_.empty()) {
+      overflow_.push_back(cell);
+      return true;
+    }
+    if (inline_size_ < inline_cells_.size()) {
+      inline_cells_[inline_size_++] = cell;
+      return true;
+    }
+    overflow_.reserve(inline_cells_.size() * 2U);
+    overflow_.insert(overflow_.end(), inline_cells_.begin(),
+                     inline_cells_.end());
+    overflow_.push_back(cell);
+    return true;
+  }
+
+  [[nodiscard]] std::span<const GridIndex> Cells() const noexcept {
+    return overflow_.empty()
+               ? std::span<const GridIndex>(inline_cells_.data(),
+                                            inline_size_)
+               : std::span<const GridIndex>(overflow_);
+  }
+
+  [[nodiscard]] bool empty() const noexcept { return Cells().empty(); }
+
+ private:
+  std::array<GridIndex, kInlineSegmentCells> inline_cells_{};
+  std::size_t inline_size_{};
+  std::vector<GridIndex> overflow_;
+};
+
+[[nodiscard]] SegmentCellSequence SegmentCells(
     const SparseGridGeometry& geometry, const Point2 source,
     const Point2 target) {
   const auto source_cell = WorldToCell(geometry, source);
@@ -257,20 +298,12 @@ struct SimplificationResult final {
   if (!source_cell.has_value() || !target_cell.has_value()) {
     return {};
   }
-  std::vector<GridIndex> cells;
-  cells.reserve(static_cast<std::size_t>(
-                    std::abs(target_cell->x - source_cell->x) +
-                    std::abs(target_cell->y - source_cell->y)) *
-                    3U +
-                1U);
+  SegmentCellSequence cells;
   const auto append = [&](const GridIndex cell) {
     if (!geometry.Contains(cell)) {
       return false;
     }
-    if (std::find(cells.begin(), cells.end(), cell) == cells.end()) {
-      cells.push_back(cell);
-    }
-    return true;
+    return cells.Append(cell);
   };
   GridIndex current = *source_cell;
   if (!append(current)) {
@@ -331,7 +364,8 @@ struct SimplificationResult final {
 }
 
 [[nodiscard]] bool ElevationStepAndGapFeasible(
-    const ElevationSnapshot& elevation, const std::vector<GridIndex>& cells,
+    const ElevationSnapshot& elevation,
+    const std::span<const GridIndex> cells,
     const double maximum_step_m, const double maximum_gap_m,
     const bool initial_support_assumed) noexcept {
   std::optional<ElevationRange> previous;
@@ -427,31 +461,80 @@ struct SimplificationResult final {
                                                   : fallback;
 }
 
-[[nodiscard]] WorkStatus SupportsTranslation(
-    const LeggedCapability& capability, const double requested_length,
-    const double endpoint_quantization_allowance, const SearchDeadline deadline,
-    const StopToken& stop, SearchStatistics& statistics, bool& supported) {
-  supported = false;
+struct LeggedMotionSummary final {
+  double maximum_translation_m{};
+  std::span<const double> spin_deltas_rad;
+};
+
+void BuildMotionSummary(const LeggedCapability& capability,
+                        double& maximum_translation_m,
+                        std::vector<double>& spin_deltas_rad) {
+  maximum_translation_m = 0.0;
+  spin_deltas_rad.clear();
+  spin_deltas_rad.reserve(std::min(capability.motion_primitives.size(),
+                                   kMaximumTerminalSpinStates));
+  std::set<double> unique_spin_deltas;
   for (const LeggedBodyPrimitive& primitive : capability.motion_primitives) {
-    ++statistics.evaluated_transitions;
-    if (const WorkStatus status = CheckWork(deadline, stop);
-        status != WorkStatus::kReady) {
-      return status;
-    }
-    const double available_length = std::hypot(
-        primitive.body_frame_displacement_m.x,
-        primitive.body_frame_displacement_m.y);
-    if (available_length <= kGeometryTolerance ||
-        std::abs(primitive.body_frame_displacement_m.z) >
-            capability.maximum_step_height_m + kComparisonTolerance ||
-        available_length + endpoint_quantization_allowance +
-                kComparisonTolerance <
-            requested_length) {
+    if (std::abs(primitive.body_frame_displacement_m.z) >
+        capability.maximum_step_height_m + kComparisonTolerance) {
       continue;
     }
-    supported = true;
-    return WorkStatus::kReady;
+    const double translation_m = std::hypot(
+        primitive.body_frame_displacement_m.x,
+        primitive.body_frame_displacement_m.y);
+    if (translation_m > kGeometryTolerance) {
+      maximum_translation_m =
+          std::max(maximum_translation_m, translation_m);
+      continue;
+    }
+    const double spin_delta = NormalizeYaw(primitive.yaw_change_rad);
+    if (std::abs(spin_delta) <= kGeometryTolerance) {
+      continue;
+    }
+    const auto next = unique_spin_deltas.lower_bound(spin_delta);
+    bool duplicate =
+        next != unique_spin_deltas.end() &&
+        AngleError(*next, spin_delta) <= kGeometryTolerance;
+    if (!duplicate && next != unique_spin_deltas.begin()) {
+      duplicate = AngleError(*std::prev(next), spin_delta) <=
+                  kGeometryTolerance;
+    }
+    if (!duplicate && !unique_spin_deltas.empty()) {
+      duplicate =
+          AngleError(*unique_spin_deltas.begin(), spin_delta) <=
+              kGeometryTolerance ||
+          AngleError(*unique_spin_deltas.rbegin(), spin_delta) <=
+              kGeometryTolerance;
+    }
+    if (duplicate) {
+      continue;
+    }
+    unique_spin_deltas.insert(spin_delta);
+    spin_deltas_rad.push_back(spin_delta);
   }
+}
+
+[[nodiscard]] bool TranslationWithinCapability(
+    const LeggedMotionSummary& summary, const double requested_length,
+    const double endpoint_quantization_allowance) noexcept {
+  return summary.maximum_translation_m > kGeometryTolerance &&
+         summary.maximum_translation_m + endpoint_quantization_allowance +
+                 kComparisonTolerance >=
+             requested_length;
+}
+
+[[nodiscard]] WorkStatus SupportsTranslation(
+    const LeggedMotionSummary& summary, const double requested_length,
+    const double endpoint_quantization_allowance, const SearchDeadline deadline,
+    const StopToken& stop, SearchStatistics& statistics, bool& supported) {
+  ++statistics.evaluated_transitions;
+  if (const WorkStatus status = CheckWork(deadline, stop);
+      status != WorkStatus::kReady) {
+    supported = false;
+    return status;
+  }
+  supported = TranslationWithinCapability(
+      summary, requested_length, endpoint_quantization_allowance);
   return WorkStatus::kReady;
 }
 
@@ -459,6 +542,7 @@ class LeggedDirectedEdgeCache final {
  public:
   [[nodiscard]] EdgeLookup Certify(
       const RequestLocalPlanningView& view, const LeggedCapability& capability,
+      const LeggedMotionSummary& motion_summary,
       const std::uint32_t source_state, const Point2 source_point,
       const GridIndex target_cell, const Point2 target_point,
       const bool target_is_lattice_point, const SearchDeadline deadline,
@@ -509,7 +593,7 @@ class LeggedDirectedEdgeCache final {
             : 0.0;
     bool primitive_supports_edge = false;
     if (const WorkStatus status = SupportsTranslation(
-            capability, distance, endpoint_quantization_allowance, deadline,
+            motion_summary, distance, endpoint_quantization_allowance, deadline,
             stop, statistics, primitive_supports_edge);
         status != WorkStatus::kReady) {
       return {.status = status};
@@ -519,14 +603,14 @@ class LeggedDirectedEdgeCache final {
       return {.certificate = certificate};
     }
 
-    const std::vector<GridIndex> cells =
+    const SegmentCellSequence cells =
         SegmentCells(view.geometry(), source_point, target_point);
     if (cells.empty()) {
       entries_.emplace(key, certificate);
       return {.certificate = certificate};
     }
     bool uses_assumed_support = false;
-    for (const GridIndex cell : cells) {
+    for (const GridIndex cell : cells.Cells()) {
       switch (view.Source(cell)) {
         case LocalCellSource::kEvidenceFree:
           break;
@@ -544,7 +628,7 @@ class LeggedDirectedEdgeCache final {
       }
     }
     if (!uses_assumed_support && !ElevationStepAndGapFeasible(
-                                     *view.base()->elevation(), cells,
+                                     *view.base()->elevation(), cells.Cells(),
                                      capability.maximum_step_height_m,
                                      capability.maximum_gap_width_m, false)) {
       entries_.emplace(key, certificate);
@@ -565,7 +649,8 @@ class LeggedDirectedEdgeCache final {
 };
 
 [[nodiscard]] TerminalYawCertificate CertifyTerminalYaw(
-    const LeggedCapability& capability, const LeggedLocalPlannerConfig& config,
+    const LeggedMotionSummary& motion_summary,
+    const LeggedLocalPlannerConfig& config,
     const bool is_final_goal, const std::optional<double>& requested_yaw,
     const double arrival_yaw, const SearchDeadline deadline,
     const StopToken& stop, SearchStatistics& statistics, WorkStatus& status) {
@@ -577,33 +662,7 @@ class LeggedDirectedEdgeCache final {
     return {.feasible = true, .yaw_rad = arrival_yaw};
   }
 
-  std::vector<double> spin_deltas;
-  spin_deltas.reserve(capability.motion_primitives.size());
-  for (const LeggedBodyPrimitive& primitive : capability.motion_primitives) {
-    ++statistics.evaluated_transitions;
-    status = CheckWork(deadline, stop);
-    if (status != WorkStatus::kReady) {
-      return {};
-    }
-    if (std::hypot(primitive.body_frame_displacement_m.x,
-                   primitive.body_frame_displacement_m.y) >
-            kGeometryTolerance ||
-        std::abs(primitive.body_frame_displacement_m.z) >
-            capability.maximum_step_height_m + kComparisonTolerance) {
-      continue;
-    }
-    const double delta = NormalizeYaw(primitive.yaw_change_rad);
-    if (std::abs(delta) <= kGeometryTolerance ||
-        std::any_of(spin_deltas.begin(), spin_deltas.end(),
-                    [&](const double known) {
-                      return AngleError(known, delta) <=
-                             kGeometryTolerance;
-                    })) {
-      continue;
-    }
-    spin_deltas.push_back(delta);
-  }
-  if (spin_deltas.empty()) {
+  if (motion_summary.spin_deltas_rad.empty()) {
     return {};
   }
 
@@ -625,7 +684,7 @@ class LeggedDirectedEdgeCache final {
     if (current.depth >= kMaximumTerminalSpinDepth) {
       continue;
     }
-    for (const double delta : spin_deltas) {
+    for (const double delta : motion_summary.spin_deltas_rad) {
       ++statistics.evaluated_transitions;
       status = CheckWork(deadline, stop);
       if (status != WorkStatus::kReady) {
@@ -661,6 +720,7 @@ class LeggedDirectedEdgeCache final {
 
 [[nodiscard]] TerminalCertificate CertifyTerminal(
     const RequestLocalPlanningView& view, const LeggedCapability& capability,
+    const LeggedMotionSummary& motion_summary,
     const LeggedLocalPlannerConfig& config,
     LeggedDirectedEdgeCache& edge_cache, const std::uint32_t source_state,
     const Point2 source_point, const double source_arrival_yaw,
@@ -684,7 +744,7 @@ class LeggedDirectedEdgeCache final {
                                      target.center.y - source_point.y);
   if (distance <= target.position_tolerance_m + kComparisonTolerance) {
     const TerminalYawCertificate yaw = CertifyTerminalYaw(
-        capability, config, target.is_final_goal, target.terminal_yaw_rad,
+        motion_summary, config, target.is_final_goal, target.terminal_yaw_rad,
         source_arrival_yaw, deadline, stop, statistics, status);
     if (status != WorkStatus::kReady) {
       return {};
@@ -701,9 +761,20 @@ class LeggedDirectedEdgeCache final {
     // certified short connector to the continuous final point.
   }
 
+  const bool target_is_lattice_point =
+      IsCellCenter(view.geometry(), target_cell, target.center);
+  const double endpoint_quantization_allowance =
+      target_is_lattice_point
+          ? 0.5 * std::numbers::sqrt2 * view.geometry().resolution_m()
+          : 0.0;
+  if (!TranslationWithinCapability(motion_summary, distance,
+                                   endpoint_quantization_allowance)) {
+    return {};
+  }
+
   const EdgeLookup edge = edge_cache.Certify(
-      view, capability, source_state, source_point, target_cell, target.center,
-      IsCellCenter(view.geometry(), target_cell, target.center), deadline, stop,
+      view, capability, motion_summary, source_state, source_point,
+      target_cell, target.center, target_is_lattice_point, deadline, stop,
       statistics);
   if (edge.status != WorkStatus::kReady) {
     status = edge.status;
@@ -713,7 +784,7 @@ class LeggedDirectedEdgeCache final {
     return {};
   }
   const TerminalYawCertificate yaw = CertifyTerminalYaw(
-      capability, config, target.is_final_goal, target.terminal_yaw_rad,
+      motion_summary, config, target.is_final_goal, target.terminal_yaw_rad,
       edge.certificate.arrival_yaw_rad, deadline, stop, statistics, status);
   if (status != WorkStatus::kReady) {
     return {};
@@ -789,6 +860,7 @@ class LeggedDirectedEdgeCache final {
     const std::vector<RawVertex>& raw_vertices,
     const std::size_t protected_tail_vertices,
     LeggedDirectedEdgeCache& edge_cache, const LeggedCapability& capability,
+    const LeggedMotionSummary& motion_summary,
     const SearchDeadline deadline, const StopToken& stop,
     SearchStatistics& statistics) {
   SimplificationResult result;
@@ -832,9 +904,9 @@ class LeggedDirectedEdgeCache final {
       return result;
     }
     const EdgeLookup shortcut = edge_cache.Certify(
-        view, capability, source.state, source_position, *candidate_cell,
-        candidate_position, candidate.lattice_position, deadline, stop,
-        statistics);
+        view, capability, motion_summary, source.state, source_position,
+        *candidate_cell, candidate_position, candidate.lattice_position,
+        deadline, stop, statistics);
     if (shortcut.status != WorkStatus::kReady) {
       result.status = shortcut.status;
       return result;
@@ -888,6 +960,7 @@ LeggedLocalPlanner::LeggedLocalPlanner(LeggedCapability capability,
       config_.terminal_yaw_tolerance_rad < 0.0) {
     throw std::invalid_argument("legged local planner configuration is invalid");
   }
+  BuildMotionSummary(capability_, maximum_translation_m_, spin_deltas_rad_);
 }
 
 LocalPlanResult LeggedLocalPlanner::Plan(
@@ -925,6 +998,10 @@ LocalPlanResult LeggedLocalPlanner::Plan(
       !view.CanBeEndpoint(*target_cell)) {
     return {};
   }
+  SearchStatistics statistics;
+  const LeggedMotionSummary motion_summary{
+      .maximum_translation_m = maximum_translation_m_,
+      .spin_deltas_rad = spin_deltas_rad_};
   const StartPhase initial_phase =
       view.Source(*start_cell) == LocalCellSource::kStartAssumedFree
           ? StartPhase::kStartPrefix
@@ -949,7 +1026,8 @@ LocalPlanResult LeggedLocalPlanner::Plan(
                       .g = 0.0,
                       .state = start_state,
                       .sequence = sequence++});
-  SearchStatistics statistics{.generated_states = 1U, .open_peak = open.size()};
+  statistics.generated_states = 1U;
+  statistics.open_peak = open.size();
   LeggedDirectedEdgeCache edge_cache;
   std::unordered_map<std::uint32_t, TerminalCacheEntry> terminal_cache;
   std::optional<std::uint32_t> goal_state;
@@ -992,9 +1070,9 @@ LocalPlanResult LeggedLocalPlanner::Plan(
     if (!terminal_entry.evaluated) {
       WorkStatus terminal_status = WorkStatus::kReady;
       terminal_entry.certificate = CertifyTerminal(
-          view, capability_, config_, edge_cache, current.state, current_point,
-          current_arrival_yaw, target, *target_cell, deadline, stop, statistics,
-          terminal_status);
+          view, capability_, motion_summary, config_, edge_cache,
+          current.state, current_point, current_arrival_yaw, target,
+          *target_cell, deadline, stop, statistics, terminal_status);
       if (terminal_status != WorkStatus::kReady) {
         return StoppedResult(terminal_status, statistics);
       }
@@ -1029,22 +1107,29 @@ LocalPlanResult LeggedLocalPlanner::Plan(
       if (!next_phase.has_value()) {
         continue;
       }
+      const std::uint32_t next_state =
+          SearchState(CellOffset(geometry, next_cell), *next_phase, false);
+      initialize(next_state);
+      if (state_[next_state] == 2U) {
+        continue;
+      }
       const Point2 next_point = CellCenter(geometry, next_cell);
+      const double geometric_lower_bound = std::hypot(
+          next_point.x - current_point.x, next_point.y - current_point.y);
+      if (SaturatingAdd(current.g, geometric_lower_bound) +
+              kComparisonTolerance >=
+          g_cost_[next_state]) {
+        continue;
+      }
       const EdgeLookup edge = edge_cache.Certify(
-          view, capability_, current.state, current_point, next_cell, next_point,
-          true, deadline, stop, statistics);
+          view, capability_, motion_summary, current.state, current_point,
+          next_cell, next_point, true, deadline, stop, statistics);
       if (edge.status != WorkStatus::kReady) {
         return StoppedResult(edge.status, statistics);
       }
       if (!edge.certificate.feasible ||
           (edge.certificate.uses_assumed_support &&
            SearchPhase(current.state) != StartPhase::kStartPrefix)) {
-        continue;
-      }
-      const std::uint32_t next_state =
-          SearchState(CellOffset(geometry, next_cell), *next_phase, false);
-      initialize(next_state);
-      if (state_[next_state] == 2U) {
         continue;
       }
       const double candidate = SaturatingAdd(current.g, edge.certificate.cost);
@@ -1138,7 +1223,7 @@ LocalPlanResult LeggedLocalPlanner::Plan(
       protects_final_arrival && raw_vertices.size() > 1U ? 1U : 0U;
   SimplificationResult simplified = SimplifyLeggedPhaseAwarePath(
       view, raw_vertices, protected_tail_vertices, edge_cache, capability_,
-      deadline, stop, statistics);
+      motion_summary, deadline, stop, statistics);
   if (simplified.status == WorkStatus::kCanceled) {
     return StoppedResult(simplified.status, statistics);
   }

@@ -1,6 +1,8 @@
 #include "lunar_incremental_navigation_core/wheel_local_planner.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <vector>
 
 #include "local/grid_supercover.hpp"
@@ -40,38 +42,116 @@ namespace {
       });
 }
 
-void SimplifyOnePhase(const RequestLocalPlanningView& view,
-                      const std::span<const PathPoint> phase_path,
-                      std::vector<PathPoint>& output,
-                      const SearchControl* control) {
+[[nodiscard]] bool SameDirectionCollinear(const PathPoint& first,
+                                          const PathPoint& middle,
+                                          const PathPoint& last) noexcept {
+  if (first.phase != middle.phase || middle.phase != last.phase) {
+    return false;
+  }
+  const double first_dx = middle.pose.position_m.x - first.pose.position_m.x;
+  const double first_dy = middle.pose.position_m.y - first.pose.position_m.y;
+  const double second_dx = last.pose.position_m.x - middle.pose.position_m.x;
+  const double second_dy = last.pose.position_m.y - middle.pose.position_m.y;
+  const double first_length_squared =
+      std::fma(first_dx, first_dx, first_dy * first_dy);
+  const double second_length_squared =
+      std::fma(second_dx, second_dx, second_dy * second_dy);
+  if (first_length_squared == 0.0 || second_length_squared == 0.0) {
+    return false;
+  }
+  const double dot = std::fma(first_dx, second_dx, first_dy * second_dy);
+  if (dot <= 0.0) {
+    return false;
+  }
+  const double cross = std::fma(first_dx, second_dy,
+                                -first_dy * second_dx);
+  const double cross_scale =
+      std::abs(first_dx * second_dy) +
+      std::abs(first_dy * second_dx);
+  const double tolerance =
+      64.0 * std::numeric_limits<double>::epsilon() * cross_scale;
+  return std::abs(cross) <= tolerance;
+}
+
+[[nodiscard]] bool CollectPhaseCorners(
+    const std::span<const PathPoint> phase_path,
+    std::vector<PathPoint>& corners, const SearchControl* control) {
+  corners.clear();
+  corners.reserve(phase_path.size());
+  for (const PathPoint& point : phase_path) {
+    if (Interrupted(control)) {
+      corners.clear();
+      return false;
+    }
+    if (corners.size() >= 2U &&
+        SameDirectionCollinear(corners[corners.size() - 2U], corners.back(),
+                               point)) {
+      corners.back() = point;
+    } else {
+      corners.push_back(point);
+    }
+  }
+  return true;
+}
+
+[[nodiscard]] bool AdjacentEdgesAreCertified(
+    const RequestLocalPlanningView& view,
+    const std::span<const PathPoint> path, const SearchControl* control) {
+  for (std::size_t index = 1U; index < path.size(); ++index) {
+    if (!HasLineOfSight(view, path[index - 1U], path[index], control)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+[[nodiscard]] bool SimplifyOnePhase(
+    const RequestLocalPlanningView& view,
+    const std::span<const PathPoint> phase_path,
+    std::vector<PathPoint>& output, const SearchControl* control) {
   if (phase_path.empty()) {
-    return;
+    return true;
+  }
+  std::vector<PathPoint> corners;
+  if (!CollectPhaseCorners(phase_path, corners, control)) {
+    return false;
+  }
+  std::span<const PathPoint> candidate_path(corners);
+  if (!AdjacentEdgesAreCertified(view, candidate_path, control)) {
+    if (Interrupted(control)) {
+      return false;
+    }
+    candidate_path = phase_path;
+    if (!AdjacentEdgesAreCertified(view, candidate_path, control)) {
+      return false;
+    }
   }
   if (output.empty() ||
-      output.back().pose != phase_path.front().pose ||
-      output.back().phase != phase_path.front().phase) {
-    output.push_back(phase_path.front());
+      output.back().pose != candidate_path.front().pose ||
+      output.back().phase != candidate_path.front().phase) {
+    output.push_back(candidate_path.front());
   }
   std::size_t anchor = 0U;
-  while (anchor + 1U < phase_path.size()) {
+  while (anchor + 1U < candidate_path.size()) {
     if (Interrupted(control)) {
-      return;
+      return false;
     }
     std::size_t selected = anchor + 1U;
-    for (std::size_t candidate = phase_path.size() - 1U;
+    for (std::size_t candidate = candidate_path.size() - 1U;
          candidate > anchor + 1U; --candidate) {
-      if (HasLineOfSight(view, phase_path[anchor], phase_path[candidate],
+      if (HasLineOfSight(view, candidate_path[anchor], candidate_path[candidate],
                          control)) {
         selected = candidate;
         break;
       }
       if (Interrupted(control)) {
-        return;
+        return false;
       }
     }
-    output.push_back(phase_path[selected]);
+    output.push_back(candidate_path[selected]);
     anchor = selected;
   }
+  return true;
 }
 
 }  // namespace
@@ -98,9 +178,8 @@ std::vector<PathPoint> SimplifyPhaseAwarePath(
            raw_path[end].phase == raw_path[begin].phase) {
       ++end;
     }
-    SimplifyOnePhase(view, raw_path.subspan(begin, end - begin), simplified,
-                     &control);
-    if (Interrupted(&control)) {
+    if (!SimplifyOnePhase(view, raw_path.subspan(begin, end - begin),
+                          simplified, &control)) {
       return {};
     }
     begin = end;

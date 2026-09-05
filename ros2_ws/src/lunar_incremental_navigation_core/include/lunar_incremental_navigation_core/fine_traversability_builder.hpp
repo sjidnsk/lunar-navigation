@@ -55,6 +55,7 @@ class FineCellEvaluator final {
   [[nodiscard]] FineCellEvaluation Evaluate(GridIndex index);
   [[nodiscard]] double hard_inflation_radius_m() const noexcept;
   [[nodiscard]] std::size_t evaluated_elevation_cells() const noexcept;
+  [[nodiscard]] std::size_t cached_elevation_tiles() const noexcept;
 
  private:
   struct Impl;
