@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from math import atan2, isfinite, sqrt
+from time import monotonic
 
 from geometry_msgs.msg import Twist
 from lunar_planning_msgs.msg import MotionReference
@@ -56,6 +57,15 @@ def incremental_path_qos() -> QoSProfile:
     )
 
 
+def state_input_qos() -> QoSProfile:
+    """Accept the navigator's best-effort odometry and TF input contract."""
+    return QoSProfile(
+        depth=10,
+        reliability=ReliabilityPolicy.BEST_EFFORT,
+        durability=DurabilityPolicy.VOLATILE,
+    )
+
+
 class PureWheeledControllerNode(Node):
     """Publishes bounded wheel commands for the latest valid reference."""
 
@@ -70,6 +80,8 @@ class PureWheeledControllerNode(Node):
             "execution_cancel_topic": "/Car/T4/execution/cancel",
             "tf_topic": "/tf",
             "control_rate_hz": 20.0,
+            "odometry_timeout_s": 0.5,
+            "tf_timeout_s": 0.5,
             "lookahead_m": 0.5,
             "max_linear_mps": 0.2,
             "max_angular_radps": 0.5,
@@ -112,10 +124,20 @@ class PureWheeledControllerNode(Node):
         control_rate_hz = float(self.get_parameter("control_rate_hz").value)
         if not isfinite(control_rate_hz) or control_rate_hz <= 0.0:
             raise ValueError("control_rate_hz must be finite and greater than zero")
+        self._odometry_timeout_s = float(
+            self.get_parameter("odometry_timeout_s").value
+        )
+        self._tf_timeout_s = float(self.get_parameter("tf_timeout_s").value)
+        if not isfinite(self._odometry_timeout_s) or self._odometry_timeout_s <= 0.0:
+            raise ValueError("odometry_timeout_s must be finite and greater than zero")
+        if not isfinite(self._tf_timeout_s) or self._tf_timeout_s <= 0.0:
+            raise ValueError("tf_timeout_s must be finite and greater than zero")
         self._active: ParsedReference | ParsedIncrementalPath | None = None
         self._trajectory_cursor = 0
         self._odometry: Odometry | None = None
+        self._odometry_received_at: float | None = None
         self._map_from_odom: MapFromOdom | None = None
+        self._map_from_odom_received_at: float | None = None
         self._commands = self.create_publisher(
             Twist, topics["command_topic"], 10
         )
@@ -123,7 +145,7 @@ class PureWheeledControllerNode(Node):
             Odometry,
             topics["odometry_topic"],
             self._on_odometry,
-            10,
+            state_input_qos(),
         )
         if self._input_mode == "motion_reference":
             self.create_subscription(
@@ -149,7 +171,7 @@ class PureWheeledControllerNode(Node):
                 TFMessage,
                 topics["tf_topic"],
                 self._on_tf,
-                10,
+                state_input_qos(),
             )
         self.create_timer(1.0 / control_rate_hz, self._tick)
 
@@ -187,18 +209,30 @@ class PureWheeledControllerNode(Node):
         update = parse_map_from_odom(message)
         if update.found:
             self._map_from_odom = update.transform
+            self._map_from_odom_received_at = (
+                monotonic() if update.transform is not None else None
+            )
             if update.transform is None:
                 self._publish_twist()
 
     def _on_odometry(self, odometry: Odometry) -> None:
         if _yaw(odometry) is None:
             self._odometry = None
+            self._odometry_received_at = None
             self._publish_twist()
             return
         self._odometry = odometry
+        self._odometry_received_at = monotonic()
 
     def _tick(self) -> None:
-        if self._active is None or self._odometry is None:
+        if (
+            self._active is None
+            or self._odometry is None
+            or self._input_is_stale(
+                self._odometry_received_at,
+                self._odometry_timeout_s,
+            )
+        ):
             self._publish_twist()
             return
         if self._input_mode == "incremental_path":
@@ -211,6 +245,10 @@ class PureWheeledControllerNode(Node):
             not isinstance(self._active, ParsedIncrementalPath)
             or self._odometry is None
             or self._map_from_odom is None
+            or self._input_is_stale(
+                self._map_from_odom_received_at,
+                self._tf_timeout_s,
+            )
         ):
             self._publish_twist()
             return
@@ -223,6 +261,10 @@ class PureWheeledControllerNode(Node):
         self._publish_twist(command.linear_x_mps, command.angular_z_radps)
         if command.complete or command.failure_reason is not None:
             self._clear_active()
+
+    @staticmethod
+    def _input_is_stale(received_at: float | None, timeout_s: float) -> bool:
+        return received_at is None or monotonic() - received_at > timeout_s
 
     def _tick_motion_reference(self) -> None:
         if not isinstance(self._active, ParsedReference) or self._odometry is None:

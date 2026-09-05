@@ -16,10 +16,12 @@ from std_msgs.msg import String
 from tf2_msgs.msg import TFMessage
 from trajectory_msgs.msg import MultiDOFJointTrajectoryPoint
 
+import lunar_pure_wheeled_controller.node as controller_module
 from lunar_pure_wheeled_controller.node import (
     PureWheeledControllerNode,
     _yaw,
     incremental_path_qos,
+    state_input_qos,
 )
 
 
@@ -261,6 +263,53 @@ def test_incremental_path_qos_is_reliable_transient_local_keep_last_one() -> Non
     assert qos.depth == 1
 
 
+def test_state_input_qos_is_best_effort_volatile_keep_last_ten() -> None:
+    qos = state_input_qos()
+
+    assert qos.reliability == ReliabilityPolicy.BEST_EFFORT
+    assert qos.durability == DurabilityPolicy.VOLATILE
+    assert qos.depth == 10
+
+
+def test_stale_incremental_inputs_stop_without_discarding_path(
+    incremental_controller_with_observer,
+    monkeypatch,
+) -> None:
+    clock = [0.0]
+    monkeypatch.setattr(controller_module, "monotonic", lambda: clock[0])
+    controller, observer, received = incremental_controller_with_observer
+
+    controller._on_path(
+        make_path(frame_id="map", points=[(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)])
+    )
+    controller._on_odometry(make_odometry(x=0.0))
+    controller._on_tf(make_direct_map_from_odom())
+    controller._tick()
+    wait_for_twists(controller, observer, received)
+    assert received[-1].linear.x > 0.0
+
+    clock[0] = 0.6
+    controller._on_tf(make_direct_map_from_odom())
+    controller._tick()
+    wait_for_twists(controller, observer, received, count=2)
+    assert received[-1].linear.x == 0.0
+    assert received[-1].angular.z == 0.0
+    assert controller._active is not None
+
+    controller._on_odometry(make_odometry(x=0.0))
+    controller._tick()
+    wait_for_twists(controller, observer, received, count=3)
+    assert received[-1].linear.x > 0.0
+
+    clock[0] = 1.2
+    controller._on_odometry(make_odometry(x=0.0))
+    controller._tick()
+    wait_for_twists(controller, observer, received, count=4)
+    assert received[-1].linear.x == 0.0
+    assert received[-1].angular.z == 0.0
+    assert controller._active is not None
+
+
 def test_reverse_trajectory_publishes_negative_linear_twist(controller_with_observer) -> None:
     """A mode-selection mutation that falls back to path tracking must fail this test."""
     controller, observer, received, _ = controller_with_observer
@@ -500,7 +549,11 @@ def test_default_topic_publishers_drive_bounded_twist() -> None:
     reference_publisher = inputs.create_publisher(
         MotionReference, "/Car/T4/planning/wheeled_reference", 10
     )
-    odometry_publisher = inputs.create_publisher(Odometry, "/Car/T3/localization/odometry", 10)
+    odometry_publisher = inputs.create_publisher(
+        Odometry,
+        "/Car/T3/localization/odometry",
+        state_input_qos(),
+    )
     received: list[Twist] = []
     observer.create_subscription(Twist, "/Car/T5/Car_Cmd_Vel", received.append, 10)
     for node in (controller, inputs, observer):
@@ -510,6 +563,57 @@ def test_default_topic_publishers_drive_bounded_twist() -> None:
         while time.monotonic() < deadline and not any(command.linear.x > 0.0 for command in received):
             reference_publisher.publish(make_reference())
             odometry_publisher.publish(make_odometry(x=0.0))
+            executor.spin_once(timeout_sec=0.01)
+
+        command = next(command for command in received if command.linear.x > 0.0)
+        assert 0.0 < command.linear.x <= 0.2
+        assert abs(command.angular.z) <= 0.5
+    finally:
+        executor.shutdown()
+        observer.destroy_node()
+        inputs.destroy_node()
+        controller.destroy_node()
+        rclpy.shutdown()
+
+
+def test_incremental_topics_accept_best_effort_state_publishers() -> None:
+    rclpy.init(args=["--ros-args", "-p", "input_mode:=incremental_path"])
+    controller = PureWheeledControllerNode()
+    inputs = rclpy.create_node("incremental_controller_best_effort_inputs")
+    observer = rclpy.create_node("incremental_controller_best_effort_observer")
+    executor = SingleThreadedExecutor()
+    path_publisher = inputs.create_publisher(
+        Path,
+        "/Car/T4/planning/local_path",
+        incremental_path_qos(),
+    )
+    odometry_publisher = inputs.create_publisher(
+        Odometry,
+        "/Car/T3/localization/odometry",
+        state_input_qos(),
+    )
+    tf_publisher = inputs.create_publisher(
+        TFMessage,
+        "/tf",
+        state_input_qos(),
+    )
+    received: list[Twist] = []
+    observer.create_subscription(Twist, "/Car/T5/Car_Cmd_Vel", received.append, 10)
+    for node in (controller, inputs, observer):
+        executor.add_node(node)
+    try:
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and not any(
+            command.linear.x > 0.0 for command in received
+        ):
+            path_publisher.publish(
+                make_path(
+                    frame_id="map",
+                    points=[(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)],
+                )
+            )
+            odometry_publisher.publish(make_odometry(x=0.0))
+            tf_publisher.publish(make_direct_map_from_odom())
             executor.spin_once(timeout_sec=0.01)
 
         command = next(command for command in received if command.linear.x > 0.0)
@@ -557,6 +661,16 @@ def test_node_uses_spec_goal_tolerance_parameter_names() -> None:
     finally:
         if node is not None:
             node.destroy_node()
+        rclpy.shutdown()
+
+
+@pytest.mark.parametrize("parameter_name", ["odometry_timeout_s", "tf_timeout_s"])
+def test_non_positive_state_input_timeout_is_rejected(parameter_name: str) -> None:
+    rclpy.init(args=["--ros-args", "-p", f"{parameter_name}:=0.0"])
+    try:
+        with pytest.raises(ValueError, match=parameter_name):
+            PureWheeledControllerNode()
+    finally:
         rclpy.shutdown()
 
 

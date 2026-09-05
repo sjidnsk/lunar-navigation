@@ -15,6 +15,8 @@ _PARAMETERS = {
     "execution_cancel_topic": "/Car/T4/execution/cancel",
     "tf_topic": "/tf",
     "control_rate_hz": "20.0",
+    "odometry_timeout_s": "0.5",
+    "tf_timeout_s": "0.5",
     "lookahead_m": "0.5",
     "max_linear_mps": "0.2",
     "max_angular_radps": "0.5",
