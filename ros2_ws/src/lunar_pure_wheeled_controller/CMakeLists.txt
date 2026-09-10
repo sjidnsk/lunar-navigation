@@ -22,6 +22,7 @@ install(DIRECTORY launch
 
 if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
+  ament_add_pytest_test(${PROJECT_NAME}_shutdown_test test/test_shutdown.py)
   ament_add_pytest_test(${PROJECT_NAME}_reference_test test/test_reference.py)
   ament_add_pytest_test(${PROJECT_NAME}_incremental_path_test test/test_incremental_path.py)
   ament_add_pytest_test(${PROJECT_NAME}_tracking_test test/test_tracking.py)
