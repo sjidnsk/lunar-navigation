@@ -1,4 +1,6 @@
 #include "lunar_incremental_navigation_core/wheel_local_planner.hpp"
+#include "lunar_incremental_navigation_core/local_goal_region.hpp"
+#include "lunar_incremental_navigation_core/arrival_tolerance.hpp"
 
 #include <algorithm>
 #include <array>
@@ -199,9 +201,12 @@ std::size_t WheelLocalPlanner::buffer_allocation_count() const noexcept {
 
 LocalPlanResult WheelLocalPlanner::Plan(
     const RequestLocalPlanningView& view, const Pose2& start,
-    const LocalTarget& target, const SearchDeadline deadline,
+    const LocalTarget& requested_target, const SearchDeadline deadline,
     const StopToken& stop) {
+  LocalTarget target = requested_target;
+  const auto region = target.region;
   LocalPlanResult result;
+  if (region) result.reason_code = "LOCAL_NO_PROGRESS";
   const SearchControl control{
       .deadline = deadline, .stop_token = stop, .now = config_.now};
   if (const auto interrupted = Interrupted(control)) {
@@ -243,8 +248,8 @@ LocalPlanResult WheelLocalPlanner::Plan(
   }
 
   const auto start_index = WorldToCell(geometry, start.position_m);
-  const auto goal_index = WorldToCell(geometry, target.center);
-  if (!start_index || !goal_index || !view.CanBeEndpoint(*goal_index)) {
+  auto goal_index = WorldToCell(geometry, target.center);
+  if (!start_index || (!region && (!goal_index || !view.CanBeEndpoint(*goal_index)))) {
     return result;
   }
   const LocalCellSource start_source = view.Source(*start_index);
@@ -277,14 +282,16 @@ LocalPlanResult WheelLocalPlanner::Plan(
     }
   };
   const auto heuristic = [&](const GridIndex index) {
+    if (region) return region->LowerBound(CellCenter(geometry, index));
     const double dx = static_cast<double>(index.x - goal_index->x);
     const double dy = static_cast<double>(index.y - goal_index->y);
     return std::hypot(dx, dy) * geometry.resolution_m();
   };
   const std::size_t start_offset = offset_of(*start_index);
   const bool supports_spin = SupportsSpin(capability_);
-  const auto terminal_feasible = [&](const std::size_t predecessor_offset) {
-    if (!target.is_final_goal || !target.terminal_yaw_rad) {
+  const auto terminal_feasible = [&](const std::size_t predecessor_offset,
+                                     const LocalTarget& terminal_target) {
+    if (!terminal_target.is_final_goal || !terminal_target.terminal_yaw_rad) {
       return true;
     }
     if (supports_spin) {
@@ -294,8 +301,8 @@ LocalPlanResult WheelLocalPlanner::Plan(
                             ? start.position_m
                             : CellCenter(geometry, index_of(predecessor_offset));
     return ArrivalYawIsFeasible(
-        {.x = from.x, .y = from.y}, target.center, start.yaw_rad,
-        *target.terminal_yaw_rad, config_.terminal_yaw_tolerance_rad);
+        {.x = from.x, .y = from.y}, terminal_target.center, start.yaw_rad,
+        *terminal_target.terminal_yaw_rad, config_.terminal_yaw_tolerance_rad);
   };
 
   initialize(start_offset);
@@ -319,7 +326,10 @@ LocalPlanResult WheelLocalPlanner::Plan(
       {-1, -1}, {1, -1}, {-1, 1}, {1, 1},
   }};
   std::optional<std::size_t> found;
+  bool reached_forward_unknown_boundary = false;
+  long double best_goal_cost = std::numeric_limits<long double>::infinity();
   while (!open.empty()) {
+    if (region && found && open.top().f >= best_goal_cost) break;
     if (const auto interrupted = Interrupted(control)) {
       result.status = *interrupted;
       return result;
@@ -338,8 +348,29 @@ LocalPlanResult WheelLocalPlanner::Plan(
         parent_[current.offset] == kInvalidParent
             ? current.offset
             : parent_[current.offset];
-    if (current_index == *goal_index &&
-        terminal_feasible(predecessor_offset)) {
+    if (region) {
+      // Only this platform's certified expanded states establish reachable
+      // missing evidence. The window-wide metadata does not establish it.
+      reached_forward_unknown_boundary |=
+          view.CanBeEndpoint(current_index) &&
+          region->HasForwardUnknownBoundaryAt(current_index);
+      const auto* candidate = region->At(current_index);
+      if (candidate &&
+          (candidate->target.is_final_goal || !WithinArrivalTolerance(
+              std::hypot(candidate->target.center.x-start.position_m.x,
+                         candidate->target.center.y-start.position_m.y),
+              requested_target.position_tolerance_m)) &&
+          view.CanBeEndpoint(current_index) &&
+          terminal_feasible(predecessor_offset, candidate->target)) {
+        const long double cost = current.g + candidate->remaining_cost;
+        if (cost < best_goal_cost) {
+          best_goal_cost = cost;
+          found = current.offset;
+          target = candidate->target;
+        }
+      }
+    } else if (current_index == *goal_index &&
+               terminal_feasible(predecessor_offset, target)) {
       found = current.offset;
       break;
     }
@@ -368,7 +399,10 @@ LocalPlanResult WheelLocalPlanner::Plan(
       }
       // Invalid terminal edges are not inserted, so the search continues to
       // other legal entering edges instead of accepting a position-only goal.
-      if (next == *goal_index && !terminal_feasible(current.offset)) {
+      const auto* next_candidate = region ? region->At(next) : nullptr;
+      if ((!region && next == *goal_index && !terminal_feasible(current.offset, target)) ||
+          (next_candidate && next_candidate->target.is_final_goal &&
+           !terminal_feasible(current.offset, next_candidate->target))) {
         continue;
       }
       const std::size_t next_offset = offset_of(next);
@@ -402,6 +436,9 @@ LocalPlanResult WheelLocalPlanner::Plan(
     }
   }
   if (!found) {
+    if (region && reached_forward_unknown_boundary) {
+      result.reason_code = "LOCAL_WAITING_FOR_MAP";
+    }
     return result;
   }
 
@@ -468,7 +505,10 @@ LocalPlanResult WheelLocalPlanner::Plan(
   if (!ApplyPathOrientations(result.raw_path, start.yaw_rad, requested_yaw,
                              control)) {
     result.status = Interrupted(control).value_or(
-        LocalPlanResult::Status::kTimeout);
+        LocalPlanResult::Status::kNoPath);
+    if (result.status == LocalPlanResult::Status::kNoPath) {
+      result.reason_code = "PATH_POSTPROCESS_FAILED";
+    }
     result.raw_path.clear();
     return result;
   }
@@ -483,7 +523,10 @@ LocalPlanResult WheelLocalPlanner::Plan(
       !ApplyPathOrientations(result.path, start.yaw_rad, requested_yaw,
                              control)) {
     result.status = Interrupted(control).value_or(
-        LocalPlanResult::Status::kTimeout);
+        LocalPlanResult::Status::kNoPath);
+    if (result.status == LocalPlanResult::Status::kNoPath) {
+      result.reason_code = "PATH_POSTPROCESS_FAILED";
+    }
     result.raw_path.clear();
     result.path.clear();
     return result;
@@ -528,6 +571,7 @@ LocalPlanResult WheelLocalPlanner::Plan(
     result.path.clear();
     return result;
   }
+  result.reason_code.clear();
   result.status = LocalPlanResult::Status::kPlanFound;
   result.reaches_final_goal = target.is_final_goal;
   result.postprocess_elapsed = SteadyClock::now() - postprocess_started;

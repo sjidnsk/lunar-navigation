@@ -1,11 +1,13 @@
 #include <chrono>
 #include <limits>
 #include <memory>
+#include <set>
 #include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
 
+#include "local/grid_supercover.hpp"
 #include "lunar_incremental_navigation_core/elevation_map.hpp"
 #include "lunar_incremental_navigation_core/wheel_local_planner.hpp"
 
@@ -58,6 +60,64 @@ namespace {
 [[nodiscard]] PathPoint P(const double x, const double y,
                           const StartPhase phase) {
   return PathPoint{.pose = {.position_m = {.x = x, .y = y}}, .phase = phase};
+}
+
+// Captured failing terminal edges from the real planned outbound/return probe.
+// Only the four cells touching the terminal corner intersect these segments.
+TEST(GridSupercover, CapturedTerminalCornersDoNotTraversePastTheEndpoint) {
+  const SparseGridGeometry geometry("map", 0.2, {.x = -12.0, .y = -12.0},
+                                    {.x = 0, .y = 0}, {.x = 120, .y = 120});
+  struct Case {
+    Vec3 from;
+    Vec3 to;
+    std::set<GridIndex> expected;
+  };
+  const std::vector<Case> cases{
+      {{.x = 7.900000000000001, .y = 0.10000000000000067},
+       {.x = 8.0, .y = 0.0}, {{99, 60}, {100, 60}, {99, 59}, {100, 59}}},
+      {{.x = 4.1000000000000005, .y = 4.900000000000001},
+       {.x = 4.0, .y = 5.0}, {{80, 84}, {79, 84}, {80, 85}, {79, 85}}}};
+  for (const auto& test : cases) {
+    for (const bool reverse : {false, true}) {
+      SCOPED_TRACE(reverse);
+      std::set<GridIndex> visited;
+      EXPECT_TRUE(local::VisitSupercoverCells(
+          geometry, reverse ? test.to : test.from,
+          reverse ? test.from : test.to, [&](const GridIndex index) {
+            visited.insert(index);
+            // Fail promptly if the implementation walks down the extension.
+            return test.expected.contains(index);
+          }));
+      EXPECT_EQ(visited, test.expected);
+      for (const GridIndex blocked : test.expected) {
+        // Termination must happen after ALL corner neighbours are certified.
+        EXPECT_FALSE(local::VisitSupercoverCells(
+            geometry, reverse ? test.to : test.from,
+            reverse ? test.from : test.to,
+            [&](const GridIndex index) { return index != blocked; }));
+      }
+    }
+  }
+}
+
+TEST(PhaseAwareSimplifier, PreservesSafeRawPathEndingAtMixedDirectionCorner) {
+  std::vector<std::pair<GridIndex, FineCellState>> cells;
+  for (std::int64_t y = 0; y < 4; ++y) {
+    for (std::int64_t x = 0; x < 8; ++x) {
+      cells.emplace_back(GridIndex{x, y}, FineCellState::kFree);
+    }
+  }
+  const auto fine = MakeFine(std::move(cells));
+  const RequestLocalPlanningView view(
+      fine, {.position_m = {.x = 0.5, .y = 2.5}}, 0.0, {});
+  const std::vector<PathPoint> raw{
+      P(0.5, 2.5, StartPhase::kNormal),
+      P(1.5, 2.5, StartPhase::kNormal),
+      P(2.0, 2.0, StartPhase::kNormal)};
+  const auto path = SimplifyPhaseAwarePath(view, raw);
+  ASSERT_FALSE(path.empty());
+  EXPECT_EQ(path.front().pose, raw.front().pose);
+  EXPECT_EQ(path.back().pose, raw.back().pose);
 }
 
 TEST(PhaseAwareSimplifier, SimplifiesPrefixAndNormalWithoutCrossingSwitch) {
@@ -219,36 +279,45 @@ TEST(PhaseAwareSimplifier,
   const auto fine = MakeFine(std::move(cells));
   const RequestLocalPlanningView view(
       fine, {.position_m = {.x = 0.5, .y = 0.5}}, 0.0, {});
-  std::vector<PathPoint> raw;
-  for (std::size_t step = 0U; step <= 40U; ++step) {
-    raw.push_back(P(0.5, 0.5 + 2.0 * static_cast<double>(step) / 40.0,
-                    StartPhase::kNormal));
-  }
-  for (std::size_t step = 1U; step <= 120U; ++step) {
-    raw.push_back(P(0.5 + 6.0 * static_cast<double>(step) / 120.0, 2.5,
-                    StartPhase::kNormal));
-  }
-  for (std::size_t step = 1U; step <= 40U; ++step) {
-    raw.push_back(P(6.5, 2.5 - 2.0 * static_cast<double>(step) / 40.0,
-                    StartPhase::kNormal));
-  }
-  std::size_t clock_checks = 0U;
-  const SearchControl control{
-      .deadline = SteadyClock::time_point::max(),
-      .now = [&] {
-        ++clock_checks;
-        return SteadyClock::time_point{};
-      }};
+  std::size_t sparse_probe_work = 0U;
+  for (const std::size_t density : {1U, 10U}) {
+    std::vector<PathPoint> raw;
+    for (std::size_t step = 0U; step <= 40U * density; ++step) {
+      raw.push_back(P(0.5, 0.5 + 2.0 * static_cast<double>(step) / (40.0 * density),
+                      StartPhase::kNormal));
+    }
+    for (std::size_t step = 1U; step <= 120U * density; ++step) {
+      raw.push_back(P(0.5 + 6.0 * static_cast<double>(step) / (120.0 * density), 2.5,
+                      StartPhase::kNormal));
+    }
+    for (std::size_t step = 1U; step <= 40U * density; ++step) {
+      raw.push_back(P(6.5, 2.5 - 2.0 * static_cast<double>(step) / (40.0 * density),
+                      StartPhase::kNormal));
+    }
+    std::size_t clock_checks = 0U;
+    const SearchControl control{
+        .deadline = SteadyClock::time_point::max(),
+        .now = [&] {
+          ++clock_checks;
+          return SteadyClock::time_point{};
+        }};
 
-  const auto simplified = SimplifyPhaseAwarePath(view, raw, control);
+    const auto simplified = SimplifyPhaseAwarePath(view, raw, control);
 
-  ASSERT_GE(simplified.size(), 4U);
-  EXPECT_EQ(simplified.front().pose, raw.front().pose);
-  EXPECT_EQ(simplified.back().pose, raw.back().pose);
-  // One interruption check per raw vertex keeps preprocessing cancelable;
-  // after that, this three-segment fixture needs only a small fixed number
-  // of LOS safety probes rather than rescanning all raw candidates.
-  EXPECT_LT(clock_checks, raw.size() + 50U);
+    ASSERT_EQ(simplified.size(), 4U);
+    EXPECT_EQ(simplified.front().pose, raw.front().pose);
+    EXPECT_EQ(simplified[1].pose, P(0.5, 2.5, StartPhase::kNormal).pose);
+    EXPECT_EQ(simplified[2].pose, P(6.5, 2.5, StartPhase::kNormal).pose);
+    EXPECT_EQ(simplified.back().pose, raw.back().pose);
+    // Preprocessing checks interruption once per raw vertex. Increasing input
+    // density tenfold must leave the remaining LOS work unchanged for this
+    // fixed geometry, including every conservative closed-cell contact. This
+    // detects rescanning dense candidates without encoding a visitor-count cap.
+    ASSERT_GE(clock_checks, raw.size());
+    const auto probe_work = clock_checks - raw.size();
+    if (density == 1U) sparse_probe_work = probe_work;
+    else EXPECT_EQ(probe_work, sparse_probe_work);
+  }
 }
 
 TEST(PhaseAwareSimplifier,

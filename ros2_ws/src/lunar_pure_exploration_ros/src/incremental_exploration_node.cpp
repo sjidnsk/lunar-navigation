@@ -2,11 +2,15 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <iterator>
 #include <limits>
+#include <list>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <numbers>
@@ -48,6 +52,7 @@ using Status = lunar_pure_exploration_msgs::msg::PureExplorationStatus;
 using Task = lunar_pure_exploration_msgs::msg::PureExplorationTask;
 using lunar::pure_exploration::CalculateCoverage;
 using lunar::pure_exploration::CandidateGain;
+using lunar::pure_exploration::CandidateKey;
 using lunar::pure_exploration::CandidateView;
 using lunar::pure_exploration::CoverageStats;
 using lunar::pure_exploration::FrontierCluster;
@@ -218,6 +223,239 @@ GridGeometry MapGeometry(const nav_msgs::msg::OccupancyGrid& map) {
           .origin_yaw = QuaternionYaw(map.info.origin.orientation)};
 }
 
+bool SameMapEvidence(const nav_msgs::msg::OccupancyGrid& left,
+                     const nav_msgs::msg::OccupancyGrid& right) {
+  const auto a = MapGeometry(left);
+  const auto b = MapGeometry(right);
+  return a.width == b.width && a.height == b.height &&
+         a.resolution == b.resolution && a.origin_x == b.origin_x &&
+         a.origin_y == b.origin_y && a.origin_yaw == b.origin_yaw &&
+         left.data == right.data;
+}
+
+// A successful observation is separate from a navigation failure. Keep the
+// coarse cells intersecting the full sensor-range disk, including UNKNOWN and
+// OutsideMap, so an unrelated map update cannot revive the same pose/yaw.
+class RecentObservationMemory final {
+ public:
+  RecentObservationMemory(const double range_m, const std::size_t entry_limit,
+                          const std::size_t patch_cell_limit)
+      : range_m_(range_m), entry_limit_(entry_limit),
+        patch_cell_limit_(patch_cell_limit) {}
+
+  void Clear() {
+    entries_.clear();
+    by_key_.clear();
+    patch_cells_ = 0U;
+    eviction_count_ = 0U;
+    invalidated_count_ = 0U;
+  }
+
+  bool Contains(const CandidateKey& key) const { return by_key_.contains(key); }
+  std::size_t size() const { return entries_.size(); }
+  std::size_t patch_cells() const { return patch_cells_; }
+  std::size_t entry_limit() const { return entry_limit_; }
+  std::size_t patch_cell_limit() const { return patch_cell_limit_; }
+  std::uint64_t eviction_count() const { return eviction_count_; }
+  std::uint64_t invalidated_count() const { return invalidated_count_; }
+
+  void InvalidateChanged(const nav_msgs::msg::OccupancyGrid& map) {
+    // Each stored cell is checked at most once per semantic map update. The
+    // sum of all patches is bounded by the existing visibility work budget.
+    for (auto entry = entries_.begin(); entry != entries_.end();) {
+      if (Matches(*entry, map)) {
+        ++entry;
+      } else {
+        entry = Erase(entry);
+        Increment(invalidated_count_);
+      }
+    }
+  }
+
+  void Record(const CandidateView& candidate,
+              const nav_msgs::msg::OccupancyGrid& map) {
+    Entry entry{.key = candidate.key, .patch = Layout(map, candidate.pose)};
+    const auto count = static_cast<std::size_t>(entry.patch.geometry.width) *
+                       entry.patch.geometry.height;
+    entry.states.reserve(count);
+    for (std::size_t index = 0U; index < count; ++index) {
+      entry.states.push_back(State(map, entry.patch, index));
+    }
+    if (const auto found = by_key_.find(candidate.key); found != by_key_.end()) {
+      Erase(found->second);
+    }
+    // Invalid evidence has already been removed on map receipt. Capacity
+    // pressure retires the oldest actual observation, never raises the
+    // navigation FailureMemory limit or labels a reached view as failed.
+    while (entries_.size() >= entry_limit_ ||
+           count > patch_cell_limit_ - patch_cells_) {
+      Erase(entries_.begin());
+      Increment(eviction_count_);
+    }
+    patch_cells_ += count;
+    entries_.push_back(std::move(entry));
+    by_key_.emplace(candidate.key, std::prev(entries_.end()));
+  }
+
+ private:
+  struct Patch final {
+    GridGeometry geometry;
+    std::int32_t minimum_x;
+    std::int32_t minimum_y;
+    Vec2 center_in_grid;
+    double range_cells;
+  };
+  struct Entry final {
+    CandidateKey key;
+    Patch patch;
+    std::vector<std::int8_t> states;
+  };
+
+  static void Increment(std::uint64_t& count) {
+    if (count != std::numeric_limits<std::uint64_t>::max()) {
+      ++count;
+    }
+  }
+
+  std::list<Entry>::iterator Erase(const std::list<Entry>::iterator entry) {
+    patch_cells_ -= entry->states.size();
+    by_key_.erase(entry->key);
+    return entries_.erase(entry);
+  }
+
+  Patch Layout(const nav_msgs::msg::OccupancyGrid& map, const Pose2& pose) const {
+    const auto source = MapGeometry(map);
+    const auto center = OccupancyGridView::WorldToGrid(source, {pose.x, pose.y});
+    const double radius = range_m_ / source.resolution;
+    if (!center || !std::isfinite(radius)) {
+      throw std::overflow_error{"observation patch grid transform overflow"};
+    }
+    const auto bound = [](const long double value) {
+      const auto rounded = std::floor(value);
+      if (rounded < std::numeric_limits<std::int32_t>::min() ||
+          rounded > std::numeric_limits<std::int32_t>::max()) {
+        throw std::overflow_error{"observation patch exceeds GridIndex range"};
+      }
+      return static_cast<std::int32_t>(rounded);
+    };
+    const auto minimum_x = bound(static_cast<long double>(center->x) - radius);
+    const auto minimum_y = bound(static_cast<long double>(center->y) - radius);
+    const auto maximum_x = bound(static_cast<long double>(center->x) + radius);
+    const auto maximum_y = bound(static_cast<long double>(center->y) + radius);
+    const auto width = static_cast<std::uint64_t>(
+        static_cast<std::int64_t>(maximum_x) - minimum_x) + 1U;
+    const auto height = static_cast<std::uint64_t>(
+        static_cast<std::int64_t>(maximum_y) - minimum_y) + 1U;
+    if (height > patch_cell_limit_ || width > patch_cell_limit_ / height ||
+        width > std::numeric_limits<std::uint32_t>::max() ||
+        height > std::numeric_limits<std::uint32_t>::max()) {
+      throw std::length_error{"observation sensor patch exceeds visibility work limit"};
+    }
+    const auto origin = OccupancyGridView::GridToWorld(
+        source, {static_cast<double>(minimum_x), static_cast<double>(minimum_y)});
+    if (!origin) {
+      throw std::overflow_error{"observation patch origin overflow"};
+    }
+    // Geometry belongs to this local patch. Growing map width/height or
+    // shifting an aligned map window elsewhere does not change its evidence.
+    return {.geometry = {.width = static_cast<std::uint32_t>(width),
+                         .height = static_cast<std::uint32_t>(height),
+                         .resolution = source.resolution,
+                         .origin_x = origin->x, .origin_y = origin->y,
+                         .origin_yaw = source.origin_yaw},
+            .minimum_x = minimum_x, .minimum_y = minimum_y,
+            .center_in_grid = *center, .range_cells = radius};
+  }
+
+  static std::int8_t State(const nav_msgs::msg::OccupancyGrid& map,
+                           const Patch& patch, const std::size_t index) {
+    const auto x = static_cast<std::int64_t>(patch.minimum_x) +
+                   static_cast<std::int64_t>(index % patch.geometry.width);
+    const auto y = static_cast<std::int64_t>(patch.minimum_y) +
+                   static_cast<std::int64_t>(index / patch.geometry.width);
+    const double dx = std::max({static_cast<double>(x) - patch.center_in_grid.x,
+                               patch.center_in_grid.x - static_cast<double>(x) - 1.0, 0.0});
+    const double dy = std::max({static_cast<double>(y) - patch.center_in_grid.y,
+                               patch.center_in_grid.y - static_cast<double>(y) - 1.0, 0.0});
+    if (dx * dx + dy * dy > patch.range_cells * patch.range_cells) {
+      return -3;  // Outside the sensor disk, not a map observation.
+    }
+    return MapState(map, x, y);
+  }
+
+  static std::int8_t MapState(const nav_msgs::msg::OccupancyGrid& map,
+                              const std::int64_t x, const std::int64_t y) {
+    if (x < 0 || y < 0 || x >= map.info.width || y >= map.info.height) {
+      return -2;  // OutsideMap remains distinct from map-backed UNKNOWN (-1).
+    }
+    return map.data[static_cast<std::size_t>(y) * map.info.width +
+                    static_cast<std::size_t>(x)];
+  }
+
+  bool Matches(const Entry& entry, const nav_msgs::msg::OccupancyGrid& map) const {
+    const auto source = MapGeometry(map);
+    const auto& previous = entry.patch.geometry;
+    if (source.resolution != previous.resolution ||
+        source.origin_yaw != previous.origin_yaw) {
+      return false;
+    }
+    const auto origin_in_grid = OccupancyGridView::WorldToGrid(
+        source, {previous.origin_x, previous.origin_y});
+    if (!origin_in_grid) {
+      return false;
+    }
+    // Reuse the stored patch lattice and sensor mask. Rebuilding either after
+    // an aligned window shift can introduce rounding differences at its origin
+    // or disk boundary. Permit only scaled floating-point roundoff, capped far
+    // below one cell; a physical fractional-cell shift still invalidates it.
+    const double scale = std::max({
+        1.0, std::abs(source.origin_x / source.resolution),
+        std::abs(source.origin_y / source.resolution),
+        std::abs(previous.origin_x / source.resolution),
+        std::abs(previous.origin_y / source.resolution),
+        std::abs(origin_in_grid->x), std::abs(origin_in_grid->y)});
+    const double tolerance = std::min(
+        1.0e-7, 32.0 * std::numeric_limits<double>::epsilon() * scale);
+    const auto aligned_index = [tolerance](const double coordinate)
+        -> std::optional<std::int32_t> {
+      const double rounded = std::round(coordinate);
+      if (std::abs(coordinate - rounded) > tolerance ||
+          rounded < std::numeric_limits<std::int32_t>::min() ||
+          rounded > std::numeric_limits<std::int32_t>::max()) {
+        return std::nullopt;
+      }
+      return static_cast<std::int32_t>(rounded);
+    };
+    const auto minimum_x = aligned_index(origin_in_grid->x);
+    const auto minimum_y = aligned_index(origin_in_grid->y);
+    if (!minimum_x || !minimum_y) {
+      return false;
+    }
+    for (std::size_t index = 0U; index < entry.states.size(); ++index) {
+      if (entry.states[index] == -3) {
+        continue;
+      }
+      const auto x = static_cast<std::int64_t>(*minimum_x) +
+                     static_cast<std::int64_t>(index % previous.width);
+      const auto y = static_cast<std::int64_t>(*minimum_y) +
+                     static_cast<std::int64_t>(index / previous.width);
+      if (entry.states[index] != MapState(map, x, y)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  double range_m_;
+  std::size_t entry_limit_;
+  std::size_t patch_cell_limit_;
+  std::size_t patch_cells_{0U};
+  std::uint64_t eviction_count_{0U};
+  std::uint64_t invalidated_count_{0U};
+  std::list<Entry> entries_;
+  std::map<CandidateKey, std::list<Entry>::iterator> by_key_;
+};
+
 GridGeometry FixedTaskGeometry(const GridGeometry& source,
                                const Polygon2& boundary) {
   long double minimum_x = 0.0L;
@@ -345,8 +583,9 @@ visualization_msgs::msg::MarkerArray BoundaryMarkers(
 struct IncrementalExplorationNode::Runtime final {
   struct ActiveGoal final {
     CandidateView candidate;
-    std::uint64_t map_sequence;
     std::uint64_t task_generation;
+    std::optional<rclcpp::Time> map_wait_started_at;
+    std::optional<std::uint64_t> map_wait_timeout_evidence_sequence;
   };
 
   Runtime(rclcpp::Node& node, IncrementalExplorationNodeParameters input)
@@ -360,6 +599,9 @@ struct IncrementalExplorationNode::Runtime final {
                candidate_generator.platform_length_m()),
         failure_memory(candidate_generator.platform_length_m(),
                        parameters.failure_memory_limits),
+        recent_observations(parameters.sensor_model.range_m,
+                            parameters.candidate_limits.maximum_candidate_views,
+                            parameters.information_gain_limits.maximum_visibility_work_units),
         clock(node.get_clock()),
         status_publisher(node.create_publisher<Status>(
             parameters.status_topic,
@@ -391,6 +633,7 @@ struct IncrementalExplorationNode::Runtime final {
   lunar::pure_exploration::InformationGainEvaluator information_gain;
   lunar::pure_exploration::CandidateRanker ranker;
   lunar::pure_exploration::FailureMemory failure_memory;
+  RecentObservationMemory recent_observations;
   PoseResolver pose_resolver;
   std::unique_ptr<NavigationClient> navigation_client;
   std::optional<nav_msgs::msg::OccupancyGrid> latest_map;
@@ -401,14 +644,17 @@ struct IncrementalExplorationNode::Runtime final {
   std::vector<FrontierCluster> frontiers;
   std::vector<CandidateView> candidates;
   std::vector<std::size_t> decision_order;
+  std::vector<bool> candidate_suppressed;
   std::optional<ActiveGoal> active_goal;
   std::optional<std::uint64_t> minimum_decision_map_sequence;
   std::string task_id;
   std::string reason_code{"IDLE"};
   std::uint8_t state{Status::IDLE};
   std::uint64_t exploration_map_sequence{0U};
+  std::uint64_t map_evidence_sequence{0U};
   std::uint64_t task_generation{0U};
   std::uint32_t completed_goal_count{0U};
+  std::uint32_t navigation_map_wait_timeout_count{0U};
   std::uint32_t map_backed_free_cell_count{0U};
   std::uint32_t reachable_candidate_count{0U};
   bool cancel_expected{false};
@@ -430,6 +676,15 @@ struct IncrementalExplorationNode::Runtime final {
 namespace {
 
 using Runtime = IncrementalExplorationNode::Runtime;
+
+double MapWaitElapsedSecondsLocked(const Runtime& runtime) {
+  if (!runtime.active_goal || !runtime.active_goal->map_wait_started_at) {
+    return 0.0;
+  }
+  const auto now = runtime.clock->now();
+  const auto started = *runtime.active_goal->map_wait_started_at;
+  return now >= started ? (now - started).seconds() : 0.0;
+}
 
 void PublishLocked(Runtime& runtime) {
   Status status;
@@ -477,8 +732,25 @@ void PublishLocked(Runtime& runtime) {
             *runtime.active_goal->candidate.frontier_canonical_key,
         .target = runtime.active_goal->candidate.pose};
   }
-  runtime.frontiers_publisher->publish(runtime.marker_builder.Build(
-      runtime.frontiers, runtime.candidates, selected));
+  auto frontier_markers = runtime.marker_builder.Build(
+      runtime.frontiers, runtime.candidates, selected);
+  for (auto& marker : frontier_markers.markers) {
+    marker.header = status.header;
+    if (marker.ns == "candidates" && marker.action == marker.ADD &&
+        marker.id >= 0 && static_cast<std::size_t>(marker.id) <
+                              runtime.candidate_suppressed.size()) {
+      const auto index = static_cast<std::size_t>(marker.id);
+      const bool active = runtime.active_goal &&
+          runtime.active_goal->candidate.key == runtime.candidates[index].key;
+      if (runtime.candidate_suppressed[index] && !active) {
+        marker.color.r = 0.5F;
+        marker.color.g = 0.5F;
+        marker.color.b = 0.5F;
+        marker.color.a = 0.25F;
+      }
+    }
+  }
+  runtime.frontiers_publisher->publish(std::move(frontier_markers));
 
   DiagnosticArray diagnostics;
   diagnostics.header = status.header;
@@ -496,18 +768,78 @@ void PublishLocked(Runtime& runtime) {
   candidate_count.key = "candidate_count";
   candidate_count.value = std::to_string(runtime.candidates.size());
   diagnostic.values.push_back(std::move(candidate_count));
+  KeyValue successful_candidate_count;
+  successful_candidate_count.key = "successful_candidate_count";
+  successful_candidate_count.value =
+      std::to_string(runtime.recent_observations.size());
+  diagnostic.values.push_back(std::move(successful_candidate_count));
+  const auto add_count = [&diagnostic](const char* key, const auto count) {
+    KeyValue value;
+    value.key = key;
+    value.value = std::to_string(count);
+    diagnostic.values.push_back(std::move(value));
+  };
+  add_count("eligible_candidate_count", runtime.reachable_candidate_count);
+  add_count("suppressed_candidate_count", std::count(
+      runtime.candidate_suppressed.begin(), runtime.candidate_suppressed.end(), true));
+  add_count("recent_observation_memory_count", runtime.recent_observations.size());
+  add_count("recent_observation_memory_patch_cells", runtime.recent_observations.patch_cells());
+  add_count("recent_observation_memory_entry_limit", runtime.recent_observations.entry_limit());
+  add_count("recent_observation_memory_patch_cell_limit", runtime.recent_observations.patch_cell_limit());
+  add_count("recent_observation_memory_eviction_count", runtime.recent_observations.eviction_count());
+  add_count("recent_observation_memory_invalidated_count", runtime.recent_observations.invalidated_count());
   KeyValue active_navigation;
   active_navigation.key = "active_navigation";
   active_navigation.value = runtime.active_goal ? "true" : "false";
   diagnostic.values.push_back(std::move(active_navigation));
+  KeyValue map_wait_elapsed;
+  map_wait_elapsed.key = "navigation_map_wait_elapsed_s";
+  map_wait_elapsed.value = std::to_string(MapWaitElapsedSecondsLocked(runtime));
+  diagnostic.values.push_back(std::move(map_wait_elapsed));
+  KeyValue map_wait_timeout;
+  map_wait_timeout.key = "navigation_map_wait_timeout_s";
+  map_wait_timeout.value =
+      std::to_string(runtime.parameters.navigation_map_wait_timeout_s);
+  diagnostic.values.push_back(std::move(map_wait_timeout));
+  KeyValue map_wait_cancel_pending;
+  map_wait_cancel_pending.key = "navigation_map_wait_cancel_pending";
+  map_wait_cancel_pending.value =
+      runtime.active_goal &&
+              runtime.active_goal->map_wait_timeout_evidence_sequence
+          ? "true" : "false";
+  diagnostic.values.push_back(std::move(map_wait_cancel_pending));
+  KeyValue map_wait_timeout_count;
+  map_wait_timeout_count.key = "navigation_map_wait_timeout_count";
+  map_wait_timeout_count.value =
+      std::to_string(runtime.navigation_map_wait_timeout_count);
+  diagnostic.values.push_back(std::move(map_wait_timeout_count));
   diagnostics.status.push_back(std::move(diagnostic));
   runtime.diagnostics_publisher->publish(std::move(diagnostics));
+}
+
+void RefreshCandidateSuppressionLocked(Runtime& runtime) {
+  runtime.candidate_suppressed.assign(runtime.candidates.size(), false);
+  runtime.reachable_candidate_count = 0U;
+  if (!runtime.raster) {
+    return;
+  }
+  for (std::size_t index = 0U; index < runtime.candidates.size(); ++index) {
+    runtime.candidate_suppressed[index] =
+        runtime.recent_observations.Contains(runtime.candidates[index].key) ||
+        runtime.failure_memory.IsSuppressed(runtime.candidates[index], *runtime.raster);
+  }
+  for (const auto index : runtime.decision_order) {
+    if (!runtime.candidate_suppressed.at(index)) {
+      ++runtime.reachable_candidate_count;
+    }
+  }
 }
 
 void RefreshDecisionLocked(Runtime& runtime) {
   runtime.frontiers.clear();
   runtime.candidates.clear();
   runtime.decision_order.clear();
+  runtime.candidate_suppressed.clear();
   runtime.map_backed_free_cell_count = 0U;
   runtime.reachable_candidate_count = 0U;
   if (!runtime.latest_map || !runtime.task_boundary) {
@@ -563,12 +895,7 @@ void RefreshDecisionLocked(Runtime& runtime) {
     runtime.decision_order.push_back(row.candidate_index);
   }
 
-  for (const std::size_t index : runtime.decision_order) {
-    if (!runtime.failure_memory.IsSuppressed(runtime.candidates.at(index),
-                                             *runtime.raster)) {
-      ++runtime.reachable_candidate_count;
-    }
-  }
+  RefreshCandidateSuppressionLocked(runtime);
 }
 
 void Decide(const std::shared_ptr<Runtime>& runtime) {
@@ -581,12 +908,17 @@ void Decide(const std::shared_ptr<Runtime>& runtime) {
       return;
     }
     if (!runtime->latest_map || !runtime->task_boundary ||
-        !runtime->pose_resolver.LatestPoseInMap() ||
-        (runtime->minimum_decision_map_sequence &&
-         runtime->exploration_map_sequence <
-             *runtime->minimum_decision_map_sequence)) {
+        !runtime->pose_resolver.LatestPoseInMap()) {
       runtime->state = Status::WAITING_FOR_INPUT;
       runtime->reason_code = "WAITING_FOR_INPUT";
+      PublishLocked(*runtime);
+      return;
+    }
+    if (runtime->minimum_decision_map_sequence &&
+        runtime->exploration_map_sequence <
+            *runtime->minimum_decision_map_sequence) {
+      // Pose updates do not satisfy a map wait or erase its specific reason.
+      runtime->state = Status::WAITING_FOR_INPUT;
       PublishLocked(*runtime);
       return;
     }
@@ -619,8 +951,7 @@ void Decide(const std::shared_ptr<Runtime>& runtime) {
 
       std::optional<std::size_t> selected;
       for (const auto index : runtime->decision_order) {
-        if (!runtime->failure_memory.IsSuppressed(
-                runtime->candidates.at(index), *runtime->raster)) {
+        if (!runtime->candidate_suppressed.at(index)) {
           selected = index;
           break;
         }
@@ -637,7 +968,6 @@ void Decide(const std::shared_ptr<Runtime>& runtime) {
       runtime->minimum_decision_map_sequence.reset();
       runtime->active_goal = Runtime::ActiveGoal{
           .candidate = runtime->candidates.at(*selected),
-          .map_sequence = runtime->exploration_map_sequence,
           .task_generation = runtime->task_generation};
       runtime->state = Status::PLANNING;
       runtime->reason_code = "NAVIGATION_GOAL_SUBMITTED";
@@ -681,8 +1011,12 @@ void HandleFeedback(const std::weak_ptr<Runtime>& weak_runtime,
   std::scoped_lock lock{runtime->mutex};
   if (runtime->teardown || !runtime->active_goal ||
       runtime->active_goal->task_generation != runtime->task_generation ||
-      runtime->state == Status::PAUSED || runtime->state == Status::IDLE) {
+      runtime->state == Status::PAUSED || runtime->state == Status::IDLE ||
+      runtime->cancel_expected) {
     return;
+  }
+  if (feedback != NavigationFeedbackState::kWaitingForMap) {
+    runtime->active_goal->map_wait_started_at.reset();
   }
   switch (feedback) {
     case NavigationFeedbackState::kPlanning:
@@ -697,7 +1031,49 @@ void HandleFeedback(const std::weak_ptr<Runtime>& weak_runtime,
       runtime->state = Status::REPLANNING;
       runtime->reason_code = "NAVIGATION_REPLANNING";
       break;
+    case NavigationFeedbackState::kWaitingForMap:
+      if (!runtime->active_goal->map_wait_started_at ||
+          runtime->clock->now() < *runtime->active_goal->map_wait_started_at) {
+        runtime->active_goal->map_wait_started_at = runtime->clock->now();
+      }
+      runtime->state = Status::WAITING_FOR_INPUT;
+      runtime->reason_code = "NAVIGATION_WAITING_FOR_MAP";
+      break;
   }
+  PublishLocked(*runtime);
+}
+
+void CheckNavigationMapWaitTimeout(const std::weak_ptr<Runtime>& weak_runtime) {
+  const auto runtime = weak_runtime.lock();
+  if (!runtime) {
+    return;
+  }
+  std::scoped_lock lock{runtime->mutex};
+  if (runtime->teardown || !runtime->active_goal || runtime->cancel_expected ||
+      runtime->active_goal->task_generation != runtime->task_generation ||
+      !runtime->active_goal->map_wait_started_at ||
+      runtime->state == Status::PAUSED || runtime->state == Status::IDLE ||
+      runtime->state == Status::ERROR ||
+      runtime->parameters.navigation_map_wait_timeout_s <= 0.0) {
+    return;
+  }
+  const auto now = runtime->clock->now();
+  if (now < *runtime->active_goal->map_wait_started_at) {
+    runtime->active_goal->map_wait_started_at = now;
+    return;
+  }
+  if (MapWaitElapsedSecondsLocked(*runtime) <
+      runtime->parameters.navigation_map_wait_timeout_s) {
+    return;
+  }
+  runtime->active_goal->map_wait_timeout_evidence_sequence =
+      runtime->map_evidence_sequence;
+  runtime->cancel_expected = true;
+  runtime->state = Status::WAITING_FOR_INPUT;
+  runtime->reason_code = "NAVIGATION_MAP_WAIT_TIMEOUT_CANCELING";
+  // Keep ownership until the navigator confirms a terminal result. Cancel
+  // acceptance alone is neither a completed goal nor evidence of no path.
+  runtime->navigation_client->CancelActive();
   PublishLocked(*runtime);
 }
 
@@ -730,11 +1106,25 @@ void HandleTerminal(const std::weak_ptr<Runtime>& weak_runtime,
               std::numeric_limits<std::uint32_t>::max()) {
             ++runtime->completed_goal_count;
           }
-          runtime->state = Status::WAITING_FOR_INPUT;
-          runtime->reason_code = "WAITING_FOR_MAP_AFTER_GOAL";
-          runtime->minimum_decision_map_sequence =
-              finished.map_sequence + 1U;
-          decide = runtime->exploration_map_sequence > finished.map_sequence;
+          // Use the latest local evidence even when this candidate vanished
+          // while navigation was active. START/CANCEL generation checks above
+          // prevent an old task's success from entering the new memory.
+          try {
+            runtime->recent_observations.Record(finished.candidate, *runtime->latest_map);
+          } catch (const std::exception& error) {
+            runtime->minimum_decision_map_sequence = runtime->exploration_map_sequence + 1U;
+            if (runtime->state != Status::PAUSED) {
+              runtime->state = Status::WAITING_FOR_INPUT;
+              runtime->reason_code = std::string{"RECENT_OBSERVATION_MEMORY_UNAVAILABLE: "} + error.what();
+            }
+            break;
+          }
+          runtime->minimum_decision_map_sequence.reset();
+          if (runtime->state != Status::PAUSED) {
+            runtime->state = Status::SELECTING_FRONTIER;
+            runtime->reason_code = "GOAL_REACHED";
+            decide = true;
+          }
           break;
         case Action::Result::NO_PATH:
         case Action::Result::INVALID_GOAL:
@@ -744,13 +1134,17 @@ void HandleTerminal(const std::weak_ptr<Runtime>& weak_runtime,
                 PersistentFailureReason::kNavigationNoPath,
                 *runtime->raster);
           }
-          runtime->state = Status::SELECTING_FRONTIER;
-          runtime->reason_code = terminal.reason_code;
-          decide = true;
+          if (runtime->state != Status::PAUSED) {
+            runtime->state = Status::SELECTING_FRONTIER;
+            runtime->reason_code = terminal.reason_code;
+            decide = true;
+          }
           break;
         case Action::Result::MAP_UNAVAILABLE:
-          runtime->state = Status::WAITING_FOR_INPUT;
-          runtime->reason_code = "MAP_UNAVAILABLE";
+          if (runtime->state != Status::PAUSED) {
+            runtime->state = Status::WAITING_FOR_INPUT;
+            runtime->reason_code = "MAP_UNAVAILABLE";
+          }
           runtime->minimum_decision_map_sequence =
               runtime->exploration_map_sequence + 1U;
           break;
@@ -761,12 +1155,48 @@ void HandleTerminal(const std::weak_ptr<Runtime>& weak_runtime,
                 PersistentFailureReason::kNavigationTimeout,
                 *runtime->raster);
           }
-          runtime->state = Status::SELECTING_FRONTIER;
-          runtime->reason_code = "NAVIGATION_TIMEOUT";
-          decide = true;
+          if (runtime->state != Status::PAUSED) {
+            runtime->state = Status::SELECTING_FRONTIER;
+            runtime->reason_code = "NAVIGATION_TIMEOUT";
+            decide = true;
+          }
           break;
         case Action::Result::CANCELED:
-          if (!expected_cancel) {
+          if (finished.map_wait_timeout_evidence_sequence) {
+            const bool same_evidence =
+                *finished.map_wait_timeout_evidence_sequence ==
+                runtime->map_evidence_sequence;
+            if (same_evidence) {
+              try {
+                if (!runtime->raster) {
+                  throw std::logic_error{"map-wait timeout has no task raster"};
+                }
+                runtime->failure_memory.RecordPersistentFailure(
+                    finished.candidate,
+                    PersistentFailureReason::kNavigationTimeout,
+                    *runtime->raster);
+              } catch (const std::exception& error) {
+                runtime->state = Status::ERROR;
+                runtime->reason_code =
+                    std::string{"NAVIGATION_MAP_WAIT_SUPPRESSION_FAILED: "} +
+                    error.what();
+                break;
+              }
+            }
+            if (runtime->navigation_map_wait_timeout_count !=
+                std::numeric_limits<std::uint32_t>::max()) {
+              ++runtime->navigation_map_wait_timeout_count;
+            }
+            runtime->minimum_decision_map_sequence.reset();
+            if (runtime->state != Status::PAUSED &&
+                runtime->state != Status::IDLE && runtime->state != Status::ERROR) {
+              runtime->state = Status::SELECTING_FRONTIER;
+              runtime->reason_code = same_evidence
+                  ? "NAVIGATION_MAP_WAIT_TIMEOUT"
+                  : "NAVIGATION_MAP_WAIT_CANCELED_AFTER_MAP_CHANGE";
+              decide = true;
+            }
+          } else if (!expected_cancel) {
             runtime->state = Status::WAITING_FOR_INPUT;
             runtime->reason_code = "UNEXPECTED_NAVIGATION_CANCELED";
             runtime->minimum_decision_map_sequence =
@@ -784,6 +1214,7 @@ void HandleTerminal(const std::weak_ptr<Runtime>& weak_runtime,
                                      : terminal.reason_code;
           break;
       }
+      RefreshCandidateSuppressionLocked(*runtime);
     }
     PublishLocked(*runtime);
   }
@@ -813,8 +1244,18 @@ void HandleMap(const std::weak_ptr<Runtime>& weak_runtime,
           std::numeric_limits<std::uint64_t>::max()) {
         throw std::overflow_error{"exploration map sequence exhausted"};
       }
+      const bool evidence_changed =
+          !runtime->latest_map || !SameMapEvidence(*runtime->latest_map, map);
       runtime->latest_map = map;
       ++runtime->exploration_map_sequence;
+      if (evidence_changed) {
+        runtime->recent_observations.InvalidateChanged(map);
+        runtime->map_evidence_sequence = runtime->exploration_map_sequence;
+        if (runtime->active_goal && runtime->active_goal->map_wait_started_at &&
+            !runtime->cancel_expected) {
+          runtime->active_goal->map_wait_started_at = runtime->clock->now();
+        }
+      }
       if (runtime->task_boundary) {
         RefreshDecisionLocked(*runtime);
       }
@@ -902,7 +1343,10 @@ void HandleTask(const std::weak_ptr<Runtime>& weak_runtime,
         runtime->task_boundary = std::move(start_boundary);
         runtime->task_grid_geometry.reset();
         runtime->failure_memory.BeginTask(runtime->task_id);
+        runtime->recent_observations.Clear();
+        runtime->candidate_suppressed.assign(runtime->candidates.size(), false);
         runtime->completed_goal_count = 0U;
+        runtime->navigation_map_wait_timeout_count = 0U;
         runtime->minimum_decision_map_sequence.reset();
         runtime->state = Status::WAITING_FOR_INPUT;
         runtime->reason_code = "WAITING_FOR_INPUT";
@@ -915,6 +1359,9 @@ void HandleTask(const std::weak_ptr<Runtime>& weak_runtime,
         if (!runtime->task_id.empty()) {
           cancel = true;
           runtime->cancel_expected = runtime->active_goal.has_value();
+          if (runtime->active_goal) {
+            runtime->active_goal->map_wait_started_at.reset();
+          }
           runtime->state = Status::PAUSED;
           runtime->reason_code = "PAUSED";
         }
@@ -940,7 +1387,10 @@ void HandleTask(const std::weak_ptr<Runtime>& weak_runtime,
         runtime->frontiers.clear();
         runtime->candidates.clear();
         runtime->decision_order.clear();
+        runtime->recent_observations.Clear();
+        runtime->candidate_suppressed.clear();
         runtime->map_backed_free_cell_count = 0U;
+        runtime->reachable_candidate_count = 0U;
         runtime->minimum_decision_map_sequence.reset();
         runtime->state = Status::IDLE;
         runtime->reason_code = "CANCELED";
@@ -976,6 +1426,13 @@ IncrementalExplorationNode::IncrementalExplorationNode(
 
 void IncrementalExplorationNode::Initialize(
     IncrementalExplorationNodeParameters parameters) {
+  parameters.navigation_map_wait_timeout_s = declare_parameter<double>(
+      "navigation_map_wait_timeout_s", parameters.navigation_map_wait_timeout_s);
+  if (!std::isfinite(parameters.navigation_map_wait_timeout_s) ||
+      parameters.navigation_map_wait_timeout_s < 0.0) {
+    throw std::invalid_argument{
+        "navigation_map_wait_timeout_s must be finite and nonnegative"};
+  }
   auto runtime = std::make_shared<Runtime>(*this, std::move(parameters));
   const std::weak_ptr<Runtime> weak_runtime{runtime};
   runtime->navigation_client = std::make_unique<NavigationClient>(
@@ -1015,11 +1472,18 @@ void IncrementalExplorationNode::Initialize(
         HandleTask(weak_runtime, *task);
       });
   runtime_ = std::move(runtime);
+  if (runtime_->parameters.navigation_map_wait_timeout_s > 0.0) {
+    navigation_map_wait_timer_ = create_wall_timer(
+        std::chrono::milliseconds{50}, [weak_runtime] {
+          CheckNavigationMapWaitTimeout(weak_runtime);
+        });
+  }
   std::scoped_lock lock{runtime_->mutex};
   PublishLocked(*runtime_);
 }
 
 IncrementalExplorationNode::~IncrementalExplorationNode() noexcept {
+  navigation_map_wait_timer_.reset();
   if (!runtime_) {
     return;
   }

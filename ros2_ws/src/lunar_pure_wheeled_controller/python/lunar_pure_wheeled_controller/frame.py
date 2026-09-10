@@ -67,6 +67,8 @@ def map_tracking_state(
         transform_x_m = float(transform.x_m)
         transform_y_m = float(transform.y_m)
         transform_yaw_rad = float(transform.yaw_rad)
+        linear_mps = float(odometry.twist.twist.linear.x)
+        angular_radps = float(odometry.twist.twist.angular.z)
     except (AttributeError, TypeError, ValueError, OverflowError):
         return None
     yaw_rad = yaw_from_quaternion(
@@ -78,6 +80,8 @@ def map_tracking_state(
     if not all(math.isfinite(value) for value in (
         odometry_x_m,
         odometry_y_m,
+        linear_mps,
+        angular_radps,
         transform_x_m,
         transform_yaw_rad,
         transform_y_m,
@@ -93,4 +97,6 @@ def map_tracking_state(
             math.sin(transform_yaw_rad + yaw_rad),
             math.cos(transform_yaw_rad + yaw_rad),
         ),
+        linear_mps,
+        angular_radps,
     )

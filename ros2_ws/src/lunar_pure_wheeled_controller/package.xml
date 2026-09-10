@@ -14,6 +14,7 @@
   <depend>std_msgs</depend>
   <depend>tf2_msgs</depend>
   <depend>lunar_planning_msgs</depend>
+  <exec_depend>python3-yaml</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <test_depend>ament_cmake_pytest</test_depend>

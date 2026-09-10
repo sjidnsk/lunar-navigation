@@ -27,6 +27,7 @@ set(LUNAR_INCREMENTAL_NAVIGATION_PRODUCTION_SOURCES
   src/global/global_route_planner.cpp
   src/local/local_planning_window.cpp
   src/local/local_target_selector.cpp
+  src/local/local_goal_region.cpp
   src/local/request_local_start_patch.cpp
   src/local/phase_aware_path_simplifier.cpp
   src/session/planning_session_coordinator.cpp
@@ -97,6 +98,9 @@ if(BUILD_TESTING)
   lunar_add_core_gtest(
     lunar_incremental_navigation_core_global_route_planner_v2_test
     test/global_route_planner_v2_test.cpp)
+  lunar_add_core_gtest(
+    lunar_incremental_navigation_core_reachable_local_goals_test
+    test/reachable_local_goals_test.cpp)
   lunar_add_core_gtest(
     lunar_incremental_navigation_core_local_target_selector_test
     test/local_target_selector_test.cpp)

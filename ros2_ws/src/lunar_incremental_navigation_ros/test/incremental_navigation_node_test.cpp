@@ -18,6 +18,7 @@
 #include <grid_map_msgs/msg/grid_map.hpp>
 #include <lunar_planning_msgs/action/navigate_to_pose.hpp>
 #include <lunar_planning_msgs/msg/path_reference.hpp>
+#include <lunar_planning_msgs/msg/tracking_status.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
@@ -120,7 +121,8 @@ bool WaitFor(Predicate&& predicate,
 }
 
 [[nodiscard]] std::shared_ptr<const core::FineTraversabilitySnapshot>
-MakeFine() {
+MakeFine(const std::uint64_t revision = 1U,
+         const std::optional<core::GridIndex> blocked = std::nullopt) {
   core::PersistentElevationMap map;
   const core::GridGeometry geometry{.frame_id = "map",
                                     .width = 8U,
@@ -146,12 +148,13 @@ MakeFine() {
           core::FineCellState::kFree;
     }
   }
+  if (blocked) states[core::TileCellOffset(*blocked)] = core::FineCellState::kBlocked;
   auto tile = std::make_shared<const core::FineTraversabilityTile>(
       std::move(states), std::move(costs));
   core::FineTraversabilityTileDirectory directory(raw->geometry());
   directory = directory.WithTile(core::TileIndex{}, std::move(tile));
   return std::make_shared<const core::FineTraversabilitySnapshot>(
-      raw->geometry(), raw->raw_elevation_revision(), 1U, "test-profile",
+      raw->geometry(), raw->raw_elevation_revision(), revision, "test-profile",
       0.25, 0.0, core::TraversalCostWeights{}, raw, std::move(directory),
       std::vector<core::TileIndex>{core::TileIndex{}},
       std::vector<core::TileIndex>{core::TileIndex{}},
@@ -413,6 +416,8 @@ struct TimingOverrides final {
   rclcpp::NodeOptions options;
   options.arguments({"--ros-args", "-r", "__node:=incremental_navigation_" + suffix});
   options.parameter_overrides({
+      rclcpp::Parameter{"enable_tracking_feedback", suffix.starts_with("tracking_")},
+      rclcpp::Parameter{"tracking_status_topic", "/test/" + suffix + "/tracking"},
       rclcpp::Parameter{"platform_type", "wheel"},
       rclcpp::Parameter{"platform_config",
                         std::string{LUNAR_INCREMENTAL_NAVIGATION_CONFIG_DIR} +
@@ -1295,6 +1300,149 @@ TEST(IncrementalNavigationNode,
   EXPECT_EQ(paths[0].segment_revision, 1U);
   EXPECT_EQ(paths[1].segment_revision, 2U);
   system.Cancel(handle);
+}
+
+TEST(IncrementalNavigationNode, TrackingCompletionRequiresMatchingStoppedFeedbackAfterPoseArrival) {
+  auto control = std::make_shared<FakeControl>();
+  control->reaches_final_goal = true;
+  auto states = std::make_shared<StateQueue>();
+  RunningSystem system("tracking_completed", IncrementalNavigationNodeDependencies{
+      .ports_factory = FakePorts(control),
+      .snapshots = core::SnapshotBundle{.fine = MakeFine()},
+      .state = core::StateInput{.base_link_pose = {.position_m = {.x = 0.5, .y = 0.5}}},
+      .state_source = [states] { return states->Take(); },
+  });
+  auto producer = rclcpp::Node::make_shared("tracking_completed_publisher");
+  auto publisher = producer->create_publisher<lunar_planning_msgs::msg::TrackingStatus>(
+      "/test/tracking_completed/tracking", 10);
+  ASSERT_TRUE(WaitFor([&] { return publisher->get_subscription_count() > 0; }));
+  auto goal = system.Send(3.5, 0.5);
+  ASSERT_TRUE(goal);
+  ASSERT_TRUE(WaitFor([&] { return !system.Paths().empty(); }));
+  auto result = system.Result(goal);
+  states->Push({.position_m = {.x = 3.5, .y = 0.5}});
+  EXPECT_EQ(result.wait_for(150ms), std::future_status::timeout);
+  lunar_planning_msgs::msg::TrackingStatus status;
+  status.session_id.uuid = goal->get_goal_id();
+  status.segment_revision = 1;
+  status.state = status.COMPLETED;
+  status.linear_speed_mps = 0.2;
+  publisher->publish(status);
+  EXPECT_EQ(result.wait_for(80ms), std::future_status::timeout);
+  status.linear_speed_mps = 0.;
+  status.segment_revision = 0;
+  publisher->publish(status);
+  EXPECT_EQ(result.wait_for(80ms), std::future_status::timeout);
+  status.segment_revision = 1;
+  status.session_id.uuid[0] ^= 1;
+  publisher->publish(status);
+  EXPECT_EQ(result.wait_for(80ms), std::future_status::timeout);
+  status.session_id.uuid = goal->get_goal_id();
+  publisher->publish(status);
+  ASSERT_EQ(result.wait_for(3s), std::future_status::ready);
+  const auto wrapped = result.get();
+  EXPECT_EQ(wrapped.code, rclcpp_action::ResultCode::SUCCEEDED);
+  ASSERT_TRUE(wrapped.result);
+  EXPECT_EQ(wrapped.result->outcome, Action::Result::GOAL_REACHED);
+  EXPECT_EQ(wrapped.result->last_segment_revision, 1U);
+}
+
+TEST(IncrementalNavigationNode, PendingFineCollisionInvalidatesBeforeMatchingCompletion) {
+  auto control = std::make_shared<FakeControl>();
+  control->reaches_final_goal = true;
+  // Once the old reference is invalidated, a replacement cannot be certified.
+  control->fail_local_after_calls = 1U;
+  auto states = std::make_shared<StateQueue>();
+  auto gate = std::make_shared<CallbackGate>();
+  auto log = std::make_shared<EventLog>();
+  auto inject_map = std::make_shared<std::atomic<bool>>(false);
+  const auto blocked = MakeFine(2U, core::GridIndex{.x = 3, .y = 0});
+  RunningSystem system("tracking_collision", IncrementalNavigationNodeDependencies{
+      .ports_factory = FakePorts(control),
+      .snapshots = core::SnapshotBundle{.fine = MakeFine()},
+      .state = core::StateInput{.base_link_pose = {.position_m = {.x = 0.5, .y = 0.5}}},
+      .state_source = [states, gate] { gate->WaitIfArmed(); return states->Take(); },
+      .snapshot_source = [inject_map, blocked]() -> std::optional<core::SnapshotBundle> {
+        if (inject_map->exchange(false)) return core::SnapshotBundle{.fine = blocked};
+        return std::nullopt;
+      },
+      .event_sink = [log](const std::string& event) { log->Push(event); },
+  });
+  auto producer = rclcpp::Node::make_shared("tracking_collision_publisher");
+  auto publisher = producer->create_publisher<lunar_planning_msgs::msg::TrackingStatus>(
+      "/test/tracking_collision/tracking", 10);
+  ASSERT_TRUE(WaitFor([&] { return publisher->get_subscription_count() > 0; }));
+  auto goal = system.Send(3.5, 0.5);
+  ASSERT_TRUE(goal);
+  ASSERT_TRUE(WaitFor([&] { return !system.Paths().empty(); }));
+  auto result = system.Result(goal);
+  gate->Arm();
+  const bool entered = gate->WaitUntilEntered();
+  if (!entered) gate->Release();
+  ASSERT_TRUE(entered);
+  states->Push({.position_m = {.x = 3.5, .y = 0.5}});
+  inject_map->store(true);
+  lunar_planning_msgs::msg::TrackingStatus status;
+  status.session_id.uuid = goal->get_goal_id();
+  status.segment_revision = 1;
+  status.state = status.COMPLETED;
+  publisher->publish(status);
+  // The planning tick is held before capturing either event. A callback-level
+  // receipt proves completion is pending before the new snapshot is captured.
+  const bool received = WaitFor([&] {
+    const auto events = log->Copy();
+    return std::find(events.begin(), events.end(), "tracking:RECEIVED") != events.end();
+  });
+  gate->Release();
+  ASSERT_TRUE(received);
+  ASSERT_EQ(result.wait_for(3s), std::future_status::ready);
+  const auto wrapped = result.get();
+  EXPECT_EQ(wrapped.code, rclcpp_action::ResultCode::ABORTED);
+  ASSERT_TRUE(wrapped.result);
+  EXPECT_EQ(wrapped.result->outcome, Action::Result::NO_PATH);
+  ASSERT_TRUE(WaitFor([&] { return system.Paths().size() >= 2U; }));
+  const auto paths = system.Paths();
+  EXPECT_EQ(paths[1].state, paths[1].INVALIDATED);
+  EXPECT_EQ(paths[1].traversability_revision, 2U);
+  EXPECT_EQ(control->local_calls, 2U);
+}
+
+TEST(IncrementalNavigationNode, StoppedMatchingTrackingFailureReplansAndStaleFeedbackIsIgnored) {
+  auto control = std::make_shared<FakeControl>();
+  control->segment_ends = {{.x = 3.5, .y = 0.5}};
+  RunningSystem system("tracking_failure", IncrementalNavigationNodeDependencies{
+      .ports_factory = FakePorts(control),
+      .snapshots = core::SnapshotBundle{.fine = MakeFine()},
+      .state = core::StateInput{.base_link_pose = {.position_m = {.x = 0.5, .y = 0.5}}},
+  });
+  auto publisher_node = rclcpp::Node::make_shared("tracking_failure_publisher");
+  auto publisher = publisher_node->create_publisher<lunar_planning_msgs::msg::TrackingStatus>(
+      "/test/tracking_failure/tracking", 10);
+  ASSERT_TRUE(WaitFor([&] { return publisher->get_subscription_count() > 0; }));
+  auto goal = system.Send(7.5, 0.5);
+  ASSERT_TRUE(goal);
+  ASSERT_TRUE(WaitFor([&] { return !system.Paths().empty(); }));
+  lunar_planning_msgs::msg::TrackingStatus status;
+  status.session_id.uuid = goal->get_goal_id();
+  status.segment_revision = 1;
+  status.state = status.FAILED;
+  status.linear_speed_mps = 0.2;
+  publisher->publish(status);
+  std::this_thread::sleep_for(80ms);
+  EXPECT_EQ(system.Paths().size(), 1U);
+  status.linear_speed_mps = 0.;
+  status.session_id.uuid[0] ^= 1;
+  publisher->publish(status);
+  std::this_thread::sleep_for(80ms);
+  EXPECT_EQ(system.Paths().size(), 1U);
+  status.session_id.uuid = goal->get_goal_id();
+  publisher->publish(status);
+  ASSERT_TRUE(WaitFor([&] { return system.Paths().size() >= 3U; }));
+  EXPECT_EQ(system.Paths().back().segment_revision, 2U);
+  publisher->publish(status);
+  std::this_thread::sleep_for(80ms);
+  EXPECT_EQ(system.Paths().size(), 3U);
+  system.Cancel(goal);
 }
 
 TEST(IncrementalNavigationNode,

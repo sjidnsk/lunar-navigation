@@ -73,6 +73,8 @@ TEST(PlatformConfig, UsesApprovedPrimitiveIdsAndOrder) {
   ASSERT_TRUE(wheel_result.capability.has_value());
   const auto& wheel = std::get<lunar::pure_planning::WheeledCapability>(
       *wheel_result.capability);
+  EXPECT_DOUBLE_EQ(wheel.maximum_forward_speed_mps, 0.2);
+  EXPECT_DOUBLE_EQ(wheel.maximum_reverse_speed_mps, 0.2);
   const std::vector<std::string> wheel_ids{
       "forward", "reverse", "forward-arc-left", "forward-arc-right",
       "reverse-arc-left", "reverse-arc-right", "spin-left", "spin-right",

@@ -8,6 +8,7 @@
 #include <numbers>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -548,6 +549,152 @@ TEST(FineTraversabilityBuilder,
             first->TraversalCost({.x = 10, .y = 8}));
   EXPECT_GT(second->TraversalCost({.x = 100, .y = 8}),
             first->TraversalCost({.x = 100, .y = 8}));
+}
+
+TEST(FineTraversabilityBuilder,
+     GeometryGrowthDerivesNewBlockedHaloInEveryDirectionAndAtCorners) {
+  struct GrowthCase {
+    GridIndex surface;
+    GridIndex probe;
+    GridIndex distant_ground;
+  };
+  const std::array cases{
+      GrowthCase{{16, 0}, {16, -1}, {-20, -20}},
+      GrowthCase{{16, 7}, {16, 8}, {80, 80}},
+      GrowthCase{{0, 4}, {-1, 4}, {-20, 40}},
+      GrowthCase{{31, 4}, {32, 4}, {80, -20}},
+      GrowthCase{{0, 0}, {-1, -1}, {-20, -20}},
+      GrowthCase{{31, 7}, {32, 8}, {80, 80}},
+  };
+  for (const auto& fixture : cases) {
+    SCOPED_TRACE("probe " + std::to_string(fixture.probe.x) + "," +
+                 std::to_string(fixture.probe.y));
+    PersistentElevationMap map;
+    const GridGeometry geometry = Geometry(32U, 8U);
+    std::vector<float> values(geometry.CellCount(), 0.0F);
+    values[Offset(geometry, fixture.surface)] = 1.3F;
+    const auto first_raw = Snapshot(map, geometry, values);
+    const auto capability = WheelCapability();
+    const auto profile = Profile(0.25, 0.01, 0.0, {});
+    FineTraversabilityBuilder builder;
+    const auto first = builder.Derive(first_raw, capability, profile);
+    ASSERT_FALSE(first_raw->geometry().Contains(fixture.probe));
+    const GridGeometry ground_update{
+        .frame_id = "map", .width = 1U, .height = 1U,
+        .resolution_m = geometry.resolution_m,
+        .origin_m = {.x = fixture.distant_ground.x * geometry.resolution_m,
+                     .y = fixture.distant_ground.y * geometry.resolution_m}};
+    ASSERT_EQ(Apply(map, ground_update, {0.0F}).status,
+              ElevationUpdateResult::Status::kApplied);
+    const auto final_raw = map.Snapshot();
+    ASSERT_TRUE(final_raw->IsDirectSuccessorOf(*first_raw));
+    ASSERT_EQ(final_raw->changed_cells().size(), 1U);
+    ASSERT_EQ(first_raw->ElevationRangeAt(fixture.surface),
+              final_raw->ElevationRangeAt(fixture.surface));
+    ASSERT_TRUE(final_raw->geometry().Contains(fixture.probe));
+    ASSERT_FALSE(final_raw->ElevationRangeAt(fixture.probe));
+
+    const auto incremental =
+        builder.Derive(final_raw, capability, profile, first);
+    const auto fresh = builder.Derive(final_raw, capability, profile);
+    FineCellEvaluator evaluator(*final_raw, capability, profile);
+    ASSERT_EQ(incremental->elevation(), fresh->elevation());
+    EXPECT_EQ(evaluator.Evaluate(fixture.probe).state, FineCellState::kBlocked);
+    EXPECT_EQ(fresh->State(fixture.probe), FineCellState::kBlocked);
+    EXPECT_EQ(incremental->State(fixture.probe), FineCellState::kBlocked);
+    std::size_t state_mismatches = 0U;
+    std::size_t cost_mismatches = 0U;
+    for (auto y = final_raw->geometry().min_inclusive().y;
+         y < final_raw->geometry().max_exclusive().y; ++y) {
+      for (auto x = final_raw->geometry().min_inclusive().x;
+           x < final_raw->geometry().max_exclusive().x; ++x) {
+        const GridIndex cell{.x = x, .y = y};
+        state_mismatches += incremental->State(cell) != fresh->State(cell);
+        cost_mismatches +=
+            incremental->TraversalCost(cell) != fresh->TraversalCost(cell);
+      }
+    }
+    EXPECT_EQ(state_mismatches, 0U);
+    EXPECT_EQ(cost_mismatches, 0U);
+    const auto halo = incremental->changed_halo_tiles();
+    EXPECT_NE(std::find(halo.begin(), halo.end(), TileForCell(fixture.probe)),
+              halo.end());
+    EXPECT_EQ(first->State(fixture.probe), FineCellState::kUnknown);
+  }
+}
+
+TEST(FineTraversabilityBuilder,
+     MergedGeometryGrowthDerivesPreviouslyOutOfBoundsBlockedHalo) {
+  PersistentElevationMap map;
+  const GridGeometry geometry = Geometry(32U, 8U);
+  std::vector<float> values(geometry.CellCount(), 0.0F);
+  values[Offset(geometry, {16, 0})] = 1.3F;
+  const auto first_raw = Snapshot(map, geometry, values);
+  const auto capability = WheelCapability();
+  const auto profile = Profile(0.25, 0.01, 0.0, {});
+  FineTraversabilityBuilder builder;
+  const auto first = builder.Derive(first_raw, capability, profile);
+  std::vector<GridIndex> merged_cells;
+  for (const auto coordinate : {-20, -25}) {
+    const GridGeometry update{
+        .frame_id = "map", .width = 1U, .height = 1U,
+        .resolution_m = geometry.resolution_m,
+        .origin_m = {.x = coordinate * geometry.resolution_m,
+                     .y = coordinate * geometry.resolution_m}};
+    ASSERT_EQ(Apply(map, update, {0.0F}).status,
+              ElevationUpdateResult::Status::kApplied);
+    const auto changed = map.Snapshot()->changed_cells();
+    merged_cells.insert(merged_cells.end(), changed.begin(), changed.end());
+  }
+  const auto final_raw = map.Snapshot();
+  ASSERT_FALSE(final_raw->IsDirectSuccessorOf(*first_raw));
+  const auto incremental = builder.Derive(
+      final_raw, capability, profile, first,
+      FineElevationChangeSet{
+          .base_raw_elevation_revision = first_raw->raw_elevation_revision(),
+          .changed_cells = merged_cells});
+  const auto fresh = builder.Derive(final_raw, capability, profile);
+  const GridIndex probe{16, -1};
+  ASSERT_FALSE(final_raw->ElevationRangeAt(probe));
+  EXPECT_EQ(incremental->State(probe), FineCellState::kBlocked);
+  EXPECT_EQ(incremental->State(probe), fresh->State(probe));
+}
+
+TEST(FineTraversabilityBuilder,
+     DistantGroundGrowthWorkRemainsBoundedBySparseTiles) {
+  PersistentElevationMap map;
+  const GridGeometry geometry = Geometry(520U, 16U);
+  std::vector<float> values(geometry.CellCount(), 0.0F);
+  values[Offset(geometry, {16, 0})] = 1.3F;
+  const auto first_raw = Snapshot(map, geometry, values);
+  const auto capability = WheelCapability();
+  const auto profile = Profile(0.25, 0.01, 0.0, {});
+  FineTraversabilityBuilder builder;
+  const auto first = builder.Derive(first_raw, capability, profile);
+  const auto unchanged_tile = first->FindTile({2, 0});
+  ASSERT_TRUE(unchanged_tile);
+  const GridGeometry distant_ground{
+      .frame_id = "map", .width = 1U, .height = 1U,
+      .resolution_m = geometry.resolution_m,
+      .origin_m = {.x = -200000.0, .y = -200000.0}};
+  ASSERT_EQ(Apply(map, distant_ground, {0.0F}).status,
+            ElevationUpdateResult::Status::kApplied);
+  const auto final_raw = map.Snapshot();
+  ASSERT_GT(final_raw->geometry().CellCount(), 1000000000000ULL);
+  ASSERT_EQ(final_raw->changed_cells().size(), 1U);
+  const auto incremental =
+      builder.Derive(final_raw, capability, profile, first);
+  const auto fresh = builder.Derive(final_raw, capability, profile);
+  const GridIndex probe{16, -1};
+  EXPECT_EQ(incremental->State(probe), FineCellState::kBlocked);
+  EXPECT_EQ(incremental->State(probe), fresh->State(probe));
+  EXPECT_LT(incremental->metrics().updated_cells,
+            final_raw->allocated_tiles() * 9U * kGridTileCellCount);
+  EXPECT_LE(incremental->changed_halo_tiles().size(),
+            final_raw->allocated_tiles() * 9U);
+  EXPECT_EQ(incremental->FindTile({2, 0}), unchanged_tile);
+  EXPECT_EQ(incremental->State({-500000, -500000}), FineCellState::kUnknown);
+  EXPECT_FALSE(final_raw->ElevationRangeAt(probe));
 }
 
 TEST(FineTraversabilityBuilder,

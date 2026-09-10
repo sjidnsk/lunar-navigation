@@ -64,6 +64,7 @@ struct PlanningSessionCoordinatorConfig final {
   double local_window_size_m{64.0};
   std::chrono::nanoseconds global_subdeadline{std::chrono::milliseconds(500)};
   NowFn now{[] { return SteadyClock::now(); }};
+  bool require_execution_confirmation{false};
 };
 
 struct PlanningSessionPorts final {

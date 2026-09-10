@@ -75,7 +75,8 @@ class FakeNavigationServer final {
   std::size_t goal_count() const { return goal_count_.load(); }
   std::size_t cancel_count() const { return cancel_count_.load(); }
 
-  void PublishFeedback(std::uint8_t state) {
+  void PublishFeedback(std::uint8_t state,
+                       const std::string& reason = "NAVIGATION_ACTIVE") {
     ASSERT_TRUE(WaitFor([this] {
       std::scoped_lock lock{mutex_};
       return active_ != nullptr;
@@ -88,7 +89,7 @@ class FakeNavigationServer final {
     ASSERT_NE(active, nullptr);
     auto feedback = std::make_shared<Action::Feedback>();
     feedback->session_state = state;
-    feedback->reason_code = "NAVIGATION_ACTIVE";
+    feedback->reason_code = reason;
     active->publish_feedback(feedback);
   }
 
@@ -153,9 +154,10 @@ TEST(NavigationClient, OwnsOneGoalMapsFeedbackAndWaitsForTerminalResult) {
   server.PublishFeedback(Action::Feedback::PLANNING);
   server.PublishFeedback(Action::Feedback::EXECUTING);
   server.PublishFeedback(Action::Feedback::REPLANNING);
+  server.PublishFeedback(Action::Feedback::PLANNING, "WAITING_FOR_MAP");
   ASSERT_TRUE(WaitFor([&] {
     std::scoped_lock lock{mutex};
-    return feedback.size() == 3U;
+    return feedback.size() == 4U;
   }));
   std::this_thread::sleep_for(100ms);
   {
@@ -174,7 +176,8 @@ TEST(NavigationClient, OwnsOneGoalMapsFeedbackAndWaitsForTerminalResult) {
               (std::vector<NavigationFeedbackState>{
                   NavigationFeedbackState::kPlanning,
                   NavigationFeedbackState::kExecuting,
-                  NavigationFeedbackState::kReplanning}));
+                  NavigationFeedbackState::kReplanning,
+                  NavigationFeedbackState::kWaitingForMap}));
     EXPECT_EQ(terminals.front().outcome, Action::Result::GOAL_REACHED);
     EXPECT_EQ(terminals.front().reason_code, "GOAL_REACHED");
   }

@@ -1,0 +1,102 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Tool Properties
+    Name: Tool Properties
+Visualization Manager:
+  Class: ""
+  Global Options:
+    Background Color: 32; 34; 38
+    Fixed Frame: map
+    Frame Rate: 30
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Cell Size: 1
+    - Class: rviz_default_plugins/Map
+      Name: Synthetic terrain
+      Enabled: true
+      Alpha: 0.5
+      Topic:
+        Value: /lunar_demo/controller/terrain
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+    - Class: rviz_default_plugins/Path
+      Name: Formal local path
+      Enabled: true
+      Color: 80; 240; 80
+      Line Width: 0.06
+      Topic:
+        Value: /lunar_demo/controller/local_path
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+    - Class: rviz_default_plugins/Path
+      Name: Coarse guidance route
+      Enabled: true
+      Color: 255; 180; 60
+      Line Width: 0.03
+      Topic:
+        Value: /lunar_demo/controller/global_route
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+    - Class: rviz_default_plugins/Path
+      Name: Actual integrated trajectory
+      Enabled: true
+      Color: 80; 180; 255
+      Line Width: 0.045
+      Topic:
+        Value: /lunar_demo/controller/trace
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Vehicle actual speed and executor state
+      Enabled: true
+      Topic:
+        Value: /lunar_demo/controller/hud
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Candidate and selected local goals
+      Enabled: true
+      Topic:
+        Value: /lunar_demo/controller/local_goals
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+    - Class: rviz_default_plugins/Map
+      Name: Fine state
+      Enabled: false
+      Topic:
+        Value: /lunar_demo/controller/fine_state
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Traversability
+      Enabled: false
+      Topic:
+        Value: /lunar_demo/controller/traversability
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+    - Class: rviz_default_plugins/Map
+      Name: Guidance state
+      Enabled: false
+      Topic:
+        Value: /lunar_demo/controller/guidance_state
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/SetGoal
+      Topic: /lunar_demo/controller/goal_pose
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: Top view
+      Scale: 45
+      X: 3
+      Y: 0
+Window Geometry:
+  Width: 1400
+  Height: 900

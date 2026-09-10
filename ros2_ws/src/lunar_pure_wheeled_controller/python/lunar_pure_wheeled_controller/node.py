@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from math import atan2, isfinite, sqrt
+from dataclasses import fields
+from collections import deque
+from pathlib import Path as FilePath
+import yaml
 from time import monotonic
 
 from geometry_msgs.msg import Twist
-from lunar_planning_msgs.msg import MotionReference
+from lunar_planning_msgs.msg import MotionReference, PathReference, TrackingStatus
 from nav_msgs.msg import Odometry, Path
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -16,21 +20,25 @@ from tf2_msgs.msg import TFMessage
 from .frame import MapFromOdom, map_tracking_state, parse_map_from_odom
 from .incremental_path import ParsedIncrementalPath, parse_incremental_path
 from .reference import ParsedReference, parse_reference
-from .tracking import TrackingPolicy, TrackingState, track_path, track_trajectory
+from .tracking import TrackingPolicy, TrackingState, track_trajectory
+from .execution import PathExecutor
 
 
 def _yaw(odometry: Odometry) -> float | None:
     position = odometry.pose.pose.position
     orientation = odometry.pose.pose.orientation
-    if not all(isfinite(value) for value in (
-        position.x,
-        position.y,
-        position.z,
-        orientation.x,
-        orientation.y,
-        orientation.z,
-        orientation.w,
-    )):
+    if not all(
+        isfinite(value)
+        for value in (
+            position.x,
+            position.y,
+            position.z,
+            orientation.x,
+            orientation.y,
+            orientation.z,
+            orientation.w,
+        )
+    ):
         return None
     quaternion_norm = sqrt(
         orientation.x * orientation.x
@@ -73,6 +81,9 @@ class PureWheeledControllerNode(Node):
         super().__init__("lunar_pure_wheeled_controller")
         defaults = {
             "input_mode": "motion_reference",
+            "platform_config": "",
+            "path_reference_topic": "/Car/T4/planning/path_reference",
+            "tracking_status_topic": "/Car/T4/control/tracking_status",
             "reference_topic": "/Car/T4/planning/wheeled_reference",
             "path_topic": "/Car/T4/planning/local_path",
             "odometry_topic": "/Car/T3/localization/odometry",
@@ -91,12 +102,18 @@ class PureWheeledControllerNode(Node):
             "spin_kp": 1.5,
             "translation_epsilon_m": 1.0e-3,
         }
+        for field in fields(TrackingPolicy):
+            defaults.setdefault(field.name, getattr(TrackingPolicy(), field.name))
         for name, value in defaults.items():
             self.declare_parameter(name, value)
         input_mode = self.get_parameter("input_mode").value
-        if input_mode not in {"motion_reference", "incremental_path"}:
+        if input_mode not in {
+            "motion_reference",
+            "incremental_path",
+            "incremental_reference",
+        }:
             raise ValueError(
-                "input_mode must be motion_reference or incremental_path"
+                "input_mode must be motion_reference, incremental_path or incremental_reference"
             )
         self._input_mode = input_mode
         topic_parameters = ["odometry_topic", "command_topic"]
@@ -104,29 +121,53 @@ class PureWheeledControllerNode(Node):
             topic_parameters.extend(["reference_topic", "execution_cancel_topic"])
         else:
             topic_parameters.extend(["path_topic", "tf_topic"])
+            if self._input_mode == "incremental_reference":
+                topic_parameters.extend(
+                    ["path_reference_topic", "tracking_status_topic"]
+                )
         topics = {
             name: self._absolute_topic_name(name, self.get_parameter(name).value)
             for name in topic_parameters
         }
-        self._policy = TrackingPolicy(**{
-            name: float(self.get_parameter(name).value)
-            for name in (
-                "lookahead_m",
-                "max_linear_mps",
-                "max_angular_radps",
-                "goal_position_tolerance_m",
-                "goal_yaw_tolerance_rad",
-                "max_cross_track_error_m",
-                "spin_kp",
-                "translation_epsilon_m",
+        policy_values = {
+            field.name: self.get_parameter(field.name).value
+            for field in fields(TrackingPolicy)
+        }
+        platform_path = self.get_parameter("platform_config").value
+        if platform_path:
+            capability = yaml.safe_load(
+                FilePath(platform_path).read_text(encoding="utf-8")
+            )["capability"]
+            names = dict(
+                max_linear_mps="maximum_forward_speed_mps",
+                max_reverse_mps="maximum_reverse_speed_mps",
+                max_angular_radps="maximum_spin_rate_radps",
+                max_linear_accel_mps2="maximum_acceleration_mps2",
+                max_linear_decel_mps2="maximum_braking_deceleration_mps2",
+                max_angular_accel_radps2="maximum_yaw_acceleration_radps2",
+                max_curvature_per_m="maximum_curvature_per_m",
+                max_lateral_accel_mps2="maximum_lateral_acceleration_mps2",
             )
-        })
+            for key, source in names.items():
+                policy_values[key] = min(
+                    float(policy_values[key]), float(capability[source])
+                )
+        self._policy = TrackingPolicy(**policy_values)
+        self._executor = PathExecutor(self._policy)
+        self._reference_identity = None
+        self._retired_sessions = deque(maxlen=64)
+        self._invalidated_revision = -1
+        self._path_sequence = 0
+        self._last_control_ns = None
+        self._tracking_status = (
+            self.create_publisher(TrackingStatus, topics["tracking_status_topic"], 10)
+            if self._input_mode == "incremental_reference"
+            else None
+        )
         control_rate_hz = float(self.get_parameter("control_rate_hz").value)
         if not isfinite(control_rate_hz) or control_rate_hz <= 0.0:
             raise ValueError("control_rate_hz must be finite and greater than zero")
-        self._odometry_timeout_s = float(
-            self.get_parameter("odometry_timeout_s").value
-        )
+        self._odometry_timeout_s = float(self.get_parameter("odometry_timeout_s").value)
         self._tf_timeout_s = float(self.get_parameter("tf_timeout_s").value)
         if not isfinite(self._odometry_timeout_s) or self._odometry_timeout_s <= 0.0:
             raise ValueError("odometry_timeout_s must be finite and greater than zero")
@@ -138,9 +179,7 @@ class PureWheeledControllerNode(Node):
         self._odometry_received_at: float | None = None
         self._map_from_odom: MapFromOdom | None = None
         self._map_from_odom_received_at: float | None = None
-        self._commands = self.create_publisher(
-            Twist, topics["command_topic"], 10
-        )
+        self._commands = self.create_publisher(Twist, topics["command_topic"], 10)
         self.create_subscription(
             Odometry,
             topics["odometry_topic"],
@@ -161,12 +200,17 @@ class PureWheeledControllerNode(Node):
                 10,
             )
         else:
-            self.create_subscription(
-                Path,
-                topics["path_topic"],
-                self._on_path,
-                incremental_path_qos(),
-            )
+            if self._input_mode == "incremental_reference":
+                self.create_subscription(
+                    PathReference,
+                    topics["path_reference_topic"],
+                    self._on_path_reference,
+                    incremental_path_qos(),
+                )
+            else:
+                self.create_subscription(
+                    Path, topics["path_topic"], self._on_path, incremental_path_qos()
+                )
             self.create_subscription(
                 TFMessage,
                 topics["tf_topic"],
@@ -188,6 +232,11 @@ class PureWheeledControllerNode(Node):
             return
         self._active = parsed
         self._trajectory_cursor = 0
+        if not parsed.trajectory_samples:
+            self._path_sequence += 1
+            self._executor.set_path(
+                parsed.path_xy_yaw, identity=(parsed.plan_id, self._path_sequence)
+            )
 
     def _on_cancel(self, message: String) -> None:
         if (
@@ -203,7 +252,53 @@ class PureWheeledControllerNode(Node):
             self._clear_active_and_stop()
             return
         self._active = parsed
-        self._trajectory_cursor = 0
+        self._path_sequence += 1
+        self._executor.set_path(
+            parsed.path_xy_yaw, identity=("plain", self._path_sequence)
+        )
+
+    def _on_path_reference(self, reference: PathReference) -> None:
+        identity = (bytes(reference.session_id.uuid), int(reference.segment_revision))
+        current = self._reference_identity
+        if identity[0] in self._retired_sessions:
+            return
+        if (
+            current is not None
+            and identity[0] == current[0]
+            and identity[1] < current[1]
+        ):
+            return
+        if reference.state == PathReference.INVALIDATED:
+            if (
+                current is None
+                or identity[0] == current[0]
+                and identity[1] >= current[1]
+            ):
+                self._reference_identity = identity
+                self._invalidated_revision = identity[1]
+                self._clear_active_and_stop()
+            return
+        if reference.state != PathReference.ACTIVE:
+            self._clear_active_and_stop()
+            return
+        if (
+            current is not None
+            and identity[0] == current[0]
+            and identity[1] <= self._invalidated_revision
+        ):
+            return
+        parsed = parse_incremental_path(reference.path)
+        if parsed.clear or parsed.reason is not None or reference.segment_revision == 0:
+            self._clear_active_and_stop()
+            return
+        if self._executor.set_path(
+            parsed.path_xy_yaw, identity=identity, final=reference.reaches_final_goal
+        ):
+            if current is not None and current[0] != identity[0]:
+                self._retired_sessions.append(current[0])
+                self._invalidated_revision = -1
+            self._reference_identity = identity
+            self._active = parsed
 
     def _on_tf(self, message: TFMessage) -> None:
         update = parse_map_from_odom(message)
@@ -235,7 +330,7 @@ class PureWheeledControllerNode(Node):
         ):
             self._publish_twist()
             return
-        if self._input_mode == "incremental_path":
+        if self._input_mode in {"incremental_path", "incremental_reference"}:
             self._tick_incremental_path()
             return
         self._tick_motion_reference()
@@ -257,10 +352,40 @@ class PureWheeledControllerNode(Node):
             self._odometry = None
             self._publish_twist()
             return
-        command = track_path(self._active.path_xy_yaw, state, self._policy)
+        now_ns = self.get_clock().now().nanoseconds
+        dt = (
+            0.05
+            if self._last_control_ns is None
+            else (now_ns - self._last_control_ns) / 1e9
+        )
+        self._last_control_ns = now_ns
+        if dt <= 0:
+            self._publish_twist()
+            return
+        result = self._executor.update(state, dt)
+        command = result.command
         self._publish_twist(command.linear_x_mps, command.angular_z_radps)
-        if command.complete or command.failure_reason is not None:
-            self._clear_active()
+        if self._tracking_status is not None and self._reference_identity is not None:
+            message = TrackingStatus()
+            message.header.stamp = self.get_clock().now().to_msg()
+            message.header.frame_id = "map"
+            message.session_id.uuid = list(self._reference_identity[0])
+            message.segment_revision = self._reference_identity[1]
+            message.state = getattr(TrackingStatus, result.phase)
+            message.direction = result.direction
+            message.progress_m, message.cross_track_m = (
+                result.progress_m,
+                result.cross_track_m,
+            )
+            message.heading_error_rad = result.heading_error_rad
+            message.linear_speed_mps, message.angular_speed_radps = (
+                state.linear_mps,
+                state.angular_radps,
+            )
+            message.reason = command.failure_reason or result.phase
+            self._tracking_status.publish(message)
+        # Hold the terminal executor until a new reference arrives. Repeated
+        # terminal feedback is safe because navigation deduplicates revisions.
 
     @staticmethod
     def _input_is_stale(received_at: float | None, timeout_s: float) -> bool:
@@ -276,7 +401,13 @@ class PureWheeledControllerNode(Node):
             self._publish_twist()
             return
         position = self._odometry.pose.pose.position
-        state = TrackingState(position.x, position.y, yaw)
+        state = TrackingState(
+            position.x,
+            position.y,
+            yaw,
+            self._odometry.twist.twist.linear.x,
+            self._odometry.twist.twist.angular.z,
+        )
         if self._active.trajectory_samples:
             result = track_trajectory(
                 self._active.trajectory_samples,
@@ -287,16 +418,23 @@ class PureWheeledControllerNode(Node):
             self._trajectory_cursor = result.next_cursor
             command = result.command
         else:
-            command = track_path(
-                self._active.path_xy_yaw,
-                state,
-                self._policy,
+            now_ns = self.get_clock().now().nanoseconds
+            dt = (
+                0.05
+                if self._last_control_ns is None
+                else (now_ns - self._last_control_ns) / 1e9
             )
+            self._last_control_ns = now_ns
+            if dt <= 0:
+                self._publish_twist()
+                return
+            command = self._executor.update(state, dt).command
         self._publish_twist(command.linear_x_mps, command.angular_z_radps)
         if command.complete or command.failure_reason is not None:
             self._clear_active()
 
     def _clear_active(self) -> None:
+        self._executor.clear()
         self._active = None
         self._trajectory_cursor = 0
 

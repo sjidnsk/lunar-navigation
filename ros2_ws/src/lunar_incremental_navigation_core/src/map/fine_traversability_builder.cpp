@@ -271,6 +271,66 @@ void ValidateMergedChanges(
   return result;
 }
 
+void IncludeNewGeometryCells(const ElevationSnapshot& raw,
+                             const SparseGridGeometry& previous,
+                             const double hard_radius_m,
+                             std::set<GridIndex>& recompute_cells) {
+  const auto& current = raw.geometry();
+  const auto old_minimum = previous.min_inclusive();
+  const auto old_maximum = previous.max_exclusive();
+  if (current.min_inclusive() == old_minimum &&
+      current.max_exclusive() == old_maximum) {
+    return;
+  }
+  const auto include_rectangle = [&recompute_cells](const GridIndex minimum,
+                                                    const GridIndex maximum) {
+    for (auto y = minimum.y; y < maximum.y; ++y) {
+      for (auto x = minimum.x; x < maximum.x; ++x) {
+        recompute_cells.insert(GridIndex{.x = x, .y = y});
+      }
+    }
+  };
+  // Growth can admit cells in an unchanged obstacle's inflation halo. They
+  // were never derived under the old bounds and are absent from changed_raw.
+  // Visit only sparse candidate tiles, then subtract the old bounds; a distant
+  // observation must not make us walk the entire newly enclosed rectangle.
+  for (const auto tile : CandidateTiles(raw, hard_radius_m)) {
+    const auto tile_x = detail::CheckedMultiply(tile.x, kGridTileWidthCells);
+    const auto tile_y = detail::CheckedMultiply(tile.y, kGridTileWidthCells);
+    if (!tile_x || !tile_y) {
+      throw std::overflow_error("fine tile origin exceeds int64 grid");
+    }
+    const GridIndex minimum{
+        .x = std::max(*tile_x, current.min_inclusive().x),
+        .y = std::max(*tile_y, current.min_inclusive().y)};
+    const GridIndex maximum{
+        .x = std::min(detail::CheckedAdd(*tile_x, kGridTileWidthCells)
+                          .value_or(std::numeric_limits<std::int64_t>::max()),
+                      current.max_exclusive().x),
+        .y = std::min(detail::CheckedAdd(*tile_y, kGridTileWidthCells)
+                          .value_or(std::numeric_limits<std::int64_t>::max()),
+                      current.max_exclusive().y)};
+    if (minimum.x >= maximum.x || minimum.y >= maximum.y) {
+      continue;
+    }
+    const GridIndex overlap_minimum{.x = std::max(minimum.x, old_minimum.x),
+                                    .y = std::max(minimum.y, old_minimum.y)};
+    const GridIndex overlap_maximum{.x = std::min(maximum.x, old_maximum.x),
+                                    .y = std::min(maximum.y, old_maximum.y)};
+    if (overlap_minimum.x >= overlap_maximum.x ||
+        overlap_minimum.y >= overlap_maximum.y) {
+      include_rectangle(minimum, maximum);
+      continue;
+    }
+    include_rectangle(minimum, {maximum.x, overlap_minimum.y});
+    include_rectangle({minimum.x, overlap_maximum.y}, maximum);
+    include_rectangle({minimum.x, overlap_minimum.y},
+                      {overlap_minimum.x, overlap_maximum.y});
+    include_rectangle({overlap_maximum.x, overlap_minimum.y},
+                      {maximum.x, overlap_maximum.y});
+  }
+}
+
 [[nodiscard]] bool TileIsUnobserved(
     const FineTraversabilityTile::StateArray& states,
     const FineTraversabilityTile::CostArray& costs) {
@@ -363,6 +423,8 @@ FineTraversabilityBuilder::Derive(
         std::sqrt(2.0) * raw->geometry().resolution_m();
     recompute_cells =
         InfluenceCells(raw->geometry(), changed_raw, influence_m);
+    IncludeNewGeometryCells(*raw, previous->geometry(), hard_radius_m,
+                             recompute_cells);
   }
 
   std::set<TileIndex> halo_tiles;

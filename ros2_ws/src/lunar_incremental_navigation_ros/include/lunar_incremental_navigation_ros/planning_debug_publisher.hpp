@@ -11,6 +11,8 @@
 #include <visualization_msgs/msg/marker_array.hpp>
 
 #include "lunar_incremental_navigation_core/local_planning.hpp"
+#include "lunar_incremental_navigation_core/local_target_selector.hpp"
+#include "lunar_incremental_navigation_core/wheel_local_planner.hpp"
 #include "lunar_incremental_navigation_core/traversability_snapshot.hpp"
 #include "lunar_incremental_navigation_core/types/platform_capability.hpp"
 
@@ -45,6 +47,11 @@ class PlanningDebugPublisher final {
       const lunar::incremental_navigation::RequestLocalPlanningView& view,
       double hard_inflation_radius_m);
 
+  void PublishLocalGoals(
+      const lunar::incremental_navigation::LocalTarget& target,
+      const lunar::incremental_navigation::LocalPlanResult& result,
+      const std::string& frame_id);
+
  private:
   PlanningDebugPublisherConfig config_;
   rclcpp::Clock::SharedPtr clock_;
@@ -60,6 +67,8 @@ class PlanningDebugPublisher final {
       traversability_publisher_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr
       start_patch_publisher_;
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr
+      local_goals_publisher_;
   std::optional<std::uint64_t> last_fine_revision_;
   std::optional<lunar::incremental_navigation::Point2> last_fine_center_;
   std::optional<std::uint64_t> last_guidance_revision_;

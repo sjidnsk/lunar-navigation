@@ -45,6 +45,7 @@ struct IncrementalNavigationNodeDependencies final {
   std::optional<lunar::incremental_navigation::SnapshotBundle> snapshots;
   std::optional<lunar::incremental_navigation::StateInput> state;
   std::function<std::optional<lunar::incremental_navigation::StateInput>()> state_source;
+  std::function<std::optional<lunar::incremental_navigation::SnapshotBundle>()> snapshot_source;
   std::function<void(const std::string&)> event_sink;
   std::function<void()> before_goal_processing;
   std::function<void()> before_terminal_commit;

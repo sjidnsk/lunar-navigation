@@ -1,6 +1,8 @@
 #include "lunar_incremental_navigation_core/legged_local_planner.hpp"
 
 #include "lunar_incremental_navigation_core/local_planning_window.hpp"
+#include "lunar_incremental_navigation_core/local_goal_region.hpp"
+#include "lunar_incremental_navigation_core/arrival_tolerance.hpp"
 
 #include <algorithm>
 #include <array>
@@ -742,7 +744,7 @@ class LeggedDirectedEdgeCache final {
   }
   const double distance = std::hypot(target.center.x - source_point.x,
                                      target.center.y - source_point.y);
-  if (distance <= target.position_tolerance_m + kComparisonTolerance) {
+  if (WithinArrivalTolerance(distance, target.position_tolerance_m)) {
     const TerminalYawCertificate yaw = CertifyTerminalYaw(
         motion_summary, config, target.is_final_goal, target.terminal_yaw_rad,
         source_arrival_yaw, deadline, stop, statistics, status);
@@ -804,6 +806,8 @@ class LeggedDirectedEdgeCache final {
 
 [[nodiscard]] double Heuristic(const Point2 point,
                                const LocalTarget& target) noexcept {
+  if (target.region) return std::max(0.0, target.region->LowerBound(point) -
+                                        target.position_tolerance_m);
   return std::max(0.0, std::hypot(point.x - target.center.x,
                                   point.y - target.center.y) -
                            target.position_tolerance_m);
@@ -965,8 +969,10 @@ LeggedLocalPlanner::LeggedLocalPlanner(LeggedCapability capability,
 
 LocalPlanResult LeggedLocalPlanner::Plan(
     const RequestLocalPlanningView& view, const Pose2& start,
-    const LocalTarget& target, const SearchDeadline deadline,
+    const LocalTarget& requested_target, const SearchDeadline deadline,
     const StopToken& stop) {
+  LocalTarget target = requested_target;
+  const auto region = target.region;
   if (const WorkStatus stopped = CheckWork(deadline, stop);
       stopped != WorkStatus::kReady) {
     return StoppedResult(stopped);
@@ -992,10 +998,10 @@ LocalPlanResult LeggedLocalPlanner::Plan(
   }
 
   const auto start_cell = WorldToCell(geometry, start.position_m);
-  const auto target_cell = WorldToCell(geometry, target.center);
-  if (!start_cell.has_value() || !target_cell.has_value() ||
+  auto target_cell = WorldToCell(geometry, target.center);
+  if (!start_cell.has_value() ||
       !view.CanCertifyLeggedSupport(*start_cell, true) ||
-      !view.CanBeEndpoint(*target_cell)) {
+      (!region && (!target_cell || !view.CanBeEndpoint(*target_cell)))) {
     return {};
   }
   SearchStatistics statistics;
@@ -1034,6 +1040,7 @@ LocalPlanResult LeggedLocalPlanner::Plan(
   TerminalCertificate goal_terminal;
   double best_goal_cost = std::numeric_limits<double>::infinity();
   bool saw_terminal_yaw_rejection = false;
+  bool reached_forward_unknown_boundary = false;
 
   constexpr std::array<std::pair<std::int64_t, std::int64_t>, 8U> kNeighbors{{
       {-1, 0}, {0, -1}, {1, 0}, {0, 1},
@@ -1066,29 +1073,49 @@ LocalPlanResult LeggedLocalPlanner::Plan(
             : Tangent(PositionForState(view, parent_state, start),
                       current_point, start.yaw_rad);
 
-    TerminalCacheEntry& terminal_entry = terminal_cache[current.state];
-    if (!terminal_entry.evaluated) {
-      WorkStatus terminal_status = WorkStatus::kReady;
-      terminal_entry.certificate = CertifyTerminal(
-          view, capability_, motion_summary, config_, edge_cache,
-          current.state, current_point, current_arrival_yaw, target,
-          *target_cell, deadline, stop, statistics, terminal_status);
-      if (terminal_status != WorkStatus::kReady) {
-        return StoppedResult(terminal_status, statistics);
-      }
-      terminal_entry.evaluated = true;
+    // The same directed-edge search that enforces step, gap and support
+    // establishes reachability; a FREE frontier on another island is ignored.
+    if (region && view.CanBeEndpoint(current_cell) &&
+        region->HasForwardUnknownBoundaryAt(current_cell)) {
+      reached_forward_unknown_boundary = true;
     }
-    const TerminalCertificate terminal = terminal_entry.certificate;
-    saw_terminal_yaw_rejection = saw_terminal_yaw_rejection ||
-                                  terminal.yaw_rejected;
-    if (terminal.feasible &&
-        (!terminal.uses_assumed_support ||
-         SearchPhase(current.state) == StartPhase::kStartPrefix)) {
-      const double terminal_total = SaturatingAdd(current.g, terminal.cost);
-      if (!goal_state.has_value() || terminal_total < best_goal_cost) {
-        goal_state = current.state;
-        goal_terminal = terminal;
-        best_goal_cost = terminal_total;
+    const auto* regional_candidate = region ? region->At(current_cell) : nullptr;
+    if (!region || (regional_candidate &&
+                    (regional_candidate->target.is_final_goal || !WithinArrivalTolerance(
+                        std::hypot(regional_candidate->target.center.x-start.position_m.x,
+                                   regional_candidate->target.center.y-start.position_m.y),
+                        requested_target.position_tolerance_m)))) {
+      LocalTarget terminal_target = region ? regional_candidate->target : target;
+      if (region && terminal_target.is_final_goal) {
+        terminal_target.position_tolerance_m = requested_target.position_tolerance_m;
+      }
+      const GridIndex terminal_cell = region ? current_cell : *target_cell;
+      TerminalCacheEntry& terminal_entry = terminal_cache[current.state];
+      if (!terminal_entry.evaluated) {
+        WorkStatus terminal_status = WorkStatus::kReady;
+        terminal_entry.certificate = CertifyTerminal(
+            view, capability_, motion_summary, config_, edge_cache,
+            current.state, current_point, current_arrival_yaw, terminal_target,
+            terminal_cell, deadline, stop, statistics, terminal_status);
+        if (terminal_status != WorkStatus::kReady) {
+          return StoppedResult(terminal_status, statistics);
+        }
+        terminal_entry.evaluated = true;
+      }
+      const TerminalCertificate terminal = terminal_entry.certificate;
+      saw_terminal_yaw_rejection |= terminal.yaw_rejected;
+      if (terminal.feasible &&
+          (!terminal.uses_assumed_support ||
+           SearchPhase(current.state) == StartPhase::kStartPrefix)) {
+        const double terminal_total = SaturatingAdd(
+            SaturatingAdd(current.g, terminal.cost),
+            region ? regional_candidate->remaining_cost : 0.0);
+        if (!goal_state.has_value() || terminal_total < best_goal_cost) {
+          goal_state = current.state;
+          goal_terminal = terminal;
+          best_goal_cost = terminal_total;
+          if (region) { target = terminal_target; target_cell = terminal_cell; }
+        }
       }
     }
 
@@ -1140,7 +1167,7 @@ LocalPlanResult LeggedLocalPlanner::Plan(
       parent_[next_state] = current.state;
       state_[next_state] = 1U;
       open.push(OpenEntry{
-          .f = SaturatingAdd(candidate, Heuristic(next_point, target)),
+          .f = SaturatingAdd(candidate, Heuristic(next_point, requested_target)),
           .g = candidate,
           .state = next_state,
           .sequence = sequence++,
@@ -1151,7 +1178,12 @@ LocalPlanResult LeggedLocalPlanner::Plan(
   }
   if (!goal_state.has_value()) {
     LocalPlanResult result = StoppedResult(WorkStatus::kInvalid, statistics);
-    if (saw_terminal_yaw_rejection) {
+    if (region) {
+      result.reason_code = reached_forward_unknown_boundary
+                               ? "LOCAL_WAITING_FOR_MAP"
+                               : "LOCAL_NO_PROGRESS";
+    }
+    if (saw_terminal_yaw_rejection && !region) {
       result.reason_code = "TERMINAL_YAW_UNREACHABLE";
     }
     return result;

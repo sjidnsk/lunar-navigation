@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>lunar_integrated_exploration_demo</name><version>0.1.0</version>
+  <description>Complex terrain, simulated clock and integrated exploration visualization.</description>
+  <maintainer email="kai@example.com">Kai</maintainer><license>Apache-2.0</license>
+  <buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>rclpy</exec_depend><exec_depend>rcl_interfaces</exec_depend><exec_depend>builtin_interfaces</exec_depend><exec_depend>python3-numpy</exec_depend>
+  <exec_depend>lunar_incremental_controller_demo</exec_depend>
+  <exec_depend>lunar_pure_exploration_ros</exec_depend><exec_depend>lunar_pure_exploration_msgs</exec_depend>
+  <exec_depend>lunar_incremental_navigation_ros</exec_depend><exec_depend>lunar_pure_wheeled_controller</exec_depend>
+  <exec_depend>lunar_planning_msgs</exec_depend><exec_depend>grid_map_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend><exec_depend>geometry_msgs</exec_depend><exec_depend>tf2_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend><exec_depend>rosgraph_msgs</exec_depend><exec_depend>std_msgs</exec_depend>
+  <exec_depend>visualization_msgs</exec_depend><exec_depend>diagnostic_msgs</exec_depend>
+  <exec_depend>launch</exec_depend><exec_depend>launch_ros</exec_depend><exec_depend>ament_index_python</exec_depend><exec_depend>rviz2</exec_depend>
+  <test_depend>python3-pytest</test_depend>
+  <export><build_type>ament_python</build_type></export>
+</package>

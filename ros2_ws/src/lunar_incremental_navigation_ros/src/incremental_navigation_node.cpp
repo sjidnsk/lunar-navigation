@@ -25,6 +25,7 @@
 #include <grid_map_msgs/msg/grid_map.hpp>
 #include <lunar_planning_msgs/action/navigate_to_pose.hpp>
 #include <lunar_planning_msgs/msg/path_reference.hpp>
+#include <lunar_planning_msgs/msg/tracking_status.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <rclcpp/callback_group.hpp>
@@ -416,7 +417,7 @@ core::PlanningSessionPorts RealSessionPorts(
                      const core::SparseGridGeometry& local_window,
                      const core::Point2 start, const core::FinalGoal& goal,
                      const std::optional<core::GlobalRoute>& guidance) {
-            return selector->Select(fine, local_window, start, goal,
+            return selector->SelectRolling(fine, local_window, start, goal,
                                     guidance);
           },
       .build_start_patch =
@@ -470,6 +471,7 @@ struct IncrementalNavigationNode::Impl final {
         test_snapshots(std::move(dependencies.snapshots)),
         latest_state(std::move(dependencies.state)),
         state_source(std::move(dependencies.state_source)),
+        snapshot_source(std::move(dependencies.snapshot_source)),
         event_sink(std::move(dependencies.event_sink)),
         before_goal_processing(
             std::move(dependencies.before_goal_processing)),
@@ -480,6 +482,7 @@ struct IncrementalNavigationNode::Impl final {
     core::PlanningSessionPorts ports =
         factory ? factory(parameters.capability)
                 : RealSessionPorts(parameters.capability);
+    tracking_feedback_enabled = node.declare_parameter<bool>("enable_tracking_feedback", false);
     coordinator = std::make_unique<core::PlanningSessionCoordinator>(
         parameters.capability, parameters.profile,
         core::PlanningSessionCoordinatorConfig{
@@ -488,7 +491,8 @@ struct IncrementalNavigationNode::Impl final {
             .goal_yaw_tolerance_rad =
                 parameters.profile.goal_yaw_tolerance_rad,
             .local_window_size_m = parameters.local_window_size_m,
-            .global_subdeadline = parameters.global_subdeadline},
+            .global_subdeadline = parameters.global_subdeadline,
+            .require_execution_confirmation = tracking_feedback_enabled},
         Instrument(std::move(ports)));
 
     action_group = node.create_callback_group(
@@ -564,6 +568,17 @@ struct IncrementalNavigationNode::Impl final {
               OnLocalMap(std::move(message));
             },
             local_map_options);
+    const auto tracking_topic = node.declare_parameter<std::string>(
+        "tracking_status_topic", "/Car/T4/control/tracking_status");
+    if (tracking_feedback_enabled) {
+      tracking_subscription = node.create_subscription<lunar_planning_msgs::msg::TrackingStatus>(
+          tracking_topic, rclcpp::QoS(10),
+          [this](lunar_planning_msgs::msg::TrackingStatus::ConstSharedPtr message) {
+            std::scoped_lock lock{event_mutex};
+            pending_tracking = *message;
+            if (event_sink) event_sink("tracking:RECEIVED");
+          }, state_options);
+    }
     odometry_subscription = node.create_subscription<nav_msgs::msg::Odometry>(
         parameters.odometry_topic, state_qos,
         [this](nav_msgs::msg::Odometry::ConstSharedPtr message) {
@@ -678,6 +693,11 @@ struct IncrementalNavigationNode::Impl final {
         core::LocalPlanResult result;
         cycle_metrics.local_elapsed_ms = MeasureMilliseconds(
             [&] { result = function(view, start, target, deadline, stop); });
+#if defined(LUNAR_BUILD_DEMO)
+        if (debug_publisher) {
+          debug_publisher->PublishLocalGoals(target, result, view.geometry().frame_id());
+        }
+#endif
         cycle_metrics.local_statistics = result.statistics;
         cycle_metrics.postprocess_elapsed_ms =
             std::chrono::duration<double, std::milli>(
@@ -873,13 +893,22 @@ struct IncrementalNavigationNode::Impl final {
         state_changed = true;
       }
     }
+    if (snapshot_source) {
+      if (auto injected = snapshot_source()) {
+        test_snapshots = std::move(*injected);
+        std::scoped_lock lock{event_mutex};
+        fine_changed = true;
+      }
+    }
     std::deque<ActionEvent> local_events;
+    std::optional<lunar_planning_msgs::msg::TrackingStatus> tracking;
     bool process_fine{};
     bool process_state{};
     std::optional<core::StateInput> state;
     {
       std::scoped_lock lock{event_mutex};
       local_events.swap(events);
+      tracking = std::exchange(pending_tracking, std::nullopt);
       process_fine = std::exchange(fine_changed, false);
       process_state = std::exchange(state_changed, false);
       state = latest_state;
@@ -923,10 +952,32 @@ struct IncrementalNavigationNode::Impl final {
         return;
       }
     }
+    // Apply pending fine evidence before accepting execution completion: a
+    // collision invalidates the reference, so its queued feedback is stale.
+    // Only the stopped executor of the current reference may request replanning.
+    // Publishing invalidation clears active_reference, naturally deduplicating it.
+    if (tracking && state && active_goal && active_goal->is_active() &&
+        active_reference &&
+        (tracking->state == lunar_planning_msgs::msg::TrackingStatus::FAILED ||
+         tracking->state == lunar_planning_msgs::msg::TrackingStatus::COMPLETED) &&
+        tracking->session_id.uuid == active_goal->get_goal_id() &&
+        tracking->segment_revision == active_reference->segment_revision &&
+        std::isfinite(tracking->linear_speed_mps) &&
+        std::isfinite(tracking->angular_speed_radps) &&
+        std::abs(tracking->linear_speed_mps) <= 0.01 &&
+        std::abs(tracking->angular_speed_radps) <= 0.03) {
+      RunCycle(*state, tracking->state == lunar_planning_msgs::msg::TrackingStatus::FAILED
+          ? core::CycleTrigger::kDeviation : core::CycleTrigger::kSegmentEnd);
+      replan_pending = coordinator->state() == core::CoordinatorState::kReplanning;
+      return;
+    }
     if (process_state && active_goal && active_goal->is_active()) {
       core::CycleTrigger trigger = core::CycleTrigger::kContinue;
       if (state && active_reference && bundle.fine) {
         trigger = TriggerForState(*state, *bundle.fine, *active_reference);
+        if (tracking_feedback_enabled && trigger == core::CycleTrigger::kSegmentEnd) {
+          trigger = core::CycleTrigger::kContinue;
+        }
       }
       RunCycle(state.value_or(MissingState()), trigger);
       if (trigger == core::CycleTrigger::kDeviation && active_goal &&
@@ -1395,6 +1446,8 @@ struct IncrementalNavigationNode::Impl final {
   rclcpp::TimerBase::SharedPtr fine_derivation_timer;
   rclcpp::TimerBase::SharedPtr guidance_derivation_timer;
 
+  rclcpp::Subscription<lunar_planning_msgs::msg::TrackingStatus>::SharedPtr tracking_subscription;
+  std::optional<lunar_planning_msgs::msg::TrackingStatus> pending_tracking;
   std::mutex event_mutex;
   std::mutex local_map_apply_mutex;
   mutable std::mutex map_diagnostics_mutex;
@@ -1407,9 +1460,11 @@ struct IncrementalNavigationNode::Impl final {
   std::optional<rclcpp_action::GoalUUID> preempt_requested_for;
   std::optional<core::StateInput> latest_state;
   std::function<std::optional<core::StateInput>()> state_source;
+  std::function<std::optional<core::SnapshotBundle>()> snapshot_source;
   bool state_changed{};
   bool fine_changed{};
   bool replan_pending{};
+  bool tracking_feedback_enabled{};
   std::shared_ptr<GoalHandle> active_goal;
   std::optional<core::PathReference> active_reference;
   std::optional<core::PathReference> last_reference;

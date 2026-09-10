@@ -14,6 +14,7 @@ enum class NavigationFeedbackState : std::uint8_t {
   kPlanning,
   kExecuting,
   kReplanning,
+  kWaitingForMap,
 };
 
 struct NavigationTarget final {

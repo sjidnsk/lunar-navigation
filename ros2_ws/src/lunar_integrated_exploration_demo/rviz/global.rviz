@@ -1,0 +1,193 @@
+Panels:
+- Class: rviz_common/Displays
+  Name: Displays
+Visualization Manager:
+  Class: ''
+  Global Options:
+    Background Color: 24; 27; 32
+    Fixed Frame: map
+    Frame Rate: 20
+  Displays:
+  - Class: rviz_default_plugins/Grid
+    Name: 1 m coarse ruler
+    Enabled: true
+    Cell Size: 1.0
+    Plane Cell Count: 300
+    Color: 90; 90; 95
+  - Class: rviz_default_plugins/MarkerArray
+    Name: SIMULATOR truth - rocks and terrain
+    Enabled: true
+    Topic:
+      Value: /lunar_demo/integrated/terrain_preview
+      Durability Policy: Transient Local
+      Reliability Policy: Reliable
+      History Policy: Keep Last
+      Depth: 1
+  - Class: rviz_default_plugins/Map
+    Name: GLOBAL exploration projection 1.0 m
+    Enabled: true
+    Alpha: 0.85
+    Draw Behind: true
+    Topic:
+      Value: /lunar_demo/integrated/exploration_map
+      Durability Policy: Transient Local
+      Reliability Policy: Reliable
+      History Policy: Keep Last
+      Depth: 1
+  - Class: rviz_default_plugins/MarkerArray
+    Name: Task boundary
+    Enabled: true
+    Topic:
+      Value: /lunar_demo/integrated/exploration/task_boundary
+      Durability Policy: Transient Local
+      Reliability Policy: Reliable
+      History Policy: Keep Last
+      Depth: 1
+  - Class: rviz_default_plugins/MarkerArray
+    Name: Known unknown task cells
+    Enabled: false
+    Topic:
+      Value: /lunar_demo/integrated/exploration/task_map_markers
+      Durability Policy: Transient Local
+      Reliability Policy: Reliable
+      History Policy: Keep Last
+      Depth: 1
+  - Class: rviz_default_plugins/MarkerArray
+    Name: Frontiers and observation candidates
+    Enabled: true
+    Topic:
+      Value: /lunar_demo/integrated/exploration/frontiers
+      Durability Policy: Transient Local
+      Reliability Policy: Reliable
+      History Policy: Keep Last
+      Depth: 1
+  - Class: rviz_default_plugins/Path
+    Name: COARSE guidance route
+    Enabled: true
+    Color: 255; 180; 40
+    Line Style: Billboards
+    Line Width: 0.5
+    Topic:
+      Value: /lunar_demo/integrated/global_route
+      Durability Policy: Transient Local
+      Reliability Policy: Reliable
+      History Policy: Keep Last
+      Depth: 1
+  - Class: rviz_default_plugins/Path
+    Name: FINE certified local path
+    Enabled: true
+    Color: 70; 255; 110
+    Line Style: Billboards
+    Line Width: 0.6
+    Topic:
+      Value: /lunar_demo/integrated/local_path
+      Durability Policy: Transient Local
+      Reliability Policy: Reliable
+      History Policy: Keep Last
+      Depth: 1
+  - Class: rviz_default_plugins/Path
+    Name: ACTUAL trajectory
+    Enabled: true
+    Color: 80; 170; 255
+    Line Style: Billboards
+    Line Width: 0.6
+    Topic:
+      Value: /lunar_demo/integrated/trace
+      Durability Policy: Transient Local
+      Reliability Policy: Reliable
+      History Policy: Keep Last
+      Depth: 1
+  - Class: rviz_default_plugins/Map
+    Name: LOCAL traversability 0.2 m
+    Enabled: false
+    Alpha: 0.8
+    Draw Behind: true
+    Topic:
+      Value: /lunar_demo/integrated/planning/fine_state
+      Durability Policy: Transient Local
+      Reliability Policy: Reliable
+      History Policy: Keep Last
+      Depth: 1
+  - Class: rviz_default_plugins/Map
+    Name: Fine cost (toggle)
+    Enabled: false
+    Alpha: 0.7
+    Draw Behind: true
+    Topic:
+      Value: /lunar_demo/integrated/planning/fine_cost
+      Durability Policy: Transient Local
+      Reliability Policy: Reliable
+      History Policy: Keep Last
+      Depth: 1
+  - Class: rviz_default_plugins/MarkerArray
+    Name: Fine traversability risk
+    Enabled: false
+    Topic:
+      Value: /lunar_demo/integrated/planning/traversability
+      Durability Policy: Transient Local
+      Reliability Policy: Reliable
+      History Policy: Keep Last
+      Depth: 1
+  - Class: rviz_default_plugins/MarkerArray
+    Name: Local candidate region and selected goal
+    Enabled: false
+    Topic:
+      Value: /lunar_demo/integrated/planning/local_goals
+      Durability Policy: Transient Local
+      Reliability Policy: Reliable
+      History Policy: Keep Last
+      Depth: 1
+  - Class: rviz_default_plugins/MarkerArray
+    Name: Start blind-zone patch (toggle)
+    Enabled: false
+    Topic:
+      Value: /lunar_demo/integrated/planning/start_patch_cells
+      Durability Policy: Transient Local
+      Reliability Policy: Reliable
+      History Policy: Keep Last
+      Depth: 1
+  - Class: rviz_default_plugins/MarkerArray
+    Name: Vehicle, FOV limit and planning window
+    Enabled: true
+    Topic:
+      Value: /lunar_demo/integrated/display
+      Durability Policy: Transient Local
+      Reliability Policy: Reliable
+      History Policy: Keep Last
+      Depth: 1
+  - Class: rviz_default_plugins/MarkerArray
+    Name: Mission status
+    Enabled: true
+    Topic:
+      Value: /lunar_demo/integrated/hud_global
+      Durability Policy: Transient Local
+      Reliability Policy: Reliable
+      History Policy: Keep Last
+      Depth: 1
+  - Class: rviz_default_plugins/MarkerArray
+    Name: ACTUAL measurement coverage - yellow
+    Enabled: false
+    Topic:
+      Value: /lunar_demo/integrated/observed_cells
+      Durability Policy: Transient Local
+      Reliability Policy: Reliable
+      History Policy: Keep Last
+      Depth: 1
+  Tools:
+  - Class: rviz_default_plugins/Interact
+  - Class: rviz_default_plugins/MoveCamera
+  - Class: rviz_default_plugins/Select
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: Global exploration
+      Target Frame: map
+      Scale: 2.0
+      X: 0.0
+      Y: 0.0
+      Angle: 0.0
+Window Geometry:
+  Width: 1250
+  Height: 900
+  X: 30
+  Y: 80

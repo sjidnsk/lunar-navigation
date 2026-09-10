@@ -19,6 +19,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/MotionReference.msg"
   "msg/PathReference.msg"
   "msg/PlannerDiagnostics.msg"
+  "msg/TrackingStatus.msg"
   "msg/TimedPath.msg"
   "action/PlanMotion.action"
   "action/NavigateToPose.action"

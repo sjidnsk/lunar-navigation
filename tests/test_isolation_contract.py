@@ -77,6 +77,8 @@ def test_ros_wrapper_has_fixed_capabilities_launch_and_interface_contracts() -> 
         "pure_planner.yaml",
         "external_interfaces.yaml",
         "pure_exploration.yaml",
+        "exploration_navigation.yaml",
+        "incremental_navigation_interfaces.yaml",
     }
 
     forbidden_fragments = {

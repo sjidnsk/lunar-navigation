@@ -17,7 +17,11 @@ using Action = lunar_planning_msgs::action::NavigateToPose;
 using ActionClient = rclcpp_action::Client<Action>;
 using GoalHandle = rclcpp_action::ClientGoalHandle<Action>;
 
-std::optional<NavigationFeedbackState> MapFeedback(const std::uint8_t state) {
+std::optional<NavigationFeedbackState> MapFeedback(
+    const std::uint8_t state, const std::string& reason_code) {
+  if (reason_code == "WAITING_FOR_MAP") {
+    return NavigationFeedbackState::kWaitingForMap;
+  }
   switch (state) {
     case Action::Feedback::PLANNING:
       return NavigationFeedbackState::kPlanning;
@@ -191,7 +195,8 @@ void NavigationClient::Navigate(const NavigationTarget target) {
         if (!feedback) {
           return;
         }
-        const auto mapped = MapFeedback(feedback->session_state);
+        const auto mapped =
+            MapFeedback(feedback->session_state, feedback->reason_code);
         if (!mapped) {
           return;
         }

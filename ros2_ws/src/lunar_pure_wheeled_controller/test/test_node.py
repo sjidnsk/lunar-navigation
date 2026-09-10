@@ -721,3 +721,82 @@ def test_input_mode_and_incremental_topics_are_validated(
         if node is not None:
             node.destroy_node()
         rclpy.shutdown()
+
+
+def test_incremental_reference_identity_invalidation_and_retired_session():
+    from lunar_planning_msgs.msg import PathReference
+    rclpy.init(args=['--ros-args','-p','input_mode:=incremental_reference',
+                     '-p','command_topic:=/lunar_demo/controller_test/cmd'])
+    controller = PureWheeledControllerNode()
+    try:
+        reference = PathReference()
+        reference.session_id.uuid = [1]*16
+        reference.segment_revision = 2
+        reference.path = make_path(frame_id='map',points=[(0.,0.,0.),(3.,0.,0.)])
+        controller._on_path_reference(reference)
+        assert controller._active is not None
+        reference.state = reference.INVALIDATED
+        controller._on_path_reference(reference)
+        reference.state = reference.ACTIVE
+        controller._on_path_reference(reference)
+        assert controller._active is None
+        reference.segment_revision = 3
+        controller._on_path_reference(reference)
+        assert controller._active is not None
+        reference.session_id.uuid = [2]*16
+        reference.segment_revision = 1
+        controller._on_path_reference(reference)
+        reference.session_id.uuid = [1]*16
+        reference.segment_revision = 4
+        controller._on_path_reference(reference)
+        assert controller._reference_identity == (bytes([2]*16),1)
+    finally:
+        controller.destroy_node()
+        rclpy.shutdown()
+
+
+@pytest.mark.parametrize("linear_speed,angular_speed", [(0.2, 0.0), (0.0, 0.2)])
+def test_incremental_feedback_reports_measured_stop_and_reference_identity(
+    linear_speed, angular_speed, monkeypatch
+):
+    from types import SimpleNamespace
+    from lunar_planning_msgs.msg import PathReference, TrackingStatus
+
+    rclpy.init(args=["--ros-args", "-p", "input_mode:=incremental_reference",
+                     "-p", "command_topic:=/lunar_demo/controller_test/cmd"])
+    controller = PureWheeledControllerNode()
+    messages, commands = [], []
+    monkeypatch.setattr(controller, "_tracking_status", SimpleNamespace(publish=messages.append))
+    monkeypatch.setattr(controller, "_publish_twist", lambda v=0.0, w=0.0: commands.append((v, w)))
+    try:
+        reference = PathReference()
+        reference.session_id.uuid = [7] * 16
+        reference.segment_revision = 3
+        reference.reaches_final_goal = True
+        reference.path = make_path(frame_id="map", points=[(0., 0., 0.), (1., 0., 0.)])
+        controller._on_path_reference(reference)
+        controller._on_tf(make_direct_map_from_odom())
+        odometry = make_odometry(x=1.)
+        odometry.twist.twist.linear.x = linear_speed
+        odometry.twist.twist.angular.z = angular_speed
+        controller._on_odometry(odometry)
+        controller._tick()
+        assert messages[-1].state == TrackingStatus.BRAKING
+        assert messages[-1].linear_speed_mps == linear_speed
+        assert messages[-1].angular_speed_radps == angular_speed
+        assert commands[-1] == (0., 0.)
+        controller._on_odometry(make_odometry(x=1.))
+        controller._last_control_ns = None
+        controller._tick()
+        assert messages[-1].state == TrackingStatus.COMPLETED
+        assert list(messages[-1].session_id.uuid) == [7] * 16
+        assert messages[-1].segment_revision == 3
+        # Missing or stale localization cannot emit a fresh terminal proof.
+        count = len(messages)
+        controller._odometry_received_at = time.monotonic() - 1.
+        controller._tick()
+        assert len(messages) == count
+        assert commands[-1] == (0., 0.)
+    finally:
+        controller.destroy_node()
+        rclpy.shutdown()

@@ -31,6 +31,7 @@
   <test_depend>ament_index_cpp</test_depend>
   <test_depend>action_msgs</test_depend>
   <test_depend>lunar_pure_planner_ros</test_depend>
+  <test_depend>rosgraph_msgs</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

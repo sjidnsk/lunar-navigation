@@ -101,7 +101,8 @@ def test_speed_is_clamped_to_policy_limit() -> None:
         policy(),
     )
 
-    assert command.linear_x_mps == 0.2
+    assert 0.0 < command.linear_x_mps <= 0.2
+    assert command.linear_x_mps <= policy().max_linear_accel_mps2 * .2
 
 
 def test_reached_goal_requires_position_and_yaw_tolerances() -> None:

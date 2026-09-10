@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "lunar_incremental_navigation_core/local_goal_region.hpp"
 
 #include <limits>
 #include <memory>
@@ -96,6 +97,7 @@ struct FakePorts final {
   LocalPlanResult::Status local_status{LocalPlanResult::Status::kPlanFound};
   std::string local_reason_code;
   bool reaches_final_goal{};
+  std::shared_ptr<const LocalGoalRegion> target_region;
   bool throw_from_target{};
   bool selector_received_guidance{};
   const FineTraversabilitySnapshot* fine_seen_by_target{};
@@ -138,6 +140,7 @@ struct FakePorts final {
                   .terminal_yaw_rad = goal.has_target_yaw
                                           ? std::optional(goal.target_yaw_rad)
                                           : std::nullopt,
+                  .region = target_region,
               });
             },
         .build_start_patch =
@@ -534,6 +537,49 @@ TEST(PlanningSessionCoordinator,
       MakeFine(5U, GridIndex{.x = 2, .y = 0})));
 }
 
+TEST(PlanningSessionCoordinator, StationaryNonFinalPathCannotBeReissuedForever) {
+  FakePorts fake;
+  PlanningSessionCoordinator coordinator(Wheel(), {}, Config(), fake.Bind());
+  ASSERT_TRUE(coordinator.Start(SessionId{{1U}}, FinalGoal{.target_x_m = 0.5, .target_y_m = 0.5}).accepted);
+  const auto result = coordinator.PlanCycle(At(0.5, 0.5), SnapshotBundle{.fine = MakeFine()},
+      CycleTrigger::kContinue, SearchDeadline::max());
+  ASSERT_TRUE(result.terminal);
+  EXPECT_EQ(result.terminal->result.outcome, SessionOutcome::kNoPath);
+  EXPECT_EQ(result.terminal->result.reason_code, "NO_LOCAL_PROGRESS");
+}
+
+TEST(PlanningSessionCoordinator, CompletedNonFinalTargetMustAdvanceOnReplan) {
+  FakePorts fake;
+  PlanningSessionCoordinator coordinator(Wheel(), {}, Config(), fake.Bind());
+  ASSERT_TRUE(coordinator.Start(SessionId{{1U}}, FinalGoal{.target_x_m = 3.5, .target_y_m = 0.5}).accepted);
+  const auto fine = MakeFine();
+  ASSERT_TRUE(coordinator.PlanCycle(At(0.5, 0.5), SnapshotBundle{.fine = fine},
+      CycleTrigger::kContinue, SearchDeadline::max()).path_reference);
+  const auto result = coordinator.PlanCycle(At(3.49, 0.5), SnapshotBundle{.fine = fine},
+      CycleTrigger::kSegmentEnd, SearchDeadline::max());
+  ASSERT_TRUE(result.terminal);
+  EXPECT_EQ(result.terminal->result.outcome, SessionOutcome::kNoPath);
+  EXPECT_EQ(result.terminal->result.reason_code, "NO_LOCAL_PROGRESS");
+}
+
+TEST(PlanningSessionCoordinator, ExecutionConfirmationGatesGoalSuccess) {
+  FakePorts fake;
+  fake.reaches_final_goal = true;
+  auto config = Config();
+  config.require_execution_confirmation = true;
+  PlanningSessionCoordinator coordinator(Wheel(), {}, config, fake.Bind());
+  ASSERT_TRUE(coordinator.Start(SessionId{{1U}}, FinalGoal{.target_x_m = 3.5, .target_y_m = 0.5}).accepted);
+  const auto fine = MakeFine();
+  ASSERT_TRUE(coordinator.PlanCycle(At(0.5, 0.5), SnapshotBundle{.fine = fine},
+      CycleTrigger::kContinue, SearchDeadline::max()).path_reference);
+  EXPECT_FALSE(coordinator.PlanCycle(At(3.5, 0.5), SnapshotBundle{.fine = fine},
+      CycleTrigger::kContinue, SearchDeadline::max()).terminal);
+  const auto result = coordinator.PlanCycle(At(3.5, 0.5), SnapshotBundle{.fine = fine},
+      CycleTrigger::kSegmentEnd, SearchDeadline::max());
+  ASSERT_TRUE(result.terminal);
+  EXPECT_EQ(result.terminal->result.outcome, SessionOutcome::kGoalReached);
+}
+
 TEST(PlanningSessionCoordinator,
      GoalRequiresDerivedPositionAndOptionalYawThenInvalidatesBeforeSuccess) {
   FakePorts fake;
@@ -907,6 +953,117 @@ TEST(PlanningSessionCoordinator,
 
   ASSERT_TRUE(terminal.invalidated);
   EXPECT_EQ(terminal.invalidated->traversability_revision, 2U);
+}
+
+TEST(PlanningSessionCoordinator, NoLocalProgressWaitsWithoutRepeatingSearchUntilMapChanges) {
+  FakePorts fake;
+  fake.local_status = LocalPlanResult::Status::kNoPath;
+  fake.local_reason_code = "LOCAL_WAITING_FOR_MAP";
+  auto region = std::make_shared<LocalGoalRegion>();
+  region->has_unknown_boundary = true;
+  fake.target_region = region;
+  PlanningSessionCoordinator coordinator(Wheel(), {}, Config(), fake.Bind());
+  ASSERT_TRUE(coordinator.Start(SessionId{{90U}}, {.target_x_m=6.5, .target_y_m=1.5}).accepted);
+  const auto fine = MakeFine(1U);
+  auto wait = coordinator.PlanCycle(At(1.5,1.5), {.fine=fine}, CycleTrigger::kContinue, SearchDeadline::max());
+  ASSERT_FALSE(wait.terminal);
+  EXPECT_FALSE(wait.path_reference);
+  EXPECT_EQ(wait.feedback.reason_code, "WAITING_FOR_MAP");
+  for (int i=0;i<10;++i) {
+    wait=coordinator.PlanCycle(At(1.5,1.5), {.fine=fine}, CycleTrigger::kSegmentEnd, SearchDeadline::max());
+    EXPECT_FALSE(wait.terminal);
+    EXPECT_FALSE(wait.path_reference);
+    EXPECT_EQ(wait.feedback.reason_code,"WAITING_FOR_MAP");
+  }
+  EXPECT_EQ(fake.wheel_calls,1);
+  EXPECT_EQ(fake.global_calls,0);
+  fake.local_status=LocalPlanResult::Status::kPlanFound;
+  fake.local_reason_code.clear();
+  fake.reaches_final_goal=true;
+  const auto updated=MakeFine(2U);
+  const auto planned=coordinator.PlanCycle(At(1.5,1.5),{.fine=updated},CycleTrigger::kContinue,SearchDeadline::max());
+  ASSERT_TRUE(planned.path_reference);
+  EXPECT_EQ(fake.wheel_calls,2);
+  const auto reached=coordinator.PlanCycle(At(6.5,1.5),{.fine=updated},CycleTrigger::kContinue,SearchDeadline::max());
+  ASSERT_TRUE(reached.terminal);
+  EXPECT_EQ(reached.terminal->result.outcome,SessionOutcome::kGoalReached);
+}
+
+TEST(PlanningSessionCoordinator, WaitingSessionRemainsCancelableAndNewGoalPlansAgain) {
+  FakePorts fake;
+  fake.local_status=LocalPlanResult::Status::kNoPath;
+  fake.local_reason_code="LOCAL_WAITING_FOR_MAP";
+  auto region = std::make_shared<LocalGoalRegion>();
+  region->has_unknown_boundary = true;
+  fake.target_region = region;
+  PlanningSessionCoordinator coordinator(Wheel(),{},Config(),fake.Bind());
+  const auto fine=MakeFine();
+  ASSERT_TRUE(coordinator.Start(SessionId{{91U}},{.target_x_m=6.5,.target_y_m=1.5}).accepted);
+  ASSERT_FALSE(coordinator.PlanCycle(At(1.5,1.5),{.fine=fine},CycleTrigger::kContinue,SearchDeadline::max()).terminal);
+  EXPECT_EQ(coordinator.Cancel(CancelReason::kCanceled).result.outcome,SessionOutcome::kCanceled);
+  ASSERT_TRUE(coordinator.Start(SessionId{{92U}},{.target_x_m=5.5,.target_y_m=1.5}).accepted);
+  static_cast<void>(coordinator.PlanCycle(At(1.5,1.5),{.fine=fine},CycleTrigger::kContinue,SearchDeadline::max()));
+  EXPECT_EQ(fake.wheel_calls,2);
+}
+
+TEST(PlanningSessionCoordinator, FinalArrivalUsesSameNumericalToleranceAsLocalSolver) {
+  FakePorts fake;
+  fake.reaches_final_goal=true;
+  PlanningSessionCoordinator coordinator(Wheel(),{},Config(),fake.Bind());
+  ASSERT_TRUE(coordinator.Start(SessionId{{93U}},{.target_x_m=5.5,.target_y_m=1.5}).accepted);
+  const auto fine=MakeFine();
+  ASSERT_TRUE(coordinator.PlanCycle(At(1.5,1.5),{.fine=fine},CycleTrigger::kContinue,SearchDeadline::max()).path_reference);
+  // One-metre fixture resolution gives a 0.5 m arrival region.
+  const auto reached=coordinator.PlanCycle(At(std::nextafter(6.0,7.0),1.5),{.fine=fine},CycleTrigger::kContinue,SearchDeadline::max());
+  ASSERT_TRUE(reached.terminal);
+  EXPECT_EQ(reached.terminal->result.outcome,SessionOutcome::kGoalReached);
+}
+
+TEST(PlanningSessionCoordinator, NoProgressWithoutUnknownEvidenceTerminatesNoPath) {
+  for (const bool region_present : {false, true}) {
+    FakePorts fake;
+    fake.local_status = LocalPlanResult::Status::kNoPath;
+    fake.local_reason_code = "LOCAL_NO_PROGRESS";
+    if (region_present) {
+      auto region = std::make_shared<LocalGoalRegion>();
+      // A window-level hint alone is insufficient: the solver did not reach
+      // a forward unknown boundary and returned LOCAL_NO_PROGRESS.
+      region->has_unknown_boundary = true;
+      fake.target_region = region;
+    }
+    PlanningSessionCoordinator coordinator(Wheel(), {}, Config(), fake.Bind());
+    ASSERT_TRUE(coordinator.Start(SessionId{{94U}},
+        {.target_x_m=6.5, .target_y_m=1.5}).accepted);
+    const auto result = coordinator.PlanCycle(At(1.5,1.5), {.fine=MakeFine()},
+        CycleTrigger::kContinue, SearchDeadline::max());
+    ASSERT_TRUE(result.terminal);
+    EXPECT_EQ(result.terminal->result.outcome, SessionOutcome::kNoPath);
+    EXPECT_EQ(result.feedback.reason_code, "LOCAL_NO_PROGRESS");
+  }
+}
+
+TEST(PlanningSessionCoordinator, WaitingWakesOnMovementSmallerThanArrivalTolerance) {
+  FakePorts fake;
+  fake.local_status = LocalPlanResult::Status::kNoPath;
+  fake.local_reason_code = "LOCAL_WAITING_FOR_MAP";
+  auto region = std::make_shared<LocalGoalRegion>();
+  region->has_unknown_boundary = true;
+  fake.target_region = region;
+  PlanningSessionCoordinator coordinator(Wheel(), {}, Config(), fake.Bind());
+  ASSERT_TRUE(coordinator.Start(SessionId{{95U}},
+      {.target_x_m=6.5, .target_y_m=1.5}).accepted);
+  const auto fine = MakeFine();
+  EXPECT_EQ(coordinator.PlanCycle(At(1.5,1.5), {.fine=fine},
+      CycleTrigger::kContinue, SearchDeadline::max()).feedback.reason_code,
+      "WAITING_FOR_MAP");
+  fake.local_status = LocalPlanResult::Status::kPlanFound;
+  fake.local_reason_code.clear();
+  // A 0.1 m movement changes which routes can connect, even though it is
+  // smaller than the fixture's 0.5 m final-arrival region.
+  const auto moved = coordinator.PlanCycle(At(1.6,1.5), {.fine=fine},
+      CycleTrigger::kContinue, SearchDeadline::max());
+  EXPECT_EQ(fake.wheel_calls, 2);
+  ASSERT_TRUE(moved.path_reference);
 }
 
 }  // namespace

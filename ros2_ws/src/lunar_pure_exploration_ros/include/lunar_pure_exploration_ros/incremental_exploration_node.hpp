@@ -15,6 +15,7 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/node.hpp>
 #include <rclcpp/subscription.hpp>
+#include <rclcpp/timer.hpp>
 #include <tf2_msgs/msg/tf_message.hpp>
 
 namespace lunar::pure_exploration_ros {
@@ -42,6 +43,7 @@ struct IncrementalExplorationNodeParameters final {
   std::string current_goal_topic;
   std::string frontiers_topic;
   std::string diagnostics_topic;
+  double navigation_map_wait_timeout_s{30.0};
 };
 
 class IncrementalExplorationNode final : public rclcpp::Node {
@@ -73,6 +75,7 @@ class IncrementalExplorationNode final : public rclcpp::Node {
   rclcpp::Subscription<
       lunar_pure_exploration_msgs::msg::PureExplorationTask>::SharedPtr
       task_subscription_;
+  rclcpp::TimerBase::SharedPtr navigation_map_wait_timer_;
 };
 
 }  // namespace lunar::pure_exploration_ros

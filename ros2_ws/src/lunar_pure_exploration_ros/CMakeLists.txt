@@ -115,6 +115,7 @@ if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   find_package(ament_index_cpp REQUIRED)
   find_package(lunar_pure_planner_ros REQUIRED)
+  find_package(rosgraph_msgs REQUIRED)
 
   # This test-only source digest gate binds the explorer compatibility test to
   # the planner snapshot integrated in lunar_pure_planner_orin. Any later
@@ -204,7 +205,7 @@ if(BUILD_TESTING)
     test/test_incremental_exploration_node.cpp)
   target_compile_features(test_incremental_exploration_node PRIVATE cxx_std_20)
   ament_target_dependencies(test_incremental_exploration_node
-    action_msgs rclcpp rclcpp_action)
+    action_msgs rclcpp rclcpp_action rosgraph_msgs)
   target_link_libraries(test_incremental_exploration_node
     ${PROJECT_NAME}_incremental)
 endif()

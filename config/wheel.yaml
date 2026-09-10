@@ -1,6 +1,7 @@
 # Source: ros2_ws/src/lunar_navigation_config/config/three_platform_capability_freeze_v1.yaml
 # Source Git SHA: c8cf14e167345150ba64dd141cfec5470e09ba41
 # Source content SHA-256: b80b57fbf904bebcffda57731a7ae3f86e45aabcaa7871e204551f04d55ef161
+# Local task override (2026-09-09): user-confirmed translation speed limit 0.2 m/s in both directions.
 platform: wheel
 platform_id: wheeled-lunar-explorer
 platform_type: WHEELED
@@ -16,8 +17,8 @@ capability:
   minimum_underbody_clearance_m: 0.21
   maximum_local_obstacle_relief_m: 0.2
   allow_unsupported_gap: false
-  maximum_forward_speed_mps: 1.5
-  maximum_reverse_speed_mps: 1.5
+  maximum_forward_speed_mps: 0.2
+  maximum_reverse_speed_mps: 0.2
   maximum_spin_rate_radps: 1.0
   maximum_acceleration_mps2: 0.5
   maximum_braking_deceleration_mps2: 0.5

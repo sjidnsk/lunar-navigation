@@ -4,10 +4,14 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 _PARAMETERS = {
     "input_mode": "motion_reference",
+    "platform_config": "",
+    "path_reference_topic": "/Car/T4/planning/path_reference",
+    "tracking_status_topic": "/Car/T4/control/tracking_status",
     "reference_topic": "/Car/T4/planning/wheeled_reference",
     "path_topic": "/Car/T4/planning/local_path",
     "odometry_topic": "/Car/T3/localization/odometry",
@@ -36,6 +40,8 @@ def generate_launch_description() -> LaunchDescription:
             package="lunar_pure_wheeled_controller",
             executable="lunar_pure_wheeled_controller_node.py",
             name="lunar_pure_wheeled_controller",
-            parameters=[{name: LaunchConfiguration(name) for name in _PARAMETERS}],
+            parameters=[{name: (ParameterValue(LaunchConfiguration(name), value_type=str)
+                                if name == "platform_config" else LaunchConfiguration(name))
+                         for name in _PARAMETERS}],
         ),
     ])

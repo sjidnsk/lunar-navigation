@@ -393,30 +393,10 @@ def test_fixed_domain_runs_all_platforms_and_mismatch_without_graph_leaks() -> N
                     "/Car/T4/plan_motion: lunar_planning_msgs/action/PlanMotion"
                     in info
                 )
-                services = _run(
-                    [
-                        "ros2",
-                        "service",
-                        "list",
-                        "--no-daemon",
-                        "--include-hidden-services",
-                    ],
-                    env=env,
-                )
-                assert services.returncode == 0
-                assert ACTION_SERVICES <= set(services.stdout.splitlines())
-                diagnostics = _run(
-                    [
-                        "ros2",
-                        "topic",
-                        "info",
-                        "--no-daemon",
-                        "/Car/T4/planning/diagnostics",
-                    ],
-                    env=env,
-                )
-                assert diagnostics.returncode == 0
-                assert "Publisher count: 1" in diagnostics.stdout
+                # _wait_for_ready_graph already requires all Action services and
+                # exactly one diagnostic publisher. A fresh CLI participant has
+                # its own discovery delay; do not replace that settled snapshot
+                # with an immediate query from a newly created participant.
             finally:
                 _stop(process, env)
 

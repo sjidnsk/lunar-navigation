@@ -1,6 +1,6 @@
 """Deterministic, dependency-free pure-pursuit tracking."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 import math
 from typing import TypeAlias
 
@@ -15,6 +15,8 @@ class TrackingState:
     x_m: float
     y_m: float
     yaw_rad: float
+    linear_mps: float = 0.0
+    angular_radps: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -27,6 +29,21 @@ class TrackingPolicy:
     max_cross_track_error_m: float = 1.0
     spin_kp: float = 1.5
     translation_epsilon_m: float = 1.0e-3
+    max_reverse_mps: float = 0.2
+    max_linear_accel_mps2: float = 0.5
+    max_linear_decel_mps2: float = 0.5
+    max_angular_accel_radps2: float = 0.5
+    max_curvature_per_m: float = 1.0
+    max_lateral_accel_mps2: float = 0.5
+    alignment_tolerance_rad: float = 0.08
+    rotate_enter_rad: float = 0.7
+    reverse_heading_threshold_rad: float = 2.4
+    corner_angle_rad: float = 0.35
+    corner_position_tolerance_m: float = 0.04
+    stopped_linear_mps: float = 0.01
+    stopped_angular_radps: float = 0.03
+    no_progress_timeout_s: float = 15.0
+    allow_reverse: bool = True
 
 
 @dataclass(frozen=True)
@@ -68,17 +85,12 @@ def _finite_state(state: TrackingState) -> bool:
 
 def _valid_policy(policy: TrackingPolicy) -> bool:
     try:
-        values = (
-            policy.lookahead_m,
-            policy.max_linear_mps,
-            policy.max_angular_radps,
-            policy.goal_position_tolerance_m,
-            policy.goal_yaw_tolerance_rad,
-            policy.max_cross_track_error_m,
-            policy.spin_kp,
-            policy.translation_epsilon_m,
-        )
-        return all(math.isfinite(float(value)) and float(value) > 0.0 for value in values)
+        values = [getattr(policy, f.name) for f in fields(TrackingPolicy) if f.name != "allow_reverse"]
+        return (all(math.isfinite(float(value)) and float(value) > 0.0 for value in values)
+                and isinstance(policy.allow_reverse, bool)
+                and policy.alignment_tolerance_rad < policy.rotate_enter_rad < math.pi
+                and policy.reverse_heading_threshold_rad <= math.pi
+                and policy.corner_angle_rad <= math.pi)
     except (AttributeError, TypeError, ValueError):
         return False
 
@@ -210,42 +222,18 @@ def _translation_sign(
 
 
 def track_path(path: PathXYYaw, state: TrackingState, policy: TrackingPolicy) -> TrackingCommand:
-    """Compute one bounded wheel command, or a stopped terminal result."""
-    points = _finite_path(path)
-    if points is None or not _finite_state(state) or not _valid_policy(policy):
+    """Compatibility calculation; ROS execution uses a persistent PathExecutor."""
+    from .execution import PathExecutor
+    try:
+        if not _finite_state(state):
+            return _stopped("INVALID_INPUT")
+        executor = PathExecutor(policy)
+        executor.set_path(path)
+        # Legacy callers supply no elapsed time; a single control interval is
+        # not a substitute for using the stateful executor in a running system.
+        return executor.update(state, .2).command
+    except (TypeError, ValueError, OverflowError):
         return _stopped("INVALID_INPUT")
-
-    x = float(state.x_m)
-    y = float(state.y_m)
-    yaw = float(state.yaw_rad)
-    goal_x, goal_y, goal_yaw = points[-1]
-    goal_distance = math.hypot(goal_x - x, goal_y - y)
-    if goal_distance <= policy.goal_position_tolerance_m:
-        yaw_error = _normalized_yaw_error(goal_yaw, yaw)
-        if abs(yaw_error) <= policy.goal_yaw_tolerance_rad:
-            return TrackingCommand(0.0, 0.0, True, None)
-        angular = _clip(policy.spin_kp * yaw_error, policy.max_angular_radps)
-        return TrackingCommand(0.0, angular, False, None)
-
-    distances = [math.hypot(point[0] - x, point[1] - y) for point in points]
-    nearest_index = min(range(len(points)), key=distances.__getitem__)
-    if distances[nearest_index] > policy.max_cross_track_error_m:
-        return _stopped("PATH_DEVIATION")
-
-    target_index = len(points) - 1
-    for index in range(nearest_index + 1, len(points)):
-        if math.hypot(points[index][0] - x, points[index][1] - y) >= policy.lookahead_m:
-            target_index = index
-            break
-    target_x, target_y, _ = points[target_index]
-    dx = target_x - x
-    dy = target_y - y
-    local_y = -math.sin(yaw) * dx + math.cos(yaw) * dy
-    lookahead = max(math.hypot(dx, dy), policy.lookahead_m)
-    curvature = 2.0 * local_y / (lookahead * lookahead)
-    linear = min(policy.max_linear_mps, max(0.0, goal_distance))
-    angular = max(-policy.max_angular_radps, min(policy.max_angular_radps, linear * curvature))
-    return TrackingCommand(linear, angular, False, None)
 
 
 def track_trajectory(

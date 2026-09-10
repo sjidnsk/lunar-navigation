@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <numbers>
@@ -17,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+#include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <lunar_planning_msgs/action/navigate_to_pose.hpp>
 #include <lunar_pure_exploration_msgs/msg/pure_exploration_status.hpp>
@@ -25,6 +27,7 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
+#include <rosgraph_msgs/msg/clock.hpp>
 #include <tf2_msgs/msg/tf_message.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 
@@ -171,6 +174,12 @@ tf2_msgs::msg::TFMessage MapFromOdom() {
   return transforms;
 }
 
+bool SameNavigationPose(const Action::Goal& left, const Action::Goal& right) {
+  return left.target_x_m == right.target_x_m &&
+         left.target_y_m == right.target_y_m &&
+         left.target_yaw_rad == right.target_yaw_rad;
+}
+
 class FakeNavigationServer final {
  public:
   FakeNavigationServer(rclcpp::Node& node, const std::string& action_name) {
@@ -202,6 +211,22 @@ class FakeNavigationServer final {
   Action::Goal goal(std::size_t index) const {
     std::scoped_lock lock{mutex_};
     return goals_.at(index);
+  }
+
+  void PublishFeedback(std::uint8_t state, const std::string& reason) {
+    ASSERT_TRUE(WaitFor([this] {
+      std::scoped_lock lock{mutex_};
+      return active_ != nullptr;
+    }));
+    std::shared_ptr<ServerGoalHandle> active;
+    {
+      std::scoped_lock lock{mutex_};
+      active = active_;
+    }
+    auto feedback = std::make_shared<Action::Feedback>();
+    feedback->session_state = state;
+    feedback->reason_code = reason;
+    active->publish_feedback(feedback);
   }
 
   void Finish(std::uint8_t outcome, const std::string& reason_code) {
@@ -237,17 +262,28 @@ class FakeNavigationServer final {
 
 class IncrementalExplorationNodeTest : public ::testing::Test {
  protected:
+  virtual double MapWaitTimeoutSeconds() const { return -1.0; }
+  virtual bool UseSimTime() const { return false; }
+  virtual void ConfigureParameters(IncrementalExplorationNodeParameters&) {}
+
   void SetUp() override {
     const auto id = next_id_.fetch_add(1U);
     const std::string prefix = "/incremental_test_" + std::to_string(id);
     parameters_ = Parameters(prefix);
+    ConfigureParameters(parameters_);
     server_node_ = std::make_shared<rclcpp::Node>(
         "incremental_navigation_server_" + std::to_string(id));
     observer_ = std::make_shared<rclcpp::Node>(
         "incremental_exploration_observer_" + std::to_string(id));
     server_ = std::make_unique<FakeNavigationServer>(
         *server_node_, parameters_.navigation_action);
-    node_ = std::make_shared<IncrementalExplorationNode>(parameters_);
+    std::vector<rclcpp::Parameter> node_parameters{{"use_sim_time", UseSimTime()}};
+    if (MapWaitTimeoutSeconds() >= 0.0) {
+      node_parameters.emplace_back("navigation_map_wait_timeout_s",
+                                   MapWaitTimeoutSeconds());
+    }
+    node_ = std::make_shared<IncrementalExplorationNode>(
+        parameters_, rclcpp::NodeOptions{}.parameter_overrides(node_parameters));
 
     task_publisher_ = observer_->create_publisher<Task>(
         parameters_.task_topic, rclcpp::QoS{10}.reliable());
@@ -265,6 +301,34 @@ class IncrementalExplorationNodeTest : public ::testing::Test {
           last_status_ = *status;
           statuses_.push_back(*status);
         });
+    diagnostics_subscription_ = observer_->create_subscription<
+        diagnostic_msgs::msg::DiagnosticArray>(
+        parameters_.diagnostics_topic, rclcpp::QoS{1}.reliable().transient_local(),
+        [this](diagnostic_msgs::msg::DiagnosticArray::SharedPtr diagnostics) {
+          for (const auto& status : diagnostics->status) {
+            std::uint64_t sequence = 0U;
+            for (const auto& value : status.values) {
+              if (value.key == "exploration_map_sequence") {
+                sequence = std::stoull(value.value);
+              } else if (value.key == "successful_candidate_count") {
+                successful_candidate_count_.store(std::stoull(value.value));
+              } else if (value.key == "recent_observation_memory_count") {
+                observation_memory_count_.store(std::stoull(value.value));
+              } else if (value.key == "recent_observation_memory_patch_cells") {
+                observation_patch_cells_.store(std::stoull(value.value));
+              } else if (value.key == "recent_observation_memory_eviction_count") {
+                observation_evictions_.store(std::stoull(value.value));
+              } else if (value.key == "recent_observation_memory_invalidated_count") {
+                observation_invalidations_.store(std::stoull(value.value));
+              } else if (value.key == "eligible_candidate_count") {
+                eligible_candidate_count_.store(std::stoull(value.value));
+              } else if (value.key == "suppressed_candidate_count") {
+                suppressed_candidate_count_.store(std::stoull(value.value));
+              }
+            }
+            map_sequence_.store(sequence);
+          }
+        });
     task_map_subscription_ = observer_->create_subscription<
         visualization_msgs::msg::MarkerArray>(
         parameters_.task_map_markers_topic,
@@ -273,6 +337,13 @@ class IncrementalExplorationNodeTest : public ::testing::Test {
           std::scoped_lock lock{task_map_mutex_};
           last_task_map_ = *markers;
           ++task_map_message_count_;
+        });
+    frontiers_subscription_ = observer_->create_subscription<
+        visualization_msgs::msg::MarkerArray>(
+        parameters_.frontiers_topic, rclcpp::QoS{1}.reliable().transient_local(),
+        [this](visualization_msgs::msg::MarkerArray::SharedPtr markers) {
+          std::scoped_lock lock{task_map_mutex_};
+          frontier_messages_.push_back(*markers);
         });
 
     executor_.add_node(server_node_);
@@ -360,6 +431,11 @@ class IncrementalExplorationNodeTest : public ::testing::Test {
     return task_map_message_count_;
   }
 
+  std::vector<visualization_msgs::msg::MarkerArray> FrontierMessages() const {
+    std::scoped_lock lock{task_map_mutex_};
+    return frontier_messages_;
+  }
+
   void PublishPoseAndMap(bool broad_frontier = true) {
     map_publisher_->publish(ExplorationMap(broad_frontier));
     odometry_publisher_->publish(Odometry());
@@ -370,6 +446,51 @@ class IncrementalExplorationNodeTest : public ::testing::Test {
     PublishPoseAndMap(broad_frontier);
     task_publisher_->publish(StartTask());
     ASSERT_TRUE(WaitFor([this] { return server_->goal_count() == 1U; }));
+    ASSERT_TRUE(WaitFor([this] { return map_sequence_.load() == 1U; }));
+  }
+
+  std::size_t CompleteCandidatesOnUnchangedMap() {
+    std::vector<Action::Goal> completed;
+    for (std::size_t index = 0U; index < 100U; ++index) {
+      const auto goal = server_->goal(index);
+      EXPECT_TRUE(std::none_of(completed.begin(), completed.end(),
+                               [&goal](const auto& previous) {
+                                 return SameNavigationPose(previous, goal);
+                               }));
+      completed.push_back(goal);
+      server_->Finish(Action::Result::GOAL_REACHED, "GOAL_REACHED");
+      if (!WaitFor([this, index] {
+            const auto status = LastStatus();
+            return server_->goal_count() > index + 1U ||
+                   (status && status->reason_code == "WAITING_FOR_MAP_CHANGE");
+          })) {
+        ADD_FAILURE() << "successful candidate did not advance or wait for map change";
+        return 0U;
+      }
+      const auto status = LastStatus();
+      if (status && status->reason_code == "WAITING_FOR_MAP_CHANGE") {
+        EXPECT_EQ(status->state, Status::WAITING_FOR_INPUT);
+        EXPECT_EQ(status->completed_goal_count, completed.size());
+        EXPECT_EQ(status->failed_candidate_count, 0U);
+        EXPECT_EQ(status->reachable_candidate_count, 0U);
+        EXPECT_GT(status->frontier_cluster_count, 0U);
+        EXPECT_LT(status->coverage_ratio, 1.0);
+        EXPECT_EQ(server_->goal_count(), completed.size());
+        EXPECT_TRUE(std::any_of(completed.begin(), completed.end(),
+                                [&completed](const auto& left) {
+                                  return std::any_of(
+                                      completed.begin(), completed.end(),
+                                      [&left](const auto& right) {
+                                        return left.target_x_m == right.target_x_m &&
+                                               left.target_y_m == right.target_y_m &&
+                                               left.target_yaw_rad != right.target_yaw_rad;
+                                      });
+                                })) << "different yaw views at one position must remain eligible";
+        return completed.size();
+      }
+    }
+    ADD_FAILURE() << "unchanged map generated more than 100 successful goals";
+    return 0U;
   }
 
   inline static std::atomic<std::uint64_t> next_id_{0U};
@@ -383,17 +504,299 @@ class IncrementalExplorationNodeTest : public ::testing::Test {
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odometry_publisher_;
   rclcpp::Publisher<tf2_msgs::msg::TFMessage>::SharedPtr tf_publisher_;
   rclcpp::Subscription<Status>::SharedPtr status_subscription_;
+  rclcpp::Subscription<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr
+      diagnostics_subscription_;
+  std::atomic<std::uint64_t> map_sequence_{0U};
+  std::atomic<std::size_t> successful_candidate_count_{0U};
+  std::atomic<std::size_t> observation_memory_count_{0U};
+  std::atomic<std::size_t> observation_patch_cells_{0U};
+  std::atomic<std::size_t> observation_evictions_{0U};
+  std::atomic<std::size_t> observation_invalidations_{0U};
+  std::atomic<std::size_t> eligible_candidate_count_{0U};
+  std::atomic<std::size_t> suppressed_candidate_count_{0U};
   rclcpp::Subscription<visualization_msgs::msg::MarkerArray>::SharedPtr
       task_map_subscription_;
+  rclcpp::Subscription<visualization_msgs::msg::MarkerArray>::SharedPtr
+      frontiers_subscription_;
   mutable std::mutex status_mutex_;
   std::optional<Status> last_status_;
   std::vector<Status> statuses_;
   mutable std::mutex task_map_mutex_;
   std::optional<visualization_msgs::msg::MarkerArray> last_task_map_;
+  std::vector<visualization_msgs::msg::MarkerArray> frontier_messages_;
   std::size_t task_map_message_count_{0U};
   rclcpp::executors::MultiThreadedExecutor executor_;
   std::jthread spin_;
 };
+
+class IncrementalExplorationMapWaitTest : public IncrementalExplorationNodeTest {
+ protected:
+  double MapWaitTimeoutSeconds() const override { return 45.0; }
+  bool UseSimTime() const override { return true; }
+
+  void SetUp() override {
+    IncrementalExplorationNodeTest::SetUp();
+    clock_publisher_ = observer_->create_publisher<rosgraph_msgs::msg::Clock>(
+        "/clock", rclcpp::ClockQoS{});
+    ASSERT_TRUE(WaitFor([this] {
+      return clock_publisher_->get_subscription_count() == 1U;
+    }));
+    SetClock(100);
+  }
+
+  void SetClock(std::int32_t seconds) {
+    rosgraph_msgs::msg::Clock clock;
+    clock.clock.sec = seconds;
+    clock_publisher_->publish(clock);
+    ASSERT_TRUE(WaitFor([this, seconds] {
+      return node_->now().seconds() == static_cast<double>(seconds);
+    }));
+  }
+
+  void WaitForMapFeedback() {
+    const auto before_feedback = StatusCount();
+    server_->PublishFeedback(Action::Feedback::PLANNING, "WAITING_FOR_MAP");
+    ASSERT_TRUE(WaitFor([this, before_feedback] {
+      const auto status = LastStatus();
+      return StatusCount() > before_feedback && status &&
+             status->reason_code == "NAVIGATION_WAITING_FOR_MAP";
+    }));
+  }
+
+  void TriggerMapWaitTimeout() {
+    WaitForMapFeedback();
+    SetClock(145);
+    ASSERT_TRUE(WaitFor([this] { return server_->cancel_count() == 1U; }));
+  }
+
+  rclcpp::Publisher<rosgraph_msgs::msg::Clock>::SharedPtr clock_publisher_;
+};
+
+class IncrementalExplorationDisabledMapWaitTest
+    : public IncrementalExplorationMapWaitTest {
+ protected:
+  double MapWaitTimeoutSeconds() const override { return 0.0; }
+};
+
+class IncrementalExplorationDefaultMapWaitTest
+    : public IncrementalExplorationMapWaitTest {
+ protected:
+  double MapWaitTimeoutSeconds() const override { return -1.0; }
+};
+
+TEST_F(IncrementalExplorationDefaultMapWaitTest,
+       DefaultThirtySecondsCancelsOnlyAtDeadline) {
+  EXPECT_DOUBLE_EQ(node_->get_parameter("navigation_map_wait_timeout_s").as_double(), 30.0);
+  Start(false);
+  WaitForMapFeedback();
+  SetClock(129);
+  EXPECT_FALSE(WaitFor([this] { return server_->cancel_count() != 0U; }, 100ms));
+  SetClock(130);
+  ASSERT_TRUE(WaitFor([this] { return server_->cancel_count() == 1U; }));
+  EXPECT_EQ(server_->goal_count(), 1U);
+  EXPECT_EQ(LastStatus()->completed_goal_count, 0U);
+}
+
+TEST_F(IncrementalExplorationNodeTest, RejectsInvalidMapWaitTimeout) {
+  for (const double timeout : {-1.0, std::numeric_limits<double>::infinity(),
+                               std::numeric_limits<double>::quiet_NaN()}) {
+    EXPECT_THROW(std::make_shared<IncrementalExplorationNode>(
+                     parameters_, rclcpp::NodeOptions{}.enable_rosout(false).parameter_overrides({
+                                      {"navigation_map_wait_timeout_s", timeout}})),
+                 std::invalid_argument);
+  }
+}
+
+TEST_F(IncrementalExplorationDisabledMapWaitTest,
+       ExplicitZeroDisablesTimeoutCancellation) {
+  Start(false);
+  WaitForMapFeedback();
+  SetClock(10000);
+  EXPECT_FALSE(WaitFor([this] { return server_->cancel_count() != 0U; }, 150ms));
+  EXPECT_EQ(LastStatus()->reason_code, "NAVIGATION_WAITING_FOR_MAP");
+  EXPECT_EQ(server_->goal_count(), 1U);
+}
+
+TEST_F(IncrementalExplorationDisabledMapWaitTest,
+       FrontierAddsAndDeletesUseMapFrameAndCurrentSimulationStamp) {
+  using Marker = visualization_msgs::msg::Marker;
+  Start(false);
+  ASSERT_TRUE(WaitFor([this] {
+    const auto messages = FrontierMessages();
+    return std::any_of(messages.begin(), messages.end(), [](const auto& message) {
+      return !message.markers.empty();
+    });
+  }));
+  SetClock(101);
+  task_publisher_->publish(Command(Task::CANCEL));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto messages = FrontierMessages();
+    return std::any_of(messages.begin(), messages.end(), [](const auto& message) {
+      return std::any_of(message.markers.begin(), message.markers.end(),
+                         [](const auto& marker) { return marker.action == Marker::DELETE; });
+    });
+  }));
+  for (const auto& message : FrontierMessages()) {
+    for (const auto& marker : message.markers) {
+      EXPECT_EQ(marker.header.frame_id, "map");
+      EXPECT_EQ(marker.header.stamp.sec, marker.action == Marker::DELETE ? 101 : 100);
+      EXPECT_EQ(marker.header.stamp.nanosec, 0U);
+    }
+  }
+}
+
+TEST_F(IncrementalExplorationMapWaitTest,
+       TimeoutWaitsForCanceledTerminalBeforeSuppressingAndReselecting) {
+  Start(false);
+  const auto first = server_->goal(0U);
+  WaitForMapFeedback();
+  SetClock(144);
+  EXPECT_FALSE(WaitFor([this] { return server_->cancel_count() != 0U; }, 100ms));
+  SetClock(145);
+  ASSERT_TRUE(WaitFor([this] { return server_->cancel_count() == 1U; }));
+  ASSERT_TRUE(WaitFor([this] {
+    return LastStatus()->reason_code == "NAVIGATION_MAP_WAIT_TIMEOUT_CANCELING";
+  }));
+  server_->PublishFeedback(Action::Feedback::EXECUTING, "EXECUTING");
+  SetClock(1000);
+  EXPECT_FALSE(WaitFor([this] { return server_->goal_count() != 1U; }, 100ms));
+  EXPECT_EQ(LastStatus()->reason_code, "NAVIGATION_MAP_WAIT_TIMEOUT_CANCELING");
+  EXPECT_EQ(LastStatus()->failed_candidate_count, 0U);
+  EXPECT_EQ(LastStatus()->completed_goal_count, 0U);
+  const auto before_terminal = StatusCount();
+  server_->Finish(Action::Result::CANCELED, "CANCELED");
+  ASSERT_TRUE(WaitFor([this] { return server_->goal_count() == 2U; }));
+  EXPECT_FALSE(SameNavigationPose(first, server_->goal(1U)));
+  EXPECT_EQ(LastStatus()->failed_candidate_count, 1U);
+  EXPECT_EQ(LastStatus()->completed_goal_count, 0U);
+  EXPECT_TRUE(HasStatusReasonPrefixSince(before_terminal,
+                                        "NAVIGATION_MAP_WAIT_TIMEOUT"));
+}
+
+TEST_F(IncrementalExplorationMapWaitTest,
+       IdenticalMapReceiptsAndRepeatedWaitingFeedbackDoNotResetTimeout) {
+  Start(false);
+  WaitForMapFeedback();
+  SetClock(140);
+  auto map = ExplorationMap(false);
+  map.header.stamp.sec = 140;
+  map_publisher_->publish(map);
+  ASSERT_TRUE(WaitFor([this] { return map_sequence_.load() == 2U; }));
+  WaitForMapFeedback();
+  SetClock(145);
+  EXPECT_TRUE(WaitFor([this] { return server_->cancel_count() == 1U; }));
+}
+
+TEST_F(IncrementalExplorationMapWaitTest,
+       ChangedMapEvidenceAndExecutingFeedbackResetContinuousWait) {
+  Start(false);
+  WaitForMapFeedback();
+  SetClock(140);
+  auto map = ExplorationMap(false);
+  map.data.front() = 0;
+  map_publisher_->publish(map);
+  ASSERT_TRUE(WaitFor([this] { return map_sequence_.load() == 2U; }));
+  SetClock(145);
+  EXPECT_FALSE(WaitFor([this] { return server_->cancel_count() != 0U; }, 100ms));
+  SetClock(170);
+  server_->PublishFeedback(Action::Feedback::EXECUTING, "EXECUTING");
+  ASSERT_TRUE(WaitFor([this] {
+    return LastStatus()->reason_code == "NAVIGATION_EXECUTING";
+  }));
+  SetClock(300);
+  EXPECT_FALSE(WaitFor([this] { return server_->cancel_count() != 0U; }, 100ms));
+  WaitForMapFeedback();
+  SetClock(345);
+  EXPECT_TRUE(WaitFor([this] { return server_->cancel_count() == 1U; }));
+}
+
+TEST_F(IncrementalExplorationMapWaitTest,
+       PauseAndResumeDoNotConvertTheirPendingCancellationIntoMapTimeout) {
+  Start(false);
+  const auto first = server_->goal(0U);
+  WaitForMapFeedback();
+  SetClock(120);
+  task_publisher_->publish(Command(Task::PAUSE));
+  ASSERT_TRUE(WaitFor([this] { return server_->cancel_count() == 1U; }));
+  SetClock(300);
+  task_publisher_->publish(Command(Task::RESUME));
+  ASSERT_TRUE(WaitFor([this] { return LastStatus()->reason_code == "RESUMED"; }));
+  server_->PublishFeedback(Action::Feedback::PLANNING, "WAITING_FOR_MAP");
+  SetClock(600);
+  EXPECT_FALSE(WaitFor([this] { return server_->goal_count() != 1U; }, 100ms));
+  server_->Finish(Action::Result::CANCELED, "CANCELED");
+  ASSERT_TRUE(WaitFor([this] { return server_->goal_count() == 2U; }));
+  EXPECT_TRUE(SameNavigationPose(first, server_->goal(1U)));
+  EXPECT_EQ(LastStatus()->failed_candidate_count, 0U);
+}
+
+TEST_F(IncrementalExplorationMapWaitTest,
+       ReplacementTaskDoesNotInheritPendingTimeoutFailure) {
+  Start(false);
+  const auto first = server_->goal(0U);
+  TriggerMapWaitTimeout();
+  task_publisher_->publish(StartTask("replacement"));
+  ASSERT_TRUE(WaitFor([this] { return LastStatus()->task_id == "replacement"; }));
+  EXPECT_EQ(server_->goal_count(), 1U);
+  server_->Finish(Action::Result::CANCELED, "CANCELED");
+  ASSERT_TRUE(WaitFor([this] { return server_->goal_count() == 2U; }));
+  EXPECT_TRUE(SameNavigationPose(first, server_->goal(1U)));
+  EXPECT_EQ(LastStatus()->failed_candidate_count, 0U);
+  EXPECT_EQ(LastStatus()->completed_goal_count, 0U);
+}
+
+TEST_F(IncrementalExplorationMapWaitTest,
+       MapChangeDuringCancellationDoesNotRecordObsoleteTimeoutEvidence) {
+  Start(false);
+  const auto first = server_->goal(0U);
+  TriggerMapWaitTimeout();
+  auto map = ExplorationMap(false);
+  map.data.front() = 0;
+  map_publisher_->publish(map);
+  ASSERT_TRUE(WaitFor([this] { return map_sequence_.load() == 2U; }));
+  server_->Finish(Action::Result::CANCELED, "CANCELED");
+  ASSERT_TRUE(WaitFor([this] { return server_->goal_count() == 2U; }));
+  EXPECT_TRUE(SameNavigationPose(first, server_->goal(1U)));
+  EXPECT_EQ(LastStatus()->failed_candidate_count, 0U);
+}
+
+TEST_F(IncrementalExplorationMapWaitTest,
+       InternalErrorDuringTimeoutCancellationIsNotConvertedToRetry) {
+  Start(false);
+  TriggerMapWaitTimeout();
+  server_->Finish(Action::Result::INTERNAL_ERROR, "TEST_NAVIGATION_INTERNAL_ERROR");
+  ASSERT_TRUE(WaitFor([this] { return LastStatus()->state == Status::ERROR; }));
+  EXPECT_EQ(LastStatus()->reason_code, "TEST_NAVIGATION_INTERNAL_ERROR");
+  EXPECT_EQ(LastStatus()->failed_candidate_count, 0U);
+  EXPECT_EQ(server_->goal_count(), 1U);
+}
+
+TEST_F(IncrementalExplorationMapWaitTest,
+       GoalReachedDuringTimeoutCancellationRemainsActualSuccess) {
+  Start(false);
+  TriggerMapWaitTimeout();
+  server_->Finish(Action::Result::GOAL_REACHED, "GOAL_REACHED");
+  ASSERT_TRUE(WaitFor([this] { return server_->goal_count() == 2U; }));
+  EXPECT_EQ(LastStatus()->completed_goal_count, 1U);
+  EXPECT_EQ(LastStatus()->failed_candidate_count, 0U);
+}
+
+TEST_F(IncrementalExplorationMapWaitTest,
+       ActualNoPathDuringPausedTimeoutCancellationKeepsPauseAndFailure) {
+  Start(false);
+  const auto first = server_->goal(0U);
+  TriggerMapWaitTimeout();
+  task_publisher_->publish(Command(Task::PAUSE));
+  ASSERT_TRUE(WaitFor([this] { return LastStatus()->state == Status::PAUSED; }));
+  server_->Finish(Action::Result::NO_PATH, "NO_PATH");
+  ASSERT_TRUE(WaitFor([this] { return LastStatus()->failed_candidate_count == 1U; }));
+  ASSERT_EQ(LastStatus()->state, Status::PAUSED);
+  EXPECT_EQ(LastStatus()->completed_goal_count, 0U);
+  EXPECT_EQ(server_->goal_count(), 1U);
+  task_publisher_->publish(Command(Task::RESUME));
+  ASSERT_TRUE(WaitFor([this] { return server_->goal_count() == 2U; }));
+  EXPECT_FALSE(SameNavigationPose(first, server_->goal(1U)));
+}
 
 TEST_F(IncrementalExplorationNodeTest, StartWithoutMapWaitsForInput) {
   task_publisher_->publish(StartTask());
@@ -557,19 +960,392 @@ TEST_F(IncrementalExplorationNodeTest,
 }
 
 TEST_F(IncrementalExplorationNodeTest,
-       GoalReachedWaitsForANewerMapOrImmediatelyUsesOneAlreadyReceived) {
+       GoalReachedContinuesWithAnotherCandidateOnUnchangedMap) {
   Start();
+  const auto first = server_->goal(0U);
   server_->Finish(Action::Result::GOAL_REACHED, "GOAL_REACHED");
-  std::this_thread::sleep_for(100ms);
-  EXPECT_EQ(server_->goal_count(), 1U);
-  map_publisher_->publish(ExplorationMap());
   ASSERT_TRUE(WaitFor([this] { return server_->goal_count() == 2U; }));
+  EXPECT_FALSE(SameNavigationPose(first, server_->goal(1U)));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LastStatus();
+    return status && status->completed_goal_count == 1U;
+  }));
+  EXPECT_EQ(LastStatus()->failed_candidate_count, 0U);
+}
 
-  map_publisher_->publish(ExplorationMap());
-  std::this_thread::sleep_for(100ms);
-  EXPECT_EQ(server_->goal_count(), 2U);
+TEST_F(IncrementalExplorationNodeTest,
+       GoalReachedAfterMapUpdateDoesNotRepeatJustReachedCandidate) {
+  Start(false);
+  const auto first = server_->goal(0U);
+  auto changed_map = ExplorationMap(false);
+  changed_map.data.front() = 0;
+  map_publisher_->publish(changed_map);
+  ASSERT_TRUE(WaitFor([this] { return map_sequence_.load() == 2U; }));
   server_->Finish(Action::Result::GOAL_REACHED, "GOAL_REACHED");
-  EXPECT_TRUE(WaitFor([this] { return server_->goal_count() == 3U; }));
+  ASSERT_TRUE(WaitFor([this] { return server_->goal_count() == 2U; }));
+  EXPECT_FALSE(SameNavigationPose(first, server_->goal(1U)));
+}
+
+TEST_F(IncrementalExplorationNodeTest,
+       SuccessfulObservationDoesNotSuppressOtherPositions) {
+  Start();
+  const auto first = server_->goal(0U);
+  for (std::size_t index = 0U; index < 30U; ++index) {
+    server_->Finish(Action::Result::GOAL_REACHED, "GOAL_REACHED");
+    ASSERT_TRUE(WaitFor([this, index] {
+      return server_->goal_count() == index + 2U;
+    }));
+    const auto next = server_->goal(index + 1U);
+    if (next.target_x_m != first.target_x_m || next.target_y_m != first.target_y_m) {
+      return;
+    }
+  }
+  FAIL() << "success at one pose must not suppress different positions";
+}
+
+TEST_F(IncrementalExplorationNodeTest,
+       SuccessfulCandidatesIgnoreRemoteEvidenceAndRetryAfterSensorRangeChange) {
+  Start(false);
+  const auto first = server_->goal(0U);
+  const auto completed = CompleteCandidatesOnUnchangedMap();
+  ASSERT_GT(completed, 1U);
+
+  const auto before_pose = StatusCount();
+  odometry_publisher_->publish(Odometry());
+  tf_publisher_->publish(MapFromOdom());
+  ASSERT_TRUE(WaitFor([this, before_pose] {
+    return StatusCount() >= before_pose + 2U;
+  }));
+  EXPECT_EQ(LastStatus()->reason_code, "WAITING_FOR_MAP_CHANGE");
+  EXPECT_EQ(server_->goal_count(), completed);
+
+  auto same_map = ExplorationMap(false);
+  same_map.header.stamp.sec = 123;
+  same_map.info.map_load_time.sec = 456;
+  map_publisher_->publish(same_map);
+  ASSERT_TRUE(WaitFor([this] { return map_sequence_.load() == 2U; }));
+  EXPECT_EQ(successful_candidate_count_.load(), completed);
+  EXPECT_EQ(LastStatus()->reason_code, "WAITING_FOR_MAP_CHANGE");
+  EXPECT_EQ(server_->goal_count(), completed);
+
+  auto changed_map = same_map;
+  changed_map.data.front() = 0;  // Remote from every view of the remaining hole.
+  map_publisher_->publish(changed_map);
+  ASSERT_TRUE(WaitFor([this] { return map_sequence_.load() == 3U; }));
+  EXPECT_EQ(successful_candidate_count_.load(), completed);
+  EXPECT_EQ(observation_memory_count_.load(), completed);
+  EXPECT_EQ(LastStatus()->reason_code, "WAITING_FOR_MAP_CHANGE");
+  EXPECT_EQ(server_->goal_count(), completed);
+
+  // Change a cell behind the reached view, beyond the navigation failure
+  // footprint patch but inside the sensor range. The original hole and the
+  // candidate's collision footprint remain unchanged.
+  std::optional<std::size_t> local_cell;
+  for (std::size_t index = 0U; index < changed_map.data.size(); ++index) {
+    const double x = static_cast<double>(index % changed_map.info.width) + 0.5;
+    const double y = static_cast<double>(index / changed_map.info.width) + 0.5;
+    const double distance = std::hypot(x - first.target_x_m, y - first.target_y_m);
+    const double toward_hole = (x - first.target_x_m) * (7.5 - first.target_x_m) +
+                               (y - first.target_y_m) * (6.5 - first.target_y_m);
+    if (changed_map.data[index] == 0 && distance > 2.5 &&
+        distance < parameters_.sensor_model.range_m && toward_hole < 0.0) {
+      local_cell = index;
+      break;
+    }
+  }
+  ASSERT_TRUE(local_cell);
+  changed_map.data[*local_cell] = 100;
+  map_publisher_->publish(changed_map);
+  ASSERT_TRUE(WaitFor([this, completed] {
+    return server_->goal_count() == completed + 1U;
+  }));
+  EXPECT_TRUE(SameNavigationPose(first, server_->goal(completed)));
+  EXPECT_GT(observation_invalidations_.load(), 0U);
+}
+
+TEST_F(IncrementalExplorationNodeTest,
+       NewTaskClearsSuccessfulCandidatesEvenWhenTaskIdIsReused) {
+  Start(false);
+  const auto first = server_->goal(0U);
+  const auto completed = CompleteCandidatesOnUnchangedMap();
+  ASSERT_GT(completed, 1U);
+  task_publisher_->publish(StartTask());
+  ASSERT_TRUE(WaitFor([this, completed] {
+    return server_->goal_count() == completed + 1U;
+  }));
+  EXPECT_TRUE(SameNavigationPose(first, server_->goal(completed)));
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LastStatus();
+    return status && status->completed_goal_count == 0U;
+  }));
+}
+
+TEST_F(IncrementalExplorationNodeTest,
+       DistantMapGrowthAndAlignedWindowShiftPreserveObservationEvidence) {
+  Start(false);
+  const auto completed = CompleteCandidatesOnUnchangedMap();
+  ASSERT_GT(completed, 1U);
+  const auto original = ExplorationMap(false);
+  auto expanded = original;
+  expanded.info.width = 22U;
+  expanded.info.height = 22U;
+  expanded.info.origin.position.x = -5.0;
+  expanded.info.origin.position.y = -5.0;
+  expanded.data.assign(22U * 22U, 0);
+  for (std::size_t y = 0U; y < original.info.height; ++y) {
+    for (std::size_t x = 0U; x < original.info.width; ++x) {
+      expanded.data[(y + 5U) * expanded.info.width + x + 5U] =
+          original.data[y * original.info.width + x];
+    }
+  }
+  map_publisher_->publish(expanded);
+  ASSERT_TRUE(WaitFor([this] { return map_sequence_.load() == 2U; }));
+  EXPECT_EQ(observation_memory_count_.load(), completed);
+  EXPECT_EQ(observation_invalidations_.load(), 0U);
+  EXPECT_EQ(LastStatus()->reason_code, "WAITING_FOR_MAP_CHANGE");
+  EXPECT_EQ(server_->goal_count(), completed);
+}
+
+TEST_F(IncrementalExplorationNodeTest,
+       ChangedLocalObservationResolutionAllowsRetry) {
+  Start(false);
+  const auto first = server_->goal(0U);
+  const auto completed = CompleteCandidatesOnUnchangedMap();
+  ASSERT_GT(completed, 1U);
+  const auto original = ExplorationMap(false);
+  auto finer = original;
+  finer.info.width = 24U;
+  finer.info.height = 24U;
+  finer.info.resolution = 0.5F;
+  finer.data.resize(24U * 24U);
+  for (std::size_t y = 0U; y < finer.info.height; ++y) {
+    for (std::size_t x = 0U; x < finer.info.width; ++x) {
+      finer.data[y * finer.info.width + x] =
+          original.data[(y / 2U) * original.info.width + x / 2U];
+    }
+  }
+  map_publisher_->publish(finer);
+  ASSERT_TRUE(WaitFor([this, completed] {
+    return server_->goal_count() == completed + 1U;
+  }));
+  EXPECT_TRUE(SameNavigationPose(first, server_->goal(completed)));
+  EXPECT_EQ(observation_invalidations_.load(), completed);
+}
+
+TEST_F(IncrementalExplorationNodeTest,
+       FractionalOriginAlignedWindowShiftPreservesObservationEvidence) {
+  auto original = ExplorationMap(false);
+  original.info.origin.position.x = 0.1;
+  original.info.origin.position.y = 0.1;
+  map_publisher_->publish(original);
+  odometry_publisher_->publish(Odometry());
+  tf_publisher_->publish(MapFromOdom());
+  task_publisher_->publish(StartTask());
+  ASSERT_TRUE(WaitFor([this] { return server_->goal_count() == 1U; }));
+  const auto completed = CompleteCandidatesOnUnchangedMap();
+  ASSERT_GT(completed, 1U);
+
+  auto shifted = original;
+  shifted.info.width = 22U;
+  shifted.info.height = 22U;
+  shifted.info.origin.position.x = -4.9;
+  shifted.info.origin.position.y = -4.9;
+  shifted.data.assign(22U * 22U, 0);
+  for (std::size_t y = 0U; y < original.info.height; ++y) {
+    for (std::size_t x = 0U; x < original.info.width; ++x) {
+      shifted.data[(y + 5U) * shifted.info.width + x + 5U] =
+          original.data[y * original.info.width + x];
+    }
+  }
+  map_publisher_->publish(shifted);
+  ASSERT_TRUE(WaitFor([this] { return map_sequence_.load() == 2U; }));
+  EXPECT_EQ(observation_memory_count_.load(), completed);
+  EXPECT_EQ(observation_invalidations_.load(), 0U);
+  EXPECT_EQ(LastStatus()->reason_code, "WAITING_FOR_MAP_CHANGE");
+  EXPECT_EQ(server_->goal_count(), completed);
+
+  // The integer shift is reversible without accumulating or hiding drift.
+  map_publisher_->publish(original);
+  ASSERT_TRUE(WaitFor([this] { return map_sequence_.load() == 3U; }));
+  EXPECT_EQ(observation_memory_count_.load(), completed);
+  EXPECT_EQ(observation_invalidations_.load(), 0U);
+  EXPECT_EQ(server_->goal_count(), completed);
+}
+
+TEST_F(IncrementalExplorationNodeTest,
+       HalfCellOriginShiftInvalidatesObservationEvidence) {
+  Start(false);
+  const auto completed = CompleteCandidatesOnUnchangedMap();
+  ASSERT_GT(completed, 1U);
+  auto shifted = ExplorationMap(false);
+  shifted.info.origin.position.x += 0.5;
+  shifted.info.origin.position.y += 0.5;
+  map_publisher_->publish(shifted);
+  ASSERT_TRUE(WaitFor([this] { return map_sequence_.load() == 2U; }));
+  EXPECT_EQ(observation_memory_count_.load(), 0U);
+  EXPECT_EQ(observation_invalidations_.load(), completed);
+}
+
+TEST_F(IncrementalExplorationNodeTest,
+       SmallRealOriginShiftInvalidatesObservationEvidence) {
+  Start(false);
+  const auto completed = CompleteCandidatesOnUnchangedMap();
+  ASSERT_GT(completed, 1U);
+  auto shifted = ExplorationMap(false);
+  shifted.info.origin.position.x += 1.0e-5;
+  map_publisher_->publish(shifted);
+  ASSERT_TRUE(WaitFor([this] { return map_sequence_.load() == 2U; }));
+  EXPECT_EQ(observation_memory_count_.load(), 0U);
+  EXPECT_EQ(observation_invalidations_.load(), completed);
+}
+
+TEST_F(IncrementalExplorationNodeTest,
+       SuccessRacingWithPauseStaysPausedUntilResume) {
+  Start(false);
+  const auto first = server_->goal(0U);
+  task_publisher_->publish(Command(Task::PAUSE));
+  ASSERT_TRUE(WaitFor([this] { return server_->cancel_count() == 1U; }));
+  server_->Finish(Action::Result::GOAL_REACHED, "GOAL_REACHED");
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LastStatus();
+    return status && status->completed_goal_count == 1U;
+  }));
+  EXPECT_EQ(LastStatus()->state, Status::PAUSED);
+  ASSERT_TRUE(WaitFor([this] { return observation_memory_count_.load() == 1U; }));
+  auto remote_change = ExplorationMap(false);
+  remote_change.data.front() = 0;
+  map_publisher_->publish(remote_change);
+  ASSERT_TRUE(WaitFor([this] { return map_sequence_.load() == 2U; }));
+  EXPECT_EQ(observation_memory_count_.load(), 1U);
+  const auto before_pose = StatusCount();
+  odometry_publisher_->publish(Odometry());
+  ASSERT_TRUE(WaitFor([this, before_pose] { return StatusCount() > before_pose; }));
+  EXPECT_EQ(server_->goal_count(), 1U);
+
+  task_publisher_->publish(Command(Task::RESUME));
+  ASSERT_TRUE(WaitFor([this] { return server_->goal_count() == 2U; }));
+  EXPECT_FALSE(SameNavigationPose(first, server_->goal(1U)));
+}
+
+TEST_F(IncrementalExplorationNodeTest,
+       OldTaskSuccessAndCancelDoNotRepopulateObservationMemory) {
+  Start(false);
+  const auto first = server_->goal(0U);
+  server_->Finish(Action::Result::GOAL_REACHED, "GOAL_REACHED");
+  ASSERT_TRUE(WaitFor([this] { return server_->goal_count() == 2U; }));
+  task_publisher_->publish(StartTask());
+  ASSERT_TRUE(WaitFor([this] { return server_->cancel_count() == 1U; }));
+  server_->Finish(Action::Result::GOAL_REACHED, "GOAL_REACHED");
+  ASSERT_TRUE(WaitFor([this] { return server_->goal_count() == 3U; }));
+  EXPECT_TRUE(SameNavigationPose(first, server_->goal(2U)));
+  ASSERT_TRUE(WaitFor([this] {
+    return observation_memory_count_.load() == 0U &&
+           LastStatus()->completed_goal_count == 0U;
+  }));
+  task_publisher_->publish(Command(Task::CANCEL));
+  ASSERT_TRUE(WaitFor([this] { return server_->cancel_count() == 2U; }));
+  server_->Finish(Action::Result::GOAL_REACHED, "GOAL_REACHED");
+  ASSERT_TRUE(WaitFor([this] { return LastStatus()->state == Status::IDLE; }));
+  EXPECT_EQ(observation_memory_count_.load(), 0U);
+  EXPECT_EQ(server_->goal_count(), 3U);
+}
+
+TEST_F(IncrementalExplorationNodeTest,
+       SuppressedCandidatesAreGrayAndActiveCandidateStaysRed) {
+  Start(false);
+  const auto first = server_->goal(0U);
+  server_->Finish(Action::Result::GOAL_REACHED, "GOAL_REACHED");
+  ASSERT_TRUE(WaitFor([this] { return server_->goal_count() == 2U; }));
+  const auto second = server_->goal(1U);
+  server_->Finish(Action::Result::NO_PATH, "NO_PATH");
+  ASSERT_TRUE(WaitFor([this] { return server_->goal_count() == 3U; }));
+  const auto active = server_->goal(2U);
+  ASSERT_TRUE(WaitFor([this] { return suppressed_candidate_count_.load() == 2U; }));
+  EXPECT_EQ(observation_memory_count_.load(), 1U);
+  EXPECT_EQ(LastStatus()->failed_candidate_count, 1U);
+  EXPECT_EQ(eligible_candidate_count_.load() + suppressed_candidate_count_.load(),
+            LastStatus()->candidate_count);
+  EXPECT_EQ(LastStatus()->reachable_candidate_count, eligible_candidate_count_.load());
+  ASSERT_TRUE(WaitFor([this, first, second, active] {
+    const auto messages = FrontierMessages();
+    if (messages.empty()) {
+      return false;
+    }
+    std::size_t gray = 0U;
+    bool selected_red = false;
+    for (const auto& marker : messages.back().markers) {
+      if (marker.ns != "candidates" || marker.action != marker.ADD) {
+        continue;
+      }
+      auto matches = [&marker](const Action::Goal& goal) {
+        return marker.pose.position.x == goal.target_x_m &&
+               marker.pose.position.y == goal.target_y_m &&
+               marker.pose.orientation.z == std::sin(goal.target_yaw_rad / 2.0) &&
+               marker.pose.orientation.w == std::cos(goal.target_yaw_rad / 2.0);
+      };
+      if ((matches(first) || matches(second)) &&
+          marker.color.r == marker.color.g && marker.color.g == marker.color.b &&
+          marker.color.a < 0.5F) {
+        ++gray;
+      }
+      if (matches(active) && marker.color.r == 1.0F && marker.color.g == 0.0F &&
+          marker.color.a == 1.0F) {
+        selected_red = true;
+      }
+    }
+    return gray == 2U && selected_red;
+  }));
+}
+
+class IncrementalExplorationSmallObservationMemoryTest
+    : public IncrementalExplorationNodeTest {
+ protected:
+  void ConfigureParameters(IncrementalExplorationNodeParameters& parameters) override {
+    // A 5m observation at 1m resolution uses at most 11x11 patch cells.
+    // Visibility of the single UNKNOWN cell fits, but only two patches fit.
+    parameters.information_gain_limits.maximum_visibility_work_units = 256U;
+  }
+};
+
+TEST_F(IncrementalExplorationSmallObservationMemoryTest,
+       ObservationMemoryEvictsOldVisitsInsteadOfFailingAtCapacity) {
+  Start(false);
+  for (std::size_t index = 0U; index < 1005U; ++index) {
+    server_->Finish(Action::Result::GOAL_REACHED, "GOAL_REACHED");
+    ASSERT_TRUE(WaitFor([this, index] {
+      return server_->goal_count() == index + 2U;
+    }));
+    ASSERT_TRUE(WaitFor([this, index] {
+      return LastStatus()->completed_goal_count == index + 1U;
+    }));
+    EXPECT_LE(observation_memory_count_.load(), 2U);
+    EXPECT_LE(observation_patch_cells_.load(), 256U);
+    EXPECT_EQ(LastStatus()->failed_candidate_count, 0U);
+    EXPECT_NE(LastStatus()->state, Status::ERROR);
+  }
+  EXPECT_GT(observation_evictions_.load(), 0U);
+  EXPECT_EQ(observation_invalidations_.load(), 0U);
+}
+
+TEST_F(IncrementalExplorationSmallObservationMemoryTest,
+       ChangedObservationEvidenceIsRemovedBeforeCapacityEviction) {
+  Start(false);
+  for (std::size_t index = 0U; index < 2U; ++index) {
+    server_->Finish(Action::Result::GOAL_REACHED, "GOAL_REACHED");
+    ASSERT_TRUE(WaitFor([this, index] {
+      return server_->goal_count() == index + 2U;
+    }));
+  }
+  ASSERT_TRUE(WaitFor([this] { return observation_memory_count_.load() == 2U; }));
+  auto local_change = ExplorationMap(false);
+  local_change.data[6U * local_change.info.width + 10U] = 100;
+  map_publisher_->publish(local_change);
+  ASSERT_TRUE(WaitFor([this] { return map_sequence_.load() == 2U; }));
+  EXPECT_GT(observation_invalidations_.load(), 0U);
+  EXPECT_EQ(observation_evictions_.load(), 0U);
+  server_->Finish(Action::Result::GOAL_REACHED, "GOAL_REACHED");
+  ASSERT_TRUE(WaitFor([this] { return server_->goal_count() == 4U; }));
+  EXPECT_EQ(observation_evictions_.load(), 0U);
 }
 
 TEST_F(IncrementalExplorationNodeTest,

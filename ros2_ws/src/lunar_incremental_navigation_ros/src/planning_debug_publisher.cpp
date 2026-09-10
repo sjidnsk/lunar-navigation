@@ -1,6 +1,7 @@
 #include "lunar_incremental_navigation_ros/planning_debug_publisher.hpp"
 
 #include <stdexcept>
+#include "lunar_incremental_navigation_core/local_goal_region.hpp"
 #include <utility>
 
 #include "lunar_incremental_navigation_ros/planning_snapshot_visualization.hpp"
@@ -10,9 +11,11 @@ namespace {
 
 [[nodiscard]] bool IsPlanningDemoTopicPrefix(
     const std::string_view prefix) noexcept {
-  constexpr std::string_view kRoot{"/planning_demo"};
-  return prefix.size() > kRoot.size() && prefix.starts_with(kRoot) &&
-         prefix[kRoot.size()] == '/';
+  for (const std::string_view root : {"/planning_demo", "/lunar_demo"}) {
+    if (prefix.size() > root.size() && prefix.starts_with(root) &&
+        prefix[root.size()] == '/') return true;
+  }
+  return false;
 }
 
 }  // namespace
@@ -30,7 +33,7 @@ std::string NormalizeDebugTopicPrefix(const std::string_view prefix) {
   }
   if (!IsPlanningDemoTopicPrefix(normalized)) {
     throw std::invalid_argument(
-        "debug topic prefix must be below /planning_demo/");
+        "debug topic prefix must be below /planning_demo/ or /lunar_demo/");
   }
   return normalized;
 }
@@ -85,9 +88,60 @@ PlanningDebugPublisher::PlanningDebugPublisher(
   traversability_publisher_ =
       node.create_publisher<visualization_msgs::msg::MarkerArray>(
           config_.topic_prefix + "/traversability", DebugVisualizationQos());
+  local_goals_publisher_ =
+      node.create_publisher<visualization_msgs::msg::MarkerArray>(
+          config_.topic_prefix + "/local_goals", DebugVisualizationQos());
   start_patch_publisher_ =
       node.create_publisher<visualization_msgs::msg::MarkerArray>(
           config_.topic_prefix + "/start_patch_cells", DebugVisualizationQos());
+}
+
+void PlanningDebugPublisher::PublishLocalGoals(
+    const lunar::incremental_navigation::LocalTarget& target,
+    const lunar::incremental_navigation::LocalPlanResult& result,
+    const std::string& frame_id) {
+  if (!enabled()) return;
+  using Marker = visualization_msgs::msg::Marker;
+  visualization_msgs::msg::MarkerArray array;
+  Marker clear;
+  clear.action = Marker::DELETEALL;
+  array.markers.push_back(clear);
+  Marker candidates;
+  candidates.header.frame_id = frame_id;
+  candidates.header.stamp = clock_->now();
+  candidates.ns = "candidates";
+  candidates.id = 0;
+  candidates.type = Marker::POINTS;
+  candidates.action = Marker::ADD;
+  candidates.pose.orientation.w = 1.;
+  candidates.scale.x = candidates.scale.y = 0.16;
+  candidates.color.g = candidates.color.b = candidates.color.a = 1.;
+  if (target.region) {
+    for (const auto& candidate : target.region->candidates) {
+      geometry_msgs::msg::Point point;
+      point.x = candidate.target.center.x;
+      point.y = candidate.target.center.y;
+      point.z = 0.15;
+      candidates.points.push_back(point);
+    }
+  }
+  array.markers.push_back(candidates);
+  const auto& path = result.path.empty() ? result.raw_path : result.path;
+  if (result.status == lunar::incremental_navigation::LocalPlanResult::Status::kPlanFound &&
+      !path.empty()) {
+    Marker selected = candidates;
+    selected.ns = "selected";
+    selected.type = Marker::SPHERE;
+    selected.points.clear();
+    selected.pose.position.x = path.back().pose.position_m.x;
+    selected.pose.position.y = path.back().pose.position_m.y;
+    selected.pose.position.z = 0.25;
+    selected.scale.x = selected.scale.y = selected.scale.z = 0.4;
+    selected.color.r = 1.;
+    selected.color.g = 0.;
+    array.markers.push_back(selected);
+  }
+  local_goals_publisher_->publish(array);
 }
 
 bool PlanningDebugPublisher::enabled() const noexcept {

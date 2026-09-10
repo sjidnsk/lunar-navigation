@@ -10,6 +10,8 @@
 #include <utility>
 
 #include "local/grid_supercover.hpp"
+#include "lunar_incremental_navigation_core/arrival_tolerance.hpp"
+#include "lunar_incremental_navigation_core/local_goal_region.hpp"
 
 namespace lunar::incremental_navigation {
 namespace {
@@ -106,6 +108,13 @@ struct PlanningSessionCoordinator::Impl final {
   std::optional<PathReference> active_path;
   std::shared_ptr<const RequestLocalPlanningView> active_view;
   std::optional<StateInput> latest_state;
+  struct WaitingInput {
+    std::uint64_t fine_revision{};
+    std::uint64_t guidance_revision{};
+    std::string frame_id;
+    Pose2 pose;
+  };
+  std::optional<WaitingInput> waiting_input;
   std::shared_ptr<std::stop_source> current_cycle_stop;
 
   [[nodiscard]] SteadyClock::time_point Now() const {
@@ -155,6 +164,7 @@ struct PlanningSessionCoordinator::Impl final {
     session_id.reset();
     goal.reset();
     latest_state.reset();
+    waiting_input.reset();
     return terminal;
   }
 
@@ -166,9 +176,10 @@ struct PlanningSessionCoordinator::Impl final {
     }
     const double position_tolerance_m = GoalPositionTolerance(
         fine, config.goal_position_tolerance_m);
-    if (std::hypot(input.base_link_pose.position_m.x - goal->target_x_m,
-                   input.base_link_pose.position_m.y - goal->target_y_m) >
-        position_tolerance_m) {
+    if (!WithinArrivalTolerance(
+            std::hypot(input.base_link_pose.position_m.x - goal->target_x_m,
+                       input.base_link_pose.position_m.y - goal->target_y_m),
+            position_tolerance_m)) {
       return false;
     }
     return !goal->has_target_yaw ||
@@ -311,6 +322,7 @@ StartSessionResult PlanningSessionCoordinator::Start(const SessionId id,
   impl_->active_path.reset();
   impl_->active_view.reset();
   impl_->latest_state.reset();
+  impl_->waiting_input.reset();
   impl_->state = CoordinatorState::kPlanning;
   return result;
 }
@@ -340,7 +352,27 @@ CycleOutput PlanningSessionCoordinator::PlanCycle(
     return output;
   }
 
-  if (snapshots.fine && impl_->GoalReached(state, *snapshots.fine)) {
+  // A waiting session remains cancelable, but unchanged evidence cannot help search.
+  if (impl_->waiting_input && snapshots.fine) {
+    const auto& waiting = *impl_->waiting_input;
+    const auto& pose = state.base_link_pose;
+    const auto guidance_revision = snapshots.guidance
+        ? snapshots.guidance->global_guidance_revision() : 0U;
+    if (waiting.fine_revision == snapshots.fine->fine_traversability_revision() &&
+        waiting.guidance_revision == guidance_revision &&
+        waiting.frame_id == snapshots.fine->geometry().frame_id() &&
+        WithinArrivalTolerance(std::hypot(pose.position_m.x-waiting.pose.position_m.x,
+                                         pose.position_m.y-waiting.pose.position_m.y), 0.0) &&
+        WithinArrivalTolerance(std::abs(NormalizeAngle(pose.yaw_rad-waiting.pose.yaw_rad)), 0.0)) {
+      output.feedback = impl_->Feedback("WAITING_FOR_MAP");
+      return output;
+    }
+    impl_->waiting_input.reset();
+    impl_->state = CoordinatorState::kReplanning;
+  }
+
+  if (snapshots.fine && impl_->GoalReached(state, *snapshots.fine) &&
+      (!impl_->config.require_execution_confirmation || trigger == CycleTrigger::kSegmentEnd)) {
     output.terminal = impl_->Finish(SessionOutcome::kGoalReached,
                                     "GOAL_REACHED",
                                     impl_->last_safety_evaluated_fine_revision);
@@ -536,6 +568,20 @@ CycleOutput PlanningSessionCoordinator::PlanCycle(
     local.status = LocalPlanResult::Status::kTimeout;
   }
 
+  if (local.status == LocalPlanResult::Status::kNoPath &&
+      local.reason_code == "LOCAL_WAITING_FOR_MAP" && target->region) {
+    output.path_reference = impl_->Invalidate(impl_->last_safety_evaluated_fine_revision);
+    impl_->waiting_input = Impl::WaitingInput{
+        .fine_revision = snapshots.fine->fine_traversability_revision(),
+        .guidance_revision = snapshots.guidance
+            ? snapshots.guidance->global_guidance_revision() : 0U,
+        .frame_id = snapshots.fine->geometry().frame_id(),
+        .pose = state.base_link_pose};
+    impl_->state = CoordinatorState::kPlanning;
+    output.feedback = impl_->Feedback("WAITING_FOR_MAP");
+    return output;
+  }
+
   if (local.status != LocalPlanResult::Status::kPlanFound) {
     SessionOutcome outcome = SessionOutcome::kNoPath;
     std::string reason = local.reason_code.empty() ? "NO_PATH"
@@ -561,6 +607,39 @@ CycleOutput PlanningSessionCoordinator::PlanCycle(
                                     "EMPTY_LOCAL_PATH",
                                     impl_->last_safety_evaluated_fine_revision);
     output.feedback = impl_->Feedback("EMPTY_LOCAL_PATH");
+    return output;
+  }
+
+  // A non-final reference consisting only of the current pose cannot advance
+  // exploration. Do not endlessly publish new revisions of an already-done segment.
+  const bool stationary = std::all_of(selected_path.begin(), selected_path.end(),
+      [&](const PathPoint& point) {
+        const auto& q = point.pose.orientation;
+        const double yaw = std::atan2(2.0 * (q.w*q.z + q.x*q.y),
+                                      1.0 - 2.0 * (q.y*q.y + q.z*q.z));
+        return std::hypot(point.pose.position_m.x - start.x,
+                          point.pose.position_m.y - start.y) <= 1e-6 &&
+               std::abs(NormalizeAngle(yaw - state.base_link_pose.yaw_rad)) <= 1e-6;
+      });
+  bool repeated_completed_target = false;
+  if (trigger == CycleTrigger::kSegmentEnd && impl_->active_path &&
+      !impl_->active_path->path.poses.empty()) {
+    const auto& previous = impl_->active_path->path.poses.back();
+    const auto& next = selected_path.back().pose;
+    const auto yaw = [](const Quaternion& q) {
+      return std::atan2(2.0*(q.w*q.z+q.x*q.y), 1.0-2.0*(q.y*q.y+q.z*q.z));
+    };
+    repeated_completed_target =
+        std::hypot(previous.position_m.x-next.position_m.x,
+                   previous.position_m.y-next.position_m.y) <= 1e-6 &&
+        std::abs(NormalizeAngle(yaw(previous.orientation)-yaw(next.orientation))) <= 1e-3 &&
+        std::hypot(next.position_m.x-start.x, next.position_m.y-start.y) <=
+            GoalPositionTolerance(*snapshots.fine, impl_->config.goal_position_tolerance_m);
+  }
+  if (!local.reaches_final_goal && (stationary || repeated_completed_target)) {
+    output.terminal = impl_->Finish(SessionOutcome::kNoPath, "NO_LOCAL_PROGRESS",
+                                    impl_->last_safety_evaluated_fine_revision);
+    output.feedback = impl_->Feedback("NO_LOCAL_PROGRESS");
     return output;
   }
 

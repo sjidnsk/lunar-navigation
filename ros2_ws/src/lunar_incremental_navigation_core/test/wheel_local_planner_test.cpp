@@ -13,6 +13,8 @@
 
 #include "lunar_incremental_navigation_core/elevation_map.hpp"
 #include "lunar_incremental_navigation_core/wheel_local_planner.hpp"
+#include "lunar_incremental_navigation_core/local_planning_window.hpp"
+#include "lunar_incremental_navigation_core/request_local_start_patch.hpp"
 
 namespace lunar::incremental_navigation {
 namespace {
@@ -26,12 +28,13 @@ using Cell = std::pair<GridIndex, std::pair<FineCellState, double>>;
 [[nodiscard]] std::shared_ptr<const FineTraversabilitySnapshot> MakeFine(
     const std::size_t width, const std::size_t height,
     const std::vector<Cell>& cells, const bool default_free = false,
-    const double resolution_m = 1.0, std::vector<float> elevation = {}) {
+    const double resolution_m = 1.0, std::vector<float> elevation = {},
+    const Vec3 origin = {}) {
   PersistentElevationMap elevation_map;
   const GridGeometry geometry{.frame_id = "map",
                               .width = width,
                               .height = height,
-                              .resolution_m = resolution_m};
+                              .resolution_m = resolution_m, .origin_m = origin};
   if (elevation.empty()) {
     elevation.assign(geometry.CellCount(), 0.0F);
   }
@@ -110,6 +113,27 @@ using Cell = std::pair<GridIndex, std::pair<FineCellState, double>>;
 [[nodiscard]] double Yaw(const Quaternion& q) {
   return std::atan2(2.0 * (q.w * q.z + q.x * q.y),
                     1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+}
+
+TEST(WheelLocalPlanner, RegionalFinalOnDecimalGridCornerRetainsContinuousEndpoint) {
+  const auto fine = MakeFine(160U, 160U, {}, true, 0.2, {}, {-16.0, -16.0, 0.0});
+  const Pose2 start{.position_m = {0.0, 0.0}, .yaw_rad = 0.0};
+  const auto window = BuildLocalPlanningWindow(*fine, {start.position_m.x, start.position_m.y}, 64.0).geometry;
+  ASSERT_TRUE(window);
+  const auto patch = RequestLocalStartPatchBuilder().Build(
+      fine, *window, start, WheeledCapability{}, TraversabilityProfile{});
+  ASSERT_TRUE(patch.view);
+  const auto target = LocalTargetSelector().SelectRolling(
+      *fine, *window, start.position_m,
+      FinalGoal{.target_x_m = 3.0, .target_y_m = 0.0}, {});
+  ASSERT_TRUE(target);
+  const auto result = WheelLocalPlanner().Plan(
+      *patch.view, start, *target, SteadyClock::time_point::max(), {});
+  ASSERT_EQ(result.status, LocalPlanResult::Status::kPlanFound);
+  ASSERT_FALSE(result.path.empty());
+  EXPECT_TRUE(result.reaches_final_goal);
+  EXPECT_DOUBLE_EQ(result.path.back().pose.position_m.x, 3.0);
+  EXPECT_DOUBLE_EQ(result.path.back().pose.position_m.y, 0.0);
 }
 
 TEST(WheelLocalPlanner, UsesEightNeighborsAndPreservesContinuousEndpoints) {

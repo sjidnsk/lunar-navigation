@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <memory>
 
 #include "lunar_incremental_navigation_core/traversability_snapshot.hpp"
 #include "lunar_incremental_navigation_core/types/global_route.hpp"
@@ -9,15 +10,24 @@
 
 namespace lunar::incremental_navigation {
 
+class LocalGoalRegion;
+
 struct LocalTarget final {
   Point2 center;
   double position_tolerance_m{};
   bool is_final_goal{};
   std::optional<double> terminal_yaw_rad;
+  std::shared_ptr<const LocalGoalRegion> region;
 };
 
 class LocalTargetSelector final {
  public:
+  [[nodiscard]] std::optional<LocalTarget> SelectRolling(
+      const FineTraversabilitySnapshot& fine,
+      const SparseGridGeometry& local_window, Point2 start,
+      const FinalGoal& final_goal,
+      const std::optional<GlobalRoute>& guidance) const;
+
   [[nodiscard]] std::optional<LocalTarget> Select(
       const FineTraversabilitySnapshot& fine,
       const SparseGridGeometry& local_window, Point2 start,
