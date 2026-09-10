@@ -44,6 +44,7 @@ struct IncrementalExplorationNodeParameters final {
   std::string frontiers_topic;
   std::string diagnostics_topic;
   double navigation_map_wait_timeout_s{30.0};
+  std::string map_frame{"map"}, odom_frame{"odom"}, base_frame{"base_link"};
 };
 
 class IncrementalExplorationNode final : public rclcpp::Node {
@@ -67,6 +68,7 @@ class IncrementalExplorationNode final : public rclcpp::Node {
   void Initialize(IncrementalExplorationNodeParameters parameters);
 
   std::shared_ptr<Runtime> runtime_;
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr startup_parameters_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr
       exploration_map_subscription_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr

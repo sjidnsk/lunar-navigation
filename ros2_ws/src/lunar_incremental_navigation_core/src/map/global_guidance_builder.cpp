@@ -169,7 +169,7 @@ struct MutableGuidanceTile final {
       .x = CheckedCeil((bounds.max_x_m - origin.x) / resolution_m),
       .y = CheckedCeil((bounds.max_y_m - origin.y) / resolution_m),
   };
-  SparseGridGeometry geometry("map", resolution_m, origin, min, max);
+  SparseGridGeometry geometry(fine_geometry.frame_id(), resolution_m, origin, min, max);
   if (!geometry.valid()) {
     throw std::invalid_argument("guidance geometry is invalid");
   }

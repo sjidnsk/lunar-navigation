@@ -9,6 +9,7 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 _PARAMETERS = {
     "input_mode": "motion_reference",
+    "map_frame": "map", "odom_frame": "odom", "base_frame": "base_link",
     "platform_config": "",
     "path_reference_topic": "/Car/T4/planning/path_reference",
     "tracking_status_topic": "/Car/T4/control/tracking_status",

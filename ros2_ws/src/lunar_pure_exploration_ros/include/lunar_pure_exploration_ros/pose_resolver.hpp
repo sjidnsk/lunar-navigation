@@ -1,5 +1,8 @@
 #pragma once
 
+#include <string>
+#include <utility>
+
 #include <optional>
 
 #include "lunar_pure_exploration_core/types.hpp"
@@ -10,12 +13,17 @@ namespace lunar::pure_exploration_ros {
 
 class PoseResolver {
  public:
+  PoseResolver(std::string map_frame = "map", std::string odom_frame = "odom",
+               std::string base_frame = "base_link")
+      : map_frame_(std::move(map_frame)), odom_frame_(std::move(odom_frame)),
+        base_frame_(std::move(base_frame)) {}
   void UpdateOdometry(const nav_msgs::msg::Odometry& odometry);
   void UpdateTransforms(const tf2_msgs::msg::TFMessage& transforms);
   [[nodiscard]] std::optional<lunar::pure_exploration::Pose2>
   LatestPoseInMap() const;
 
  private:
+  std::string map_frame_, odom_frame_, base_frame_;
   struct PlanarTransform {
     double x;
     double y;

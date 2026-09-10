@@ -65,6 +65,7 @@ namespace core = lunar::incremental_navigation;
 constexpr std::string_view kPackageName{"lunar_incremental_navigation_ros"};
 
 struct RuntimeParameters final {
+  std::string map_frame, odom_frame, base_frame;
   std::string platform_name;
   core::PlatformType platform_type;
   core::PlatformCapability capability;
@@ -120,10 +121,10 @@ struct RuntimeParameters final {
   auto loaded = LoadPlatformConfig(
       ResolvePlatformConfig(platform_name, configured_path), platform_name);
   if (!loaded.capability) {
-    throw std::runtime_error("PLANNER_ERROR: platform_config rejected");
+    throw std::runtime_error("PLANNER_ERROR: " + loaded.error_detail);
   }
   if (!loaded.start_blind_zone_margin_m) {
-    throw std::runtime_error("PLANNER_ERROR: platform_config rejected");
+    throw std::runtime_error("PLANNER_ERROR: " + loaded.error_detail);
   }
   const std::int64_t planning_sla_ms =
       node.declare_parameter<std::int64_t>("planning_sla_ms", 2000);
@@ -148,6 +149,9 @@ struct RuntimeParameters final {
         "local_window_size_m > 0");
   }
   RuntimeParameters parameters{
+      .map_frame = node.declare_parameter<std::string>("map_frame", "map"),
+      .odom_frame = node.declare_parameter<std::string>("odom_frame", "odom"),
+      .base_frame = node.declare_parameter<std::string>("base_frame", "base_link"),
       .platform_name = platform_name,
       .platform_type = platform_type,
       .capability = std::move(*loaded.capability),
@@ -465,6 +469,7 @@ struct IncrementalNavigationNode::Impl final {
   Impl(IncrementalNavigationNode& owner, IncrementalNavigationNodeDependencies dependencies)
       : node(owner),
         parameters(ReadRuntimeParameters(owner)),
+        input_store(parameters.map_frame, parameters.odom_frame),
         pipeline(parameters.capability, parameters.profile,
                  parameters.coarse_resolution_m),
         exploration_map_publisher(node, parameters.exploration_map_topic),
@@ -508,7 +513,7 @@ struct IncrementalNavigationNode::Impl final {
     planning_group = node.create_callback_group(
         rclcpp::CallbackGroupType::MutuallyExclusive);
 
-    const auto local_map_qos = MakeTraversabilityInputQos(
+    auto local_map_qos = MakeTraversabilityInputQos(
         parameters.local_map_qos_reliability,
         parameters.local_map_qos_durability);
     if (!local_map_qos) {
@@ -516,6 +521,12 @@ struct IncrementalNavigationNode::Impl final {
           "PLANNER_ERROR: local map QoS must use reliability "
           "{reliable,best_effort} and durability "
           "{transient_local,volatile}");
+    }
+    const auto local_depth = node.declare_parameter<int>("local_map_qos_depth", 1);
+    if (local_depth <= 0) throw std::invalid_argument("local_map_qos_depth must be positive");
+    local_map_qos->keep_last(local_depth);
+    if (parameters.map_frame.empty() || parameters.odom_frame.empty() || parameters.base_frame.empty() || parameters.map_frame == parameters.odom_frame || parameters.map_frame == parameters.base_frame || parameters.odom_frame == parameters.base_frame) {
+      throw std::invalid_argument("map_frame, odom_frame, base_frame must be distinct nonempty names");
     }
     const auto state_qos = StateInputQos();
 
@@ -749,7 +760,7 @@ struct IncrementalNavigationNode::Impl final {
 
     const bool has_usable_map_from_odom =
         input.map_from_odom &&
-        AdaptDirectMapFromOdom(*input.map_from_odom).value.has_value();
+        AdaptDirectMapFromOdom(*input.map_from_odom, parameters.map_frame, parameters.odom_frame).value.has_value();
     if (!has_usable_map_from_odom) {
       RCLCPP_DEBUG(node.get_logger(),
                    "local map deferred until direct map -> odom TF arrives");
@@ -868,11 +879,11 @@ struct IncrementalNavigationNode::Impl final {
     if (!input.odometry || !input.map_from_odom) {
       return;
     }
-    const auto transform = AdaptDirectMapFromOdom(*input.map_from_odom);
+    const auto transform = AdaptDirectMapFromOdom(*input.map_from_odom, parameters.map_frame, parameters.odom_frame);
     if (!transform.value) {
       return;
     }
-    const auto state = AdaptStateInput(*transform.value, *input.odometry);
+    const auto state = AdaptStateInput(*transform.value, *input.odometry, parameters.map_frame, parameters.odom_frame, parameters.base_frame);
     if (!state.value) {
       return;
     }
@@ -1139,9 +1150,9 @@ struct IncrementalNavigationNode::Impl final {
     }
 #endif
     if (output.global_route) {
-      global_route_publisher->publish(ConvertGlobalRoute(output.global_route));
+      global_route_publisher->publish(ConvertGlobalRoute(output.global_route, parameters.map_frame));
     } else if (!output.terminal && output.feedback.reason_code == "PLAN_FOUND") {
-      global_route_publisher->publish(ConvertGlobalRoute(std::nullopt));
+      global_route_publisher->publish(ConvertGlobalRoute(std::nullopt, parameters.map_frame));
     }
     if (output.path_reference) {
       PublishPath(*output.path_reference);
@@ -1167,7 +1178,7 @@ struct IncrementalNavigationNode::Impl final {
   }
 
   void PublishPath(const core::PathReference& reference) {
-    const auto converted = ConvertPathReference(reference);
+    const auto converted = ConvertPathReference(reference, parameters.map_frame);
     path_publisher->publish(converted);
     local_path_publisher->publish(converted.path);
     last_reference = reference;
@@ -1403,7 +1414,7 @@ struct IncrementalNavigationNode::Impl final {
     if (terminal.invalidated && !invalidation_already_published) {
       PublishPath(*terminal.invalidated);
     }
-    global_route_publisher->publish(ConvertGlobalRoute(std::nullopt));
+    global_route_publisher->publish(ConvertGlobalRoute(std::nullopt, parameters.map_frame));
     pending_terminal = PendingTerminal{
         .handle = handle,
         .terminal = terminal,
@@ -1481,7 +1492,21 @@ IncrementalNavigationNode::IncrementalNavigationNode(
     const rclcpp::NodeOptions& options,
     IncrementalNavigationNodeDependencies dependencies)
     : rclcpp::Node("incremental_navigation", options),
-      impl_(std::make_unique<Impl>(*this, std::move(dependencies))) {}
+      impl_(std::make_unique<Impl>(*this, std::move(dependencies))) {
+  startup_parameters_ = add_on_set_parameters_callback([this](const std::vector<rclcpp::Parameter>& values) {
+    rcl_interfaces::msg::SetParametersResult result;
+    result.successful = true;
+    for (const auto& value : values) {
+      if (value.get_name() == "use_sim_time") continue;
+      if (has_parameter(value.get_name()) && get_parameter(value.get_name()).get_parameter_value() != value.get_parameter_value()) {
+        result.successful = false;
+        result.reason = value.get_name() + ": startup-only parameter; edit configuration and restart node";
+        break;
+      }
+    }
+    return result;
+  });
+}
 
 IncrementalNavigationNode::~IncrementalNavigationNode() = default;
 

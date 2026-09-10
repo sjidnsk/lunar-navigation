@@ -235,9 +235,9 @@ struct CellBounds final {
 
 [[nodiscard]] visualization_msgs::msg::Marker MakeCircle(
     const std::string& marker_namespace, const core::Pose2& anchor,
-    const double radius, const int id) {
+    const double radius, const int id, const std::string& frame) {
   visualization_msgs::msg::Marker marker;
-  marker.header.frame_id = "map";
+  marker.header.frame_id = frame;
   marker.ns = marker_namespace;
   marker.id = id;
   marker.type = visualization_msgs::msg::Marker::LINE_STRIP;
@@ -398,9 +398,9 @@ visualization_msgs::msg::MarkerArray ProjectStartPatchVisualization(
   output.markers.push_back(std::move(assumed_unknown));
   output.markers.push_back(MakeCircle(
       "hard_radius", view.patch_anchor(),
-      std::max(0.0, hard_inflation_radius_m), 1));
+      std::max(0.0, hard_inflation_radius_m), 1, geometry.frame_id()));
   output.markers.push_back(MakeCircle("start_patch_radius", view.patch_anchor(),
-                                      view.start_patch_radius_m(), 2));
+                                      view.start_patch_radius_m(), 2, geometry.frame_id()));
   return output;
 }
 

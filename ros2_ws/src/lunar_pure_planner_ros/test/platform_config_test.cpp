@@ -51,6 +51,19 @@ void ExpectRejected(const std::filesystem::path& path,
   EXPECT_EQ(result.reason_code, "PLANNER_ERROR");
 }
 
+TEST(PlatformConfig, AcceptsLowerSpeedAndExplainsInvalidSpeed) {
+  const auto base = ReadText(ConfigPath("wheel.yaml"));
+  const auto slower = WriteTemporaryConfig("lower_speed", ReplaceExactlyOnce(base, "maximum_forward_speed_mps: 0.2", "maximum_forward_speed_mps: 0.1"));
+  const auto accepted = lunar::pure_planner_ros::LoadPlatformConfig(slower, "wheel");
+  ASSERT_TRUE(accepted.capability) << accepted.error_detail;
+  EXPECT_DOUBLE_EQ(std::get<lunar::pure_planning::WheeledCapability>(*accepted.capability).maximum_forward_speed_mps, 0.1);
+  const auto invalid = WriteTemporaryConfig("invalid_speed", ReplaceExactlyOnce(base, "maximum_forward_speed_mps: 0.2", "maximum_forward_speed_mps: -0.1"));
+  const auto rejected = lunar::pure_planner_ros::LoadPlatformConfig(invalid, "wheel");
+  EXPECT_FALSE(rejected.capability);
+  EXPECT_NE(rejected.error_detail.find("maximum_forward_speed_mps"), std::string::npos);
+  std::filesystem::remove(slower); std::filesystem::remove(invalid);
+}
+
 TEST(PlatformConfig, LoadsExactlyThreeFixedPlatforms) {
   EXPECT_TRUE(lunar::pure_planner_ros::LoadPlatformConfig(
                   ConfigPath("wheel.yaml"), "wheel")
@@ -136,22 +149,22 @@ TEST(PlatformConfig, RejectsNonFiniteValueInAnOtherwiseValidConfig) {
   std::filesystem::remove(path);
 }
 
-TEST(PlatformConfig, RejectsAChangedFixedCapabilityValue) {
+TEST(PlatformConfig, AcceptsAChangedFixedCapabilityValue) {
   const auto path = WriteTemporaryConfig(
       "platform_config_value_drift",
       ReplaceExactlyOnce(ReadText(ConfigPath("wheel.yaml")),
                          "wheel_diameter_m: 0.319", "wheel_diameter_m: 0.320"));
-  ExpectRejected(path, "wheel");
+  EXPECT_TRUE(lunar::pure_planner_ros::LoadPlatformConfig(path, "wheel").capability);
   std::filesystem::remove(path);
 }
 
-TEST(PlatformConfig, RejectsCapabilityVersionDrift) {
+TEST(PlatformConfig, AcceptsCapabilityVersionDrift) {
   const auto path = WriteTemporaryConfig(
       "platform_config_version_drift",
       ReplaceExactlyOnce(ReadText(ConfigPath("legged.yaml")),
                          "capability_version: quad48-approved-baseline-v2",
                          "capability_version: quad48-approved-baseline-v1"));
-  ExpectRejected(path, "legged");
+  EXPECT_TRUE(lunar::pure_planner_ros::LoadPlatformConfig(path, "legged").capability);
   std::filesystem::remove(path);
 }
 
@@ -164,7 +177,7 @@ TEST(PlatformConfig, RejectsDuplicatePrimitiveId) {
   std::filesystem::remove(path);
 }
 
-TEST(PlatformConfig, RejectsPrimitiveOrderDrift) {
+TEST(PlatformConfig, AcceptsPrimitiveOrderDrift) {
   std::string contents = ReadText(ConfigPath("wheel.yaml"));
   contents = ReplaceExactlyOnce(contents, "primitive_id: forward,",
                                 "primitive_id: placeholder,");
@@ -173,7 +186,7 @@ TEST(PlatformConfig, RejectsPrimitiveOrderDrift) {
   contents = ReplaceExactlyOnce(contents, "primitive_id: placeholder,",
                                 "primitive_id: reverse,");
   const auto path = WriteTemporaryConfig("platform_config_order_drift", contents);
-  ExpectRejected(path, "wheel");
+  EXPECT_TRUE(lunar::pure_planner_ros::LoadPlatformConfig(path, "wheel").capability);
   std::filesystem::remove(path);
 }
 
@@ -187,13 +200,13 @@ TEST(PlatformConfig, RejectsPrimitiveKindDrift) {
   std::filesystem::remove(path);
 }
 
-TEST(PlatformConfig, RejectsFixedBooleanDrift) {
+TEST(PlatformConfig, AcceptsFixedBooleanDrift) {
   const auto path = WriteTemporaryConfig(
       "platform_config_bool_drift",
       ReplaceExactlyOnce(ReadText(ConfigPath("wheel.yaml")),
                          "allow_unsupported_gap: false",
                          "allow_unsupported_gap: true"));
-  ExpectRejected(path, "wheel");
+  EXPECT_TRUE(lunar::pure_planner_ros::LoadPlatformConfig(path, "wheel").capability);
   std::filesystem::remove(path);
 }
 
@@ -216,13 +229,13 @@ TEST(PlatformConfig, RejectsNegativeBodyDimension) {
   std::filesystem::remove(path);
 }
 
-TEST(PlatformConfig, RejectsExactPrimitiveProjectionDrift) {
+TEST(PlatformConfig, AcceptsExactPrimitiveProjectionDrift) {
   const auto path = WriteTemporaryConfig(
       "platform_config_projection_drift",
       ReplaceExactlyOnce(ReadText(ConfigPath("wheel.yaml")),
                          "position_m: [0.19509032201612825, 0.01921471959676957, 0.0]",
                          "position_m: [0.19509032201612825, 0.01921471959676958, 0.0]"));
-  ExpectRejected(path, "wheel");
+  EXPECT_TRUE(lunar::pure_planner_ros::LoadPlatformConfig(path, "wheel").capability);
   std::filesystem::remove(path);
 }
 

@@ -285,6 +285,12 @@ CandidateGenerator::CandidateGenerator(PlatformGeometry platform,
     : validator_(std::move(platform), ValidateLimits(limits)),
       parameters_(parameters),
       limits_(limits) {
+  if (parameters_.yaw_offsets_rad.empty()) {
+    throw std::invalid_argument("yaw_offsets must be nonempty");
+  }
+  if (parameters_.yaw_offsets_rad.size() > limits_.maximum_candidate_views) {
+    throw std::length_error("yaw_offsets exceed maximum_candidate_views");
+  }
   for (std::size_t i = 0U; i < parameters_.yaw_offsets_rad.size(); ++i) {
     if (!std::isfinite(parameters_.yaw_offsets_rad[i]) ||
         (i > 0U && !(parameters_.yaw_offsets_rad[i - 1U] <

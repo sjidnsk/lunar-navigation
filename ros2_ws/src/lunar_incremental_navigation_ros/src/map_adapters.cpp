@@ -59,16 +59,16 @@ NormalizedQuaternion(const geometry_msgs::msg::Quaternion& value) noexcept {
 AdaptCurrentMapFromOdomWithoutStamp(
     const geometry_msgs::msg::TransformStamped& transform) {
   const auto rotation = NormalizedQuaternion(transform.transform.rotation);
-  if (transform.header.frame_id != "map" ||
-      transform.child_frame_id != "odom" || !rotation ||
+  if (transform.header.frame_id.empty() ||
+      transform.child_frame_id.empty() || !rotation ||
       !Finite(transform.transform.translation.x) ||
       !Finite(transform.transform.translation.y) ||
       !Finite(transform.transform.translation.z)) {
     return Invalid<lunar::incremental_navigation::RigidTransform>();
   }
   return {.value = lunar::incremental_navigation::RigidTransform{
-              .parent_frame = "map",
-              .child_frame = "odom",
+              .parent_frame = transform.header.frame_id,
+              .child_frame = transform.child_frame_id,
               .translation_m = {
                   .x = transform.transform.translation.x,
                   .y = transform.transform.translation.y,
@@ -118,7 +118,7 @@ struct LayerLayout final {
   const auto width = CellDimension(message.info.length_x, message.info.resolution);
   const auto height = CellDimension(message.info.length_y, message.info.resolution);
   if (!width || !height || message.header.frame_id.empty() ||
-      map_from_source.parent_frame != "map" ||
+      map_from_source.parent_frame.empty() ||
       map_from_source.child_frame != message.header.frame_id ||
       !ValidPose(message.info.pose) ||
       message.layers.size() != message.data.size()) {

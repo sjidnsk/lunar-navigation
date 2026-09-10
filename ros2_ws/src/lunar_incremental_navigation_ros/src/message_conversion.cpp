@@ -7,9 +7,9 @@
 namespace lunar::incremental_navigation_ros {
 namespace {
 
-[[nodiscard]] std_msgs::msg::Header MapHeader() {
+[[nodiscard]] std_msgs::msg::Header MapHeader(std::string_view frame) {
   std_msgs::msg::Header header;
-  header.frame_id = "map";
+  header.frame_id = frame;
   header.stamp.sec = 0;
   header.stamp.nanosec = 0U;
   return header;
@@ -29,9 +29,9 @@ namespace {
 }
 
 [[nodiscard]] nav_msgs::msg::Path ConvertPoses(
-    const std::vector<lunar::incremental_navigation::Pose3>& poses) {
+    const std::vector<lunar::incremental_navigation::Pose3>& poses, std::string_view map_frame) {
   nav_msgs::msg::Path path;
-  path.header = MapHeader();
+  path.header = MapHeader(map_frame);
   path.poses.reserve(poses.size());
   for (const auto& pose : poses) {
     geometry_msgs::msg::PoseStamped converted;
@@ -78,23 +78,23 @@ lunar_planning_msgs::action::NavigateToPose::Result ConvertResult(
 }
 
 lunar_planning_msgs::msg::PathReference ConvertPathReference(
-    const lunar::incremental_navigation::PathReference& reference) {
+    const lunar::incremental_navigation::PathReference& reference, std::string_view map_frame) {
   lunar_planning_msgs::msg::PathReference converted;
   converted.session_id.uuid = reference.session_id.bytes;
   converted.segment_revision = reference.segment_revision;
   converted.traversability_revision = reference.traversability_revision;
   converted.state = static_cast<std::uint8_t>(reference.state);
   converted.reaches_final_goal = reference.reaches_final_goal;
-  converted.path = ConvertPoses(reference.path.poses);
+  converted.path = ConvertPoses(reference.path.poses, map_frame);
   return converted;
 }
 
 nav_msgs::msg::Path ConvertGlobalRoute(
-    const std::optional<lunar::incremental_navigation::GlobalRoute>& route) {
+    const std::optional<lunar::incremental_navigation::GlobalRoute>& route, std::string_view map_frame) {
   if (!route) {
-    return ConvertPoses({});
+    return ConvertPoses({}, map_frame);
   }
-  return ConvertPoses(route->poses_map);
+  return ConvertPoses(route->poses_map, map_frame);
 }
 
 }  // namespace lunar::incremental_navigation_ros

@@ -27,12 +27,12 @@ class MapFromOdomUpdate:
     transform: MapFromOdom | None
 
 
-def parse_map_from_odom(message: TFMessage) -> MapFromOdomUpdate:
+def parse_map_from_odom(message: TFMessage, map_frame="map", odom_frame="odom") -> MapFromOdomUpdate:
     """Extract the last direct ``map <- odom`` transform in one TF message."""
     matching = [
         transform
         for transform in message.transforms
-        if transform.header.frame_id == "map" and transform.child_frame_id == "odom"
+        if transform.header.frame_id == map_frame and transform.child_frame_id == odom_frame
     ]
     if not matching:
         return MapFromOdomUpdate(False, None)

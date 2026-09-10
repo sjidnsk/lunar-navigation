@@ -23,7 +23,7 @@ void InputStore::UpdateOdometry(nav_msgs::msg::Odometry::ConstSharedPtr message)
 void InputStore::UpdateTf(const tf2_msgs::msg::TFMessage& message) {
   std::scoped_lock lock{mutex_};
   for (const auto& transform : message.transforms) {
-    if (transform.header.frame_id == "map" && transform.child_frame_id == "odom") {
+    if (transform.header.frame_id == map_frame_ && transform.child_frame_id == odom_frame_) {
       latest_.map_from_odom = transform;
       ++latest_.tf_sequence;
     }

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string_view>
+
 #include <optional>
 #include <string>
 
@@ -30,9 +32,9 @@ struct GoalConversionResult final {
     const lunar::incremental_navigation::NavigateToPoseResult& result);
 
 [[nodiscard]] lunar_planning_msgs::msg::PathReference ConvertPathReference(
-    const lunar::incremental_navigation::PathReference& reference);
+    const lunar::incremental_navigation::PathReference& reference, std::string_view map_frame = "map");
 
 [[nodiscard]] nav_msgs::msg::Path ConvertGlobalRoute(
-    const std::optional<lunar::incremental_navigation::GlobalRoute>& route);
+    const std::optional<lunar::incremental_navigation::GlobalRoute>& route, std::string_view map_frame = "map");
 
 }  // namespace lunar::incremental_navigation_ros

@@ -129,13 +129,15 @@ class WideWallTerrain(Terrain):
 class FormalMapper:
     """An owned formal navigator process plus an observation-only ROS peer."""
 
-    def __init__(self, binary, config, artifact_dir):
+    def __init__(self, binary, config, artifact_dir, frames=("map", "odom", "base_link")):
         self.artifact_dir = artifact_dir
+        self.frames = frames
         suffix = uuid.uuid4().hex[:12]
         self.prefix = '/lunar_demo/obstacle_mapping_' + suffix
         node_name = 'obstacle_mapper_' + suffix
         parameters = {
             'platform_type': 'wheel', 'platform_config': str(config),
+            'map_frame': frames[0], 'odom_frame': frames[1], 'base_frame': frames[2],
             'coarse_resolution_m': 1.0, 'local_window_size_m': 64.0,
             'use_sim_time': False, 'enable_tracking_feedback': False,
             'enable_debug_visualization': True, 'debug_fine_window_m': 28.0,
@@ -187,13 +189,13 @@ class FormalMapper:
         x, y, yaw = self.pose
         stamp = self.node.get_clock().now().to_msg()
         odom = Odometry()
-        odom.header.stamp, odom.header.frame_id, odom.child_frame_id = stamp, 'odom', 'base_link'
+        odom.header.stamp, odom.header.frame_id, odom.child_frame_id = stamp, self.frames[1], self.frames[2]
         odom.pose.pose.position.x, odom.pose.pose.position.y = x, y
         odom.pose.pose.orientation.z, odom.pose.pose.orientation.w = (
             math.sin(yaw / 2), math.cos(yaw / 2))
         transform = TransformStamped()
-        transform.header.stamp, transform.header.frame_id = stamp, 'map'
-        transform.child_frame_id = 'odom'
+        transform.header.stamp, transform.header.frame_id = stamp, self.frames[0]
+        transform.child_frame_id = self.frames[1]
         transform.transform.rotation.w = 1.0
         self.tf_pub.publish(TFMessage(transforms=[transform]))
         self.odom_pub.publish(odom)
@@ -223,7 +225,9 @@ class FormalMapper:
         previous_geometry = {name: _geometry(msg) for name, msg in self.maps.items()}
         self.publish_pose()
         stamp = self.node.get_clock().now().to_msg()
-        self.map_pub.publish(observation_grid_map(observation, stamp))
+        grid = observation_grid_map(observation, stamp)
+        grid.header.frame_id = self.frames[1]
+        self.map_pub.publish(grid)
         self.until(lambda: set(self.maps) == {'fine', 'coarse'} and
                    all(self.revisions[key] > previous_revisions[key] for key in REVISION_FIELDS) and
                    all(_stamp_ns(msg.header.stamp) > _stamp_ns(stamp) and
@@ -238,6 +242,7 @@ class FormalMapper:
             'geometry_changed': {name: _geometry(msg) != previous_geometry.get(name)
                                  for name, msg in self.maps.items()},
         }
+        assert all(msg.header.frame_id == self.frames[0] for msg in self.maps.values())
         return self.maps['fine'], self.maps['coarse']
 
     def close(self):
@@ -257,8 +262,8 @@ class FormalMapper:
             self.context.shutdown()
 
 
-@pytest.fixture
-def formal_mapper(monkeypatch):
+@pytest.fixture(params=[("map", "odom", "base_link"), ("world", "local_odom", "robot_base")], ids=["default_frames", "custom_frames"])
+def formal_mapper(monkeypatch, request):
     package = 'lunar_incremental_navigation_ros'
     try:
         binary = Path(get_package_prefix(package)) / 'lib' / package / 'lunar_incremental_navigation_node'
@@ -270,7 +275,7 @@ def formal_mapper(monkeypatch):
     evidence_root.mkdir(parents=True, exist_ok=True)
     artifact_dir = Path(tempfile.mkdtemp(prefix='obstacle-mapping-', dir=evidence_root))
     monkeypatch.setenv('ROS_LOCALHOST_ONLY', '1')
-    mapper = FormalMapper(binary, config, artifact_dir)
+    mapper = FormalMapper(binary, config, artifact_dir, request.param)
     try:
         yield mapper
     finally:

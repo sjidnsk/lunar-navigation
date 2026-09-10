@@ -12,11 +12,26 @@ rclcpp::QoS ExplorationMapQos() {
   return rclcpp::QoS{rclcpp::KeepLast{1}}.reliable().transient_local();
 }
 
+rclcpp::QoS ConfiguredExplorationMapQos(rclcpp::Node& node) {
+  const auto reliability = node.declare_parameter<std::string>("exploration_map_qos_reliability", "reliable");
+  const auto durability = node.declare_parameter<std::string>("exploration_map_qos_durability", "transient_local");
+  const auto depth = node.declare_parameter<int>("exploration_map_qos_depth", 1);
+  if (depth <= 0) throw std::invalid_argument("exploration_map_qos_depth must be positive");
+  rclcpp::QoS qos{rclcpp::KeepLast{static_cast<std::size_t>(depth)}};
+  if (reliability == "reliable") qos.reliable();
+  else if (reliability == "best_effort") qos.best_effort();
+  else throw std::invalid_argument("exploration_map_qos_reliability: expected reliable or best_effort");
+  if (durability == "transient_local") qos.transient_local();
+  else if (durability == "volatile") qos.durability_volatile();
+  else throw std::invalid_argument("exploration_map_qos_durability: expected transient_local or volatile");
+  return qos;
+}
+
 IncrementalMapPublisher::IncrementalMapPublisher(rclcpp::Node& node,
                                                  std::string topic)
     : clock_(node.get_clock()),
       publisher_(node.create_publisher<nav_msgs::msg::OccupancyGrid>(
-          std::move(topic), ExplorationMapQos())) {}
+          std::move(topic), ConfiguredExplorationMapQos(node))) {}
 
 bool IncrementalMapPublisher::Publish(
     const lunar::incremental_navigation::SnapshotBundle& bundle) {

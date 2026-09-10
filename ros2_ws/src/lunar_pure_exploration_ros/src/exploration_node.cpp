@@ -615,7 +615,7 @@ ExplorationNodeParameters LoadParameters(rclcpp::Node& node) {
       node.declare_parameter<double>("stop_wait_diagnostic_s", 5.0);
 
   if (threshold < 0 || threshold > 100 || maximum_task_raster_cells <= 0 ||
-      yaw_offsets_deg.size() != 5U || maximum_replans < 0 ||
+      yaw_offsets_deg.empty() || maximum_replans < 0 ||
       maximum_replans > std::numeric_limits<std::uint8_t>::max() ||
       maximum_candidate_retryable_retries < 0 ||
       maximum_candidate_retryable_retries >
@@ -638,6 +638,7 @@ ExplorationNodeParameters LoadParameters(rclcpp::Node& node) {
     throw std::invalid_argument{"invalid exploration parameters"};
   }
   lunar::pure_exploration::CandidateParameters candidate_parameters;
+  candidate_parameters.yaw_offsets_rad.resize(yaw_offsets_deg.size());
   for (std::size_t index = 0U; index < yaw_offsets_deg.size(); ++index) {
     if (!std::isfinite(yaw_offsets_deg[index])) {
       throw std::invalid_argument{"yaw offsets must be finite"};

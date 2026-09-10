@@ -178,17 +178,21 @@ TEST(PlatformConfigLoader,
                std::invalid_argument);
 }
 
-TEST(PlatformConfigLoader, RejectsSelectorPayloadAndFrozenIdentityMismatch) {
+TEST(PlatformConfigLoader, RejectsSelectorPayloadMismatch) {
   for (const auto& replacement : {
            std::pair{"platform: wheel", "platform: legged"},
-           std::pair{"platform_type: WHEELED", "platform_type: wheel"},
-           std::pair{"base_frame_id: base_footprint",
-                     "base_frame_id: base_link"}}) {
+           std::pair{"platform_type: WHEELED", "platform_type: wheel"}}) {
     const TemporaryYaml yaml{
         ReplaceOnce(WheelYaml(), replacement.first, replacement.second)};
     EXPECT_THROW(LoadPlatformConfig(yaml.path(), "wheel"),
                  std::invalid_argument);
   }
+}
+
+TEST(PlatformConfigLoader, PreservesConfiguredBaseFrame) {
+  const TemporaryYaml yaml{ReplaceOnce(WheelYaml(),
+      "base_frame_id: base_footprint", "base_frame_id: robot_base")};
+  EXPECT_EQ(LoadPlatformConfig(yaml.path(), "wheel").geometry.base_frame_id, "robot_base");
 }
 
 TEST(PlatformConfigLoader, RejectsEmptyOrDuplicatePlatformId) {

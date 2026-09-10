@@ -120,15 +120,20 @@ IncrementalExplorationNodeParameters LoadParameters(rclcpp::Node& node) {
       node.declare_parameter<double>("sensor_fov_deg", 90.0);
   const auto yaw_offsets_deg = node.declare_parameter<std::vector<double>>(
       "yaw_offsets_deg", {-45.0, -22.5, 0.0, 22.5, 45.0});
-  if (yaw_offsets_deg.size() != 5U || !std::isfinite(minimum_frontier) ||
-      minimum_frontier <= 0.0 ||
-      !std::isfinite(coverage_target) || coverage_target <= 0.0 ||
-      coverage_target > 1.0 || !std::isfinite(sensor_range) ||
-      sensor_range <= 0.0 || !std::isfinite(sensor_fov_deg) ||
-      sensor_fov_deg <= 0.0) {
-    throw std::invalid_argument{"invalid incremental exploration parameters"};
-  }
+  const auto require_positive = [](double value, const char* name) {
+    if (!std::isfinite(value) || value <= 0.0) {
+      throw std::invalid_argument(std::string{name} + ": must be finite and > 0");
+    }
+  };
+  require_positive(minimum_frontier, "minimum_frontier_length_m");
+  require_positive(coverage_target, "coverage_target");
+  if (coverage_target > 1.0) throw std::invalid_argument("coverage_target: must be <= 1");
+  require_positive(sensor_range, "sensor_range_m");
+  require_positive(sensor_fov_deg, "sensor_fov_deg");
+  if (sensor_fov_deg > 360.0) throw std::invalid_argument("sensor_fov_deg: must be <= 360");
+  if (yaw_offsets_deg.empty()) throw std::invalid_argument("yaw_offsets_deg: must be nonempty");
   lunar::pure_exploration::CandidateParameters candidate_parameters;
+  candidate_parameters.yaw_offsets_rad.resize(yaw_offsets_deg.size());
   for (std::size_t index = 0U; index < yaw_offsets_deg.size(); ++index) {
     if (!std::isfinite(yaw_offsets_deg[index])) {
       throw std::invalid_argument{"yaw offsets must be finite"};
@@ -212,8 +217,8 @@ double QuaternionYaw(const geometry_msgs::msg::Quaternion& quaternion) {
 }
 
 GridGeometry MapGeometry(const nav_msgs::msg::OccupancyGrid& map) {
-  if (map.header.frame_id != "map") {
-    throw std::invalid_argument{"exploration map frame must be map"};
+  if (map.header.frame_id.empty()) {
+    throw std::invalid_argument{"exploration map frame must be nonempty"};
   }
   return {.width = map.info.width,
           .height = map.info.height,
@@ -527,8 +532,8 @@ std::vector<std::int8_t> ProjectToFixedGrid(
   return data;
 }
 
-Polygon2 TaskBoundary(const Task& task) {
-  if (task.task_id.empty() || task.header.frame_id != "map" ||
+Polygon2 TaskBoundary(const Task& task, const std::string& frame) {
+  if (task.task_id.empty() || task.header.frame_id != frame ||
       task.boundary.points.size() < 3U) {
     throw std::invalid_argument{"invalid incremental exploration START"};
   }
@@ -551,9 +556,9 @@ std::uint32_t ToU32(const std::size_t value) {
 }
 
 visualization_msgs::msg::MarkerArray BoundaryMarkers(
-    const Polygon2& boundary) {
+    const Polygon2& boundary, const std::string& frame) {
   visualization_msgs::msg::Marker marker;
-  marker.header.frame_id = "map";
+  marker.header.frame_id = frame;
   marker.ns = "task_boundary";
   marker.id = 0;
   marker.type = visualization_msgs::msg::Marker::LINE_STRIP;
@@ -602,6 +607,7 @@ struct IncrementalExplorationNode::Runtime final {
         recent_observations(parameters.sensor_model.range_m,
                             parameters.candidate_limits.maximum_candidate_views,
                             parameters.information_gain_limits.maximum_visibility_work_units),
+        pose_resolver(parameters.map_frame, parameters.odom_frame, parameters.base_frame),
         clock(node.get_clock()),
         status_publisher(node.create_publisher<Status>(
             parameters.status_topic,
@@ -689,7 +695,7 @@ double MapWaitElapsedSecondsLocked(const Runtime& runtime) {
 void PublishLocked(Runtime& runtime) {
   Status status;
   status.header.stamp = runtime.clock->now();
-  status.header.frame_id = "map";
+  status.header.frame_id = runtime.parameters.map_frame;
   status.task_id = runtime.task_id;
   status.state = runtime.state;
   status.reason_code = runtime.reason_code;
@@ -717,11 +723,11 @@ void PublishLocked(Runtime& runtime) {
 
   if (runtime.task_boundary) {
     runtime.task_boundary_publisher->publish(
-        BoundaryMarkers(*runtime.task_boundary));
+        BoundaryMarkers(*runtime.task_boundary, runtime.parameters.map_frame));
   }
   if (runtime.raster) {
     runtime.task_map_publisher->publish(
-        runtime.task_map_marker_builder.Build(*runtime.raster, "map"));
+        runtime.task_map_marker_builder.Build(*runtime.raster, runtime.parameters.map_frame));
   }
   std::optional<MarkerSelection> selected;
   if (runtime.active_goal &&
@@ -974,7 +980,7 @@ void Decide(const std::shared_ptr<Runtime>& runtime) {
       target = NavigationTarget{.pose = runtime->active_goal->candidate.pose};
       geometry_msgs::msg::PoseStamped goal;
       goal.header.stamp = runtime->clock->now();
-      goal.header.frame_id = "map";
+      goal.header.frame_id = runtime->parameters.map_frame;
       goal.pose.position.x = target->pose.x;
       goal.pose.position.y = target->pose.y;
       goal.pose.orientation.z = std::sin(target->pose.yaw / 2.0);
@@ -1236,6 +1242,9 @@ void HandleMap(const std::weak_ptr<Runtime>& weak_runtime,
       return;
     }
     try {
+      if (map.header.frame_id != runtime->parameters.map_frame) {
+        throw std::invalid_argument("exploration map frame mismatch: expected " + runtime->parameters.map_frame);
+      }
       const auto geometry = MapGeometry(map);
       RequirePublishedExplorationMapValues(map.data);
       static_cast<void>(OccupancyGridView(
@@ -1317,7 +1326,7 @@ void HandleTask(const std::weak_ptr<Runtime>& weak_runtime,
   std::optional<Polygon2> start_boundary;
   if (task.command == Task::START) {
     try {
-      start_boundary = TaskBoundary(task);
+      start_boundary = TaskBoundary(task, runtime->parameters.map_frame);
     } catch (const std::exception& error) {
       std::scoped_lock lock{runtime->mutex};
       runtime->reason_code =
@@ -1424,8 +1433,29 @@ IncrementalExplorationNode::IncrementalExplorationNode(
   Initialize(LoadParameters(*this));
 }
 
+rclcpp::QoS ConfiguredExplorationMapQos(rclcpp::Node& node) {
+  const auto reliability = node.declare_parameter<std::string>("exploration_map_qos_reliability", "reliable");
+  const auto durability = node.declare_parameter<std::string>("exploration_map_qos_durability", "transient_local");
+  const auto depth = node.declare_parameter<int>("exploration_map_qos_depth", 1);
+  if (depth <= 0) throw std::invalid_argument("exploration_map_qos_depth must be positive");
+  rclcpp::QoS qos{rclcpp::KeepLast{static_cast<std::size_t>(depth)}};
+  if (reliability == "reliable") qos.reliable();
+  else if (reliability == "best_effort") qos.best_effort();
+  else throw std::invalid_argument("exploration_map_qos_reliability: expected reliable or best_effort");
+  if (durability == "transient_local") qos.transient_local();
+  else if (durability == "volatile") qos.durability_volatile();
+  else throw std::invalid_argument("exploration_map_qos_durability: expected transient_local or volatile");
+  return qos;
+}
+
 void IncrementalExplorationNode::Initialize(
     IncrementalExplorationNodeParameters parameters) {
+  parameters.map_frame = declare_parameter<std::string>("map_frame", parameters.map_frame);
+  parameters.odom_frame = declare_parameter<std::string>("odom_frame", parameters.odom_frame);
+  parameters.base_frame = declare_parameter<std::string>("base_frame", parameters.base_frame);
+  if (parameters.map_frame.empty() || parameters.odom_frame.empty() || parameters.base_frame.empty() || parameters.map_frame == parameters.odom_frame || parameters.odom_frame == parameters.base_frame || parameters.map_frame == parameters.base_frame) {
+    throw std::invalid_argument("map_frame, odom_frame, base_frame must be nonempty distinct names");
+  }
   parameters.navigation_map_wait_timeout_s = declare_parameter<double>(
       "navigation_map_wait_timeout_s", parameters.navigation_map_wait_timeout_s);
   if (!std::isfinite(parameters.navigation_map_wait_timeout_s) ||
@@ -1433,6 +1463,7 @@ void IncrementalExplorationNode::Initialize(
     throw std::invalid_argument{
         "navigation_map_wait_timeout_s must be finite and nonnegative"};
   }
+  const auto exploration_qos = ConfiguredExplorationMapQos(*this);
   auto runtime = std::make_shared<Runtime>(*this, std::move(parameters));
   const std::weak_ptr<Runtime> weak_runtime{runtime};
   runtime->navigation_client = std::make_unique<NavigationClient>(
@@ -1446,7 +1477,7 @@ void IncrementalExplorationNode::Initialize(
   exploration_map_subscription_ =
       create_subscription<nav_msgs::msg::OccupancyGrid>(
           runtime->parameters.exploration_map_topic,
-          rclcpp::QoS{1}.reliable().transient_local(),
+          exploration_qos,
           [weak_runtime](nav_msgs::msg::OccupancyGrid::SharedPtr map) {
             HandleMap(weak_runtime, *map);
           });
@@ -1472,6 +1503,20 @@ void IncrementalExplorationNode::Initialize(
         HandleTask(weak_runtime, *task);
       });
   runtime_ = std::move(runtime);
+  startup_parameters_ = add_on_set_parameters_callback([this](const std::vector<rclcpp::Parameter>& values) {
+    rcl_interfaces::msg::SetParametersResult result;
+    result.successful = true;
+    for (const auto& value : values) {
+      if (value.get_name() == "use_sim_time") continue;
+      if (has_parameter(value.get_name()) && get_parameter(value.get_name()).get_parameter_value() != value.get_parameter_value()) {
+        result.successful = false;
+        result.reason = value.get_name() + ": startup-only parameter; edit configuration and restart node";
+        break;
+      }
+    }
+    return result;
+  });
+
   if (runtime_->parameters.navigation_map_wait_timeout_s > 0.0) {
     navigation_map_wait_timer_ = create_wall_timer(
         std::chrono::milliseconds{50}, [weak_runtime] {

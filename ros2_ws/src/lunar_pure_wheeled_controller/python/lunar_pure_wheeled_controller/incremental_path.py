@@ -21,11 +21,11 @@ def _invalid_path() -> ParsedIncrementalPath:
     return ParsedIncrementalPath((), False, "INVALID_PATH")
 
 
-def parse_incremental_path(path: Path) -> ParsedIncrementalPath:
+def parse_incremental_path(path: Path, map_frame="map") -> ParsedIncrementalPath:
     """Validate a map-frame Path while treating an empty path as a clear."""
     if not path.poses:
         return ParsedIncrementalPath((), True, None)
-    if path.header.frame_id != "map":
+    if path.header.frame_id != map_frame:
         return _invalid_path()
 
     samples: list[tuple[float, float, float]] = []

@@ -17,7 +17,7 @@
 namespace lunar::pure_exploration {
 
 struct CandidateParameters {
-  std::array<double, 5> yaw_offsets_rad;
+  std::vector<double> yaw_offsets_rad;
 };
 
 struct CandidateKey {

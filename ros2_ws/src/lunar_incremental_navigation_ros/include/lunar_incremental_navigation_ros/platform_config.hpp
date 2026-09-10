@@ -13,6 +13,7 @@ struct PlatformConfigResult final {
   std::optional<lunar::incremental_navigation::PlatformCapability> capability;
   std::optional<double> start_blind_zone_margin_m;
   std::string reason_code;
+  std::string error_detail;
 };
 
 [[nodiscard]] PlatformConfigResult LoadPlatformConfig(

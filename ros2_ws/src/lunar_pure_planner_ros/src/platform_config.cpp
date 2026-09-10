@@ -8,6 +8,7 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+#include <set>
 
 #include <yaml-cpp/yaml.h>
 
@@ -30,12 +31,13 @@ using lunar::pure_planning::WheelPrimitiveKind;
 
 constexpr std::string_view kPlannerError{"PLANNER_ERROR"};
 
-[[noreturn]] void Invalid() { throw std::runtime_error{"invalid platform config"}; }
+[[noreturn]] void Invalid(const std::string& detail = "invalid platform config structure") { throw std::runtime_error{detail}; }
 
 void RequireKeys(const YAML::Node& node,
                  std::initializer_list<std::string_view> expected) {
-  if (!node.IsMap() || node.size() != expected.size()) {
-    Invalid();
+  if (!node.IsMap()) Invalid("expected configuration mapping");
+  for (const auto key : expected) {
+    if (!node[std::string{key}]) Invalid("missing field: " + std::string{key});
   }
   for (const auto& entry : node) {
     if (!entry.first.IsScalar()) {
@@ -50,7 +52,7 @@ void RequireKeys(const YAML::Node& node,
       }
     }
     if (!found) {
-      Invalid();
+      Invalid("unknown field: " + key);
     }
   }
 }
@@ -58,7 +60,7 @@ void RequireKeys(const YAML::Node& node,
 YAML::Node Require(const YAML::Node& node, std::string_view key) {
   const YAML::Node value = node[std::string{key}];
   if (!value) {
-    Invalid();
+    Invalid("missing field: " + std::string{key});
   }
   return value;
 }
@@ -66,11 +68,11 @@ YAML::Node Require(const YAML::Node& node, std::string_view key) {
 std::string String(const YAML::Node& node, std::string_view key) {
   const YAML::Node& value = Require(node, key);
   if (!value.IsScalar()) {
-    Invalid();
+    Invalid(std::string{key} + ": expected nonempty string");
   }
   const std::string result = value.as<std::string>();
   if (result.empty()) {
-    Invalid();
+    Invalid(std::string{key} + ": expected nonempty string");
   }
   return result;
 }
@@ -78,11 +80,16 @@ std::string String(const YAML::Node& node, std::string_view key) {
 double Finite(const YAML::Node& node, std::string_view key) {
   const YAML::Node& value = Require(node, key);
   if (!value.IsScalar()) {
-    Invalid();
+    Invalid(std::string{key} + ": expected finite number");
   }
-  const double result = value.as<double>();
+  double result{};
+  try {
+    result = value.as<double>();
+  } catch (const YAML::Exception&) {
+    Invalid(std::string{key} + ": expected finite number");
+  }
   if (!std::isfinite(result)) {
-    Invalid();
+    Invalid(std::string{key} + ": expected finite number");
   }
   return result;
 }
@@ -90,7 +97,7 @@ double Finite(const YAML::Node& node, std::string_view key) {
 double Positive(const YAML::Node& node, std::string_view key) {
   const double value = Finite(node, key);
   if (value <= 0.0) {
-    Invalid();
+    Invalid(std::string{key} + ": must be > 0");
   }
   return value;
 }
@@ -98,7 +105,7 @@ double Positive(const YAML::Node& node, std::string_view key) {
 double NonNegative(const YAML::Node& node, std::string_view key) {
   const double value = Finite(node, key);
   if (value < 0.0) {
-    Invalid();
+    Invalid(std::string{key} + ": must be >= 0");
   }
   return value;
 }
@@ -106,7 +113,7 @@ double NonNegative(const YAML::Node& node, std::string_view key) {
 bool Boolean(const YAML::Node& node, std::string_view key) {
   const YAML::Node& value = Require(node, key);
   if (!value.IsScalar()) {
-    Invalid();
+    Invalid(std::string{key} + ": expected boolean");
   }
   return value.as<bool>();
 }
@@ -114,13 +121,13 @@ bool Boolean(const YAML::Node& node, std::string_view key) {
 Vec3 Vec3Value(const YAML::Node& node, std::string_view key) {
   const YAML::Node& value = Require(node, key);
   if (!value.IsSequence() || value.size() != 3U) {
-    Invalid();
+    Invalid(std::string{key} + ": expected three finite coordinates");
   }
   const Vec3 result{value[0U].as<double>(), value[1U].as<double>(),
                     value[2U].as<double>()};
   if (!std::isfinite(result.x) || !std::isfinite(result.y) ||
       !std::isfinite(result.z)) {
-    Invalid();
+    Invalid(std::string{key} + ": expected three finite coordinates");
   }
   return result;
 }
@@ -128,12 +135,12 @@ Vec3 Vec3Value(const YAML::Node& node, std::string_view key) {
 Interval IntervalValue(const YAML::Node& node, std::string_view key) {
   const YAML::Node& value = Require(node, key);
   if (!value.IsSequence() || value.size() != 2U) {
-    Invalid();
+    Invalid(std::string{key} + ": expected finite [lower, upper], lower <= upper");
   }
   const Interval result{value[0U].as<double>(), value[1U].as<double>()};
   if (!std::isfinite(result.lower) || !std::isfinite(result.upper) ||
       result.lower > result.upper) {
-    Invalid();
+    Invalid(std::string{key} + ": expected finite [lower, upper], lower <= upper");
   }
   return result;
 }
@@ -150,7 +157,7 @@ WheelPrimitiveKind WheelKind(const std::string& name) {
   if (name == "SPIN_CLOCKWISE") return WheelPrimitiveKind::kSpinClockwise;
   if (name == "SPIN_COUNTERCLOCKWISE") return WheelPrimitiveKind::kSpinCounterclockwise;
   if (name == "STOP_AND_SWITCH") return WheelPrimitiveKind::kStopAndSwitch;
-  Invalid();
+  Invalid("motion_primitives.kind: unsupported " + name);
 }
 
 LeggedPrimitiveKind LeggedKind(const std::string& name) {
@@ -159,24 +166,33 @@ LeggedPrimitiveKind LeggedKind(const std::string& name) {
   if (name == "LATERAL_LEFT") return LeggedPrimitiveKind::kLateralLeft;
   if (name == "LATERAL_RIGHT") return LeggedPrimitiveKind::kLateralRight;
   if (name == "SPIN") return LeggedPrimitiveKind::kSpin;
-  Invalid();
+  Invalid("motion_primitives.kind: unsupported " + name);
 }
 
 std::vector<WheelMotionPrimitive> WheelPrimitives(const YAML::Node& node) {
   const YAML::Node& values = Require(node, "motion_primitives");
-  if (!values.IsSequence() || values.size() != 9U) {
-    Invalid();
+  if (!values.IsSequence() || values.size() == 0U) {
+    Invalid("motion_primitives: expected nonempty sequence");
   }
   std::vector<WheelMotionPrimitive> result;
   result.reserve(values.size());
+  std::set<std::string> primitive_ids;
   for (const YAML::Node& value : values) {
     RequireKeys(value, {"primitive_id", "kind", "position_m", "yaw_change_rad"});
     const std::string id = String(value, "primitive_id");
+    if (!primitive_ids.insert(id).second) Invalid("motion_primitives.primitive_id: duplicate " + id);
     const double yaw = Finite(value, "yaw_change_rad");
+    const auto kind = WheelKind(String(value, "kind"));
+    const auto displacement = Vec3Value(value, "position_m");
+    if ((kind == WheelPrimitiveKind::kForward || kind == WheelPrimitiveKind::kForwardArc) && displacement.x <= 0.0)
+      Invalid("motion_primitives.position_m: forward motion must have positive x");
+    if ((kind == WheelPrimitiveKind::kReverse || kind == WheelPrimitiveKind::kReverseArc) && displacement.x >= 0.0)
+      Invalid("motion_primitives.position_m: reverse motion must have negative x");
+
     result.push_back(WheelMotionPrimitive{
         .primitive_id = id,
-        .kind = WheelKind(String(value, "kind")),
-        .relative_end_pose = Pose3{.position_m = Vec3Value(value, "position_m"),
+        .kind = kind,
+        .relative_end_pose = Pose3{.position_m = displacement,
                                    .orientation = YawQuaternion(yaw)},
     });
   }
@@ -185,13 +201,15 @@ std::vector<WheelMotionPrimitive> WheelPrimitives(const YAML::Node& node) {
 
 std::vector<LeggedBodyPrimitive> LeggedPrimitives(const YAML::Node& node) {
   const YAML::Node& values = Require(node, "motion_primitives");
-  if (!values.IsSequence() || values.size() != 6U) {
-    Invalid();
+  if (!values.IsSequence() || values.size() == 0U) {
+    Invalid("motion_primitives: expected nonempty sequence");
   }
   std::vector<LeggedBodyPrimitive> result;
   result.reserve(values.size());
+  std::set<std::string> primitive_ids;
   for (const YAML::Node& value : values) {
     RequireKeys(value, {"primitive_id", "kind", "body_frame_displacement_m", "yaw_change_rad"});
+    if (!primitive_ids.insert(String(value, "primitive_id")).second) Invalid("motion_primitives.primitive_id: duplicate");
     result.push_back(LeggedBodyPrimitive{
         .primitive_id = String(value, "primitive_id"),
         .kind = LeggedKind(String(value, "kind")),
@@ -203,21 +221,20 @@ std::vector<LeggedBodyPrimitive> LeggedPrimitives(const YAML::Node& node) {
 }
 
 void ValidateIdentity(const YAML::Node& root, const std::string_view platform,
-                      const std::string_view id, const std::string_view type,
-                      const std::string_view version, const std::string_view frame) {
+                      const std::string_view type) {
   RequireKeys(root, {"platform", "platform_id", "platform_type", "capability_version",
                      "base_frame_id", "capability"});
-  if (String(root, "platform") != platform || String(root, "platform_id") != id ||
-      String(root, "platform_type") != type ||
-      String(root, "capability_version") != version ||
-      String(root, "base_frame_id") != frame) {
-    Invalid();
+  if (String(root, "platform") != platform || String(root, "platform_type") != type) {
+    Invalid("platform/platform_type does not match selected platform " + std::string{platform});
   }
+  // Identity labels describe a configured platform, not a frozen numeric profile.
+  static_cast<void>(String(root, "platform_id"));
+  static_cast<void>(String(root, "capability_version"));
+  static_cast<void>(String(root, "base_frame_id"));
 }
 
 PlatformCapability ParseWheel(const YAML::Node& root) {
-  ValidateIdentity(root, "wheel", "wheeled-lunar-explorer", "WHEELED",
-                   "wheeled-engineering-baseline-v1", "base_footprint");
+  ValidateIdentity(root, "wheel", "WHEELED");
   const YAML::Node& node = Require(root, "capability");
   RequireKeys(node, {"footprint_xy_m", "body_extent_m", "wheel_diameter_m", "wheel_width_m",
                      "wheelbase_m", "track_width_m", "minimum_underbody_clearance_m",
@@ -240,7 +257,7 @@ PlatformCapability ParseWheel(const YAML::Node& root) {
     footprint_xy_m.push_back(value);
   }
   const Vec3 body_extent = Vec3Value(node, "body_extent_m");
-  if (body_extent.x <= 0.0 || body_extent.y <= 0.0 || body_extent.z <= 0.0) Invalid();
+  if (body_extent.x <= 0.0 || body_extent.y <= 0.0 || body_extent.z <= 0.0) Invalid("body_extent_m: dimensions must be > 0");
   return WheeledCapability{
       .footprint_xy_m = std::move(footprint_xy_m), .body_extent_m = body_extent,
       .wheel_diameter_m = Positive(node, "wheel_diameter_m"), .wheel_width_m = Positive(node, "wheel_width_m"),
@@ -263,8 +280,7 @@ PlatformCapability ParseWheel(const YAML::Node& root) {
 }
 
 PlatformCapability ParseLegged(const YAML::Node& root) {
-  ValidateIdentity(root, "legged", "yobotics-quad48", "LEGGED",
-                   "quad48-approved-baseline-v2", "base_link");
+  ValidateIdentity(root, "legged", "LEGGED");
   const YAML::Node& node = Require(root, "capability");
   RequireKeys(node, {"body_extent_m", "nominal_body_height_m", "body_height_m", "platform_mass_kg",
                      "nominal_payload_kg", "maximum_payload_kg", "maximum_forward_speed_mps",
@@ -274,9 +290,9 @@ PlatformCapability ParseLegged(const YAML::Node& root) {
                      "minimum_body_clearance_m", "step_vertical_rate_mps", "unknown_is_traversable",
                      "motion_primitives"});
   const Vec3 body_extent = Vec3Value(node, "body_extent_m");
-  if (body_extent.x <= 0.0 || body_extent.y <= 0.0 || body_extent.z <= 0.0) Invalid();
+  if (body_extent.x <= 0.0 || body_extent.y <= 0.0 || body_extent.z <= 0.0) Invalid("body_extent_m: dimensions must be > 0");
   const Interval body_height = IntervalValue(node, "body_height_m");
-  if (body_height.lower < 0.0) Invalid();
+  if (body_height.lower < 0.0) Invalid("body_height_range_m: lower bound must be >= 0");
   const double forward = Positive(node, "maximum_forward_speed_mps");
   const double reverse = Positive(node, "maximum_reverse_speed_mps");
   const double lateral = Positive(node, "maximum_lateral_speed_mps");
@@ -295,8 +311,7 @@ PlatformCapability ParseLegged(const YAML::Node& root) {
 }
 
 PlatformCapability ParseHopper(const YAML::Node& root) {
-  ValidateIdentity(root, "hopper", "hopper-lunar-explorer", "HOPPER",
-                   "hopper-engineering-baseline-v1", "base_link");
+  ValidateIdentity(root, "hopper", "HOPPER");
   const YAML::Node& node = Require(root, "capability");
   RequireKeys(node, {"specific_impulse_s", "reference_total_mass_kg", "reference_propellant_mass_kg",
                      "gravity_mps2", "reference_horizontal_range_m", "reference_elevation_delta_m",
@@ -305,9 +320,9 @@ PlatformCapability ParseHopper(const YAML::Node& root) {
                      "reachability_delta_v_margin_ratio", "standard_gravity_mps2", "maximum_landing_slope_rad"});
   const double total_mass = Positive(node, "reference_total_mass_kg");
   const double propellant_mass = Positive(node, "reference_propellant_mass_kg");
-  if (propellant_mass >= total_mass) Invalid();
+  if (propellant_mass >= total_mass) Invalid("propellant_mass_kg: must be less than total_mass_kg");
   const Vec3 gravity = Vec3Value(node, "gravity_mps2");
-  if (gravity.z >= 0.0) Invalid();
+  if (gravity.z >= 0.0) Invalid("gravity_mps2: z must be negative");
   return HopperCapability{
       .specific_impulse_s = Positive(node, "specific_impulse_s"), .reference_total_mass_kg = total_mass,
       .reference_propellant_mass_kg = propellant_mass, .gravity_mps2 = gravity,
@@ -322,233 +337,6 @@ PlatformCapability ParseHopper(const YAML::Node& root) {
   };
 }
 
-bool SameVec2(const Vec2& actual, const Vec2& expected) {
-  return actual.x == expected.x && actual.y == expected.y;
-}
-
-bool SameVec3(const Vec3& actual, const Vec3& expected) {
-  return actual.x == expected.x && actual.y == expected.y && actual.z == expected.z;
-}
-
-bool SameQuaternion(const Quaternion& actual, const Quaternion& expected) {
-  return actual.w == expected.w && actual.x == expected.x &&
-      actual.y == expected.y && actual.z == expected.z;
-}
-
-bool SameWheel(const WheeledCapability& actual, const WheeledCapability& expected) {
-  if (actual.footprint_xy_m.size() != expected.footprint_xy_m.size() ||
-      actual.motion_primitives.size() != expected.motion_primitives.size()) {
-    return false;
-  }
-  for (std::size_t index = 0U; index < actual.footprint_xy_m.size(); ++index) {
-    if (!SameVec2(actual.footprint_xy_m[index], expected.footprint_xy_m[index])) {
-      return false;
-    }
-  }
-  for (std::size_t index = 0U; index < actual.motion_primitives.size(); ++index) {
-    const auto& lhs = actual.motion_primitives[index];
-    const auto& rhs = expected.motion_primitives[index];
-    if (lhs.primitive_id != rhs.primitive_id || lhs.kind != rhs.kind ||
-        !SameVec3(lhs.relative_end_pose.position_m, rhs.relative_end_pose.position_m) ||
-        !SameQuaternion(lhs.relative_end_pose.orientation, rhs.relative_end_pose.orientation)) {
-      return false;
-    }
-  }
-  return SameVec3(actual.body_extent_m, expected.body_extent_m) &&
-      actual.wheel_diameter_m == expected.wheel_diameter_m &&
-      actual.wheel_width_m == expected.wheel_width_m &&
-      actual.wheelbase_m == expected.wheelbase_m &&
-      actual.track_width_m == expected.track_width_m &&
-      actual.minimum_underbody_clearance_m == expected.minimum_underbody_clearance_m &&
-      actual.maximum_local_obstacle_relief_m == expected.maximum_local_obstacle_relief_m &&
-      actual.allow_unsupported_gap == expected.allow_unsupported_gap &&
-      actual.minimum_body_z_m == expected.minimum_body_z_m &&
-      actual.maximum_body_z_m == expected.maximum_body_z_m &&
-      actual.maximum_forward_speed_mps == expected.maximum_forward_speed_mps &&
-      actual.maximum_reverse_speed_mps == expected.maximum_reverse_speed_mps &&
-      actual.maximum_spin_rate_radps == expected.maximum_spin_rate_radps &&
-      actual.maximum_acceleration_mps2 == expected.maximum_acceleration_mps2 &&
-      actual.maximum_braking_deceleration_mps2 == expected.maximum_braking_deceleration_mps2 &&
-      actual.maximum_yaw_acceleration_radps2 == expected.maximum_yaw_acceleration_radps2 &&
-      actual.maximum_lateral_acceleration_mps2 == expected.maximum_lateral_acceleration_mps2 &&
-      actual.maximum_curvature_per_m == expected.maximum_curvature_per_m &&
-      actual.maximum_slope_rad == expected.maximum_slope_rad &&
-      actual.minimum_clearance_m == expected.minimum_clearance_m;
-}
-
-bool SameLegged(const LeggedCapability& actual, const LeggedCapability& expected) {
-  if (actual.motion_primitives.size() != expected.motion_primitives.size()) {
-    return false;
-  }
-  for (std::size_t index = 0U; index < actual.motion_primitives.size(); ++index) {
-    const auto& lhs = actual.motion_primitives[index];
-    const auto& rhs = expected.motion_primitives[index];
-    if (lhs.primitive_id != rhs.primitive_id || lhs.kind != rhs.kind ||
-        !SameVec3(lhs.body_frame_displacement_m, rhs.body_frame_displacement_m) ||
-        lhs.yaw_change_rad != rhs.yaw_change_rad) {
-      return false;
-    }
-  }
-  return SameVec3(actual.body_extent_m, expected.body_extent_m) &&
-      actual.nominal_body_height_m == expected.nominal_body_height_m &&
-      actual.platform_mass_kg == expected.platform_mass_kg &&
-      actual.nominal_payload_kg == expected.nominal_payload_kg &&
-      actual.maximum_payload_kg == expected.maximum_payload_kg &&
-      actual.maximum_slope_rad == expected.maximum_slope_rad &&
-      actual.maximum_step_height_m == expected.maximum_step_height_m &&
-      actual.maximum_gap_width_m == expected.maximum_gap_width_m &&
-      actual.minimum_body_clearance_m == expected.minimum_body_clearance_m &&
-      actual.step_vertical_rate_mps == expected.step_vertical_rate_mps &&
-      actual.body_height_m.lower == expected.body_height_m.lower &&
-      actual.body_height_m.upper == expected.body_height_m.upper &&
-      actual.forward_speed_mps.lower == expected.forward_speed_mps.lower &&
-      actual.forward_speed_mps.upper == expected.forward_speed_mps.upper &&
-      actual.lateral_speed_mps.lower == expected.lateral_speed_mps.lower &&
-      actual.lateral_speed_mps.upper == expected.lateral_speed_mps.upper &&
-      actual.yaw_rate_radps.lower == expected.yaw_rate_radps.lower &&
-      actual.yaw_rate_radps.upper == expected.yaw_rate_radps.upper &&
-      actual.maximum_linear_acceleration_mps2 == expected.maximum_linear_acceleration_mps2 &&
-      actual.maximum_yaw_acceleration_radps2 == expected.maximum_yaw_acceleration_radps2 &&
-      actual.unknown_is_traversable == expected.unknown_is_traversable;
-}
-
-bool SameHopper(const HopperCapability& actual, const HopperCapability& expected) {
-  return actual.specific_impulse_s == expected.specific_impulse_s &&
-      actual.reference_total_mass_kg == expected.reference_total_mass_kg &&
-      actual.reference_propellant_mass_kg == expected.reference_propellant_mass_kg &&
-      SameVec3(actual.gravity_mps2, expected.gravity_mps2) &&
-      actual.reference_horizontal_range_m == expected.reference_horizontal_range_m &&
-      actual.reference_elevation_delta_m == expected.reference_elevation_delta_m &&
-      actual.runtime_fallback_allowed == expected.runtime_fallback_allowed &&
-      actual.landing_support_radius_m == expected.landing_support_radius_m &&
-      actual.flight_collision_radius_m == expected.flight_collision_radius_m &&
-      actual.maximum_landing_plane_residual_m == expected.maximum_landing_plane_residual_m &&
-      actual.landing_lateral_margin_m == expected.landing_lateral_margin_m &&
-      actual.flight_map_margin_m == expected.flight_map_margin_m &&
-      actual.reachability_delta_v_margin_ratio == expected.reachability_delta_v_margin_ratio &&
-      actual.standard_gravity_mps2 == expected.standard_gravity_mps2 &&
-      actual.maximum_landing_slope_rad == expected.maximum_landing_slope_rad;
-}
-
-PlatformCapability ExpectedCapability(const std::string_view platform) {
-  if (platform == "wheel") {
-    return WheeledCapability{
-        .footprint_xy_m = {{0.591, 0.409}, {0.591, -0.409},
-                           {-0.591, -0.409}, {-0.591, 0.409}},
-        .body_extent_m = {1.182, 0.818, 1.29996},
-        .wheel_diameter_m = 0.319,
-        .wheel_width_m = 0.148,
-        .wheelbase_m = 0.8175,
-        .track_width_m = 0.67,
-        .minimum_underbody_clearance_m = 0.21,
-        .maximum_local_obstacle_relief_m = 0.2,
-        .allow_unsupported_gap = false,
-        .minimum_body_z_m = 0.0,
-        .maximum_body_z_m = 1.29996,
-        .maximum_forward_speed_mps = 0.2,
-        .maximum_reverse_speed_mps = 0.2,
-        .maximum_spin_rate_radps = 1.0,
-        .maximum_acceleration_mps2 = 0.5,
-        .maximum_braking_deceleration_mps2 = 0.5,
-        .maximum_yaw_acceleration_radps2 = 0.5,
-        .maximum_lateral_acceleration_mps2 = 0.5,
-        .maximum_curvature_per_m = 1.0,
-        .maximum_slope_rad = 0.3490658503988659,
-        .minimum_clearance_m = 0.2,
-        .motion_primitives = {
-            {"forward", WheelPrimitiveKind::kForward,
-             {.position_m = {0.2, 0.0, 0.0}}},
-            {"reverse", WheelPrimitiveKind::kReverse,
-             {.position_m = {-0.2, 0.0, 0.0}}},
-            {"forward-arc-left", WheelPrimitiveKind::kForwardArc,
-             {.position_m = {0.19509032201612825, 0.01921471959676957, 0.0},
-              .orientation = YawQuaternion(0.19634954084936207)}},
-            {"forward-arc-right", WheelPrimitiveKind::kForwardArc,
-             {.position_m = {0.19509032201612825, -0.01921471959676957, 0.0},
-              .orientation = YawQuaternion(-0.19634954084936207)}},
-            {"reverse-arc-left", WheelPrimitiveKind::kReverseArc,
-             {.position_m = {-0.19509032201612825, 0.01921471959676957, 0.0},
-              .orientation = YawQuaternion(-0.19634954084936207)}},
-            {"reverse-arc-right", WheelPrimitiveKind::kReverseArc,
-             {.position_m = {-0.19509032201612825, -0.01921471959676957, 0.0},
-              .orientation = YawQuaternion(0.19634954084936207)}},
-            {"spin-left", WheelPrimitiveKind::kSpinCounterclockwise,
-             {.orientation = YawQuaternion(0.19634954084936207)}},
-            {"spin-right", WheelPrimitiveKind::kSpinClockwise,
-             {.orientation = YawQuaternion(-0.19634954084936207)}},
-            {"stop-switch", WheelPrimitiveKind::kStopAndSwitch, {}},
-        },
-    };
-  }
-  if (platform == "legged") {
-    return LeggedCapability{
-        .body_extent_m = {0.68, 0.33, 0.35},
-        .nominal_body_height_m = 0.33,
-        .platform_mass_kg = 15.89,
-        .nominal_payload_kg = 8.0,
-        .maximum_payload_kg = 10.0,
-        .maximum_slope_rad = 0.5235987755982988,
-        .maximum_step_height_m = 0.5,
-        .maximum_gap_width_m = 0.3,
-        .minimum_body_clearance_m = 0.3,
-        .step_vertical_rate_mps = 0.1,
-        .body_height_m = {0.28, 0.38},
-        .forward_speed_mps = {-1.5, 1.5},
-        .lateral_speed_mps = {-0.8, 0.8},
-        .yaw_rate_radps = {-1.0, 1.0},
-        .maximum_linear_acceleration_mps2 = 1.0,
-        .maximum_yaw_acceleration_radps2 = 1.0,
-        .unknown_is_traversable = false,
-        .motion_primitives = {
-            {"forward", LeggedPrimitiveKind::kForward, {0.2, 0.0, 0.0}, 0.0},
-            {"backward", LeggedPrimitiveKind::kBackward, {-0.2, 0.0, 0.0}, 0.0},
-            {"lateral-left", LeggedPrimitiveKind::kLateralLeft, {0.0, 0.2, 0.0}, 0.0},
-            {"lateral-right", LeggedPrimitiveKind::kLateralRight, {0.0, -0.2, 0.0}, 0.0},
-            {"spin-left", LeggedPrimitiveKind::kSpin, {0.0, 0.0, 0.0}, 0.19634954084936207},
-            {"spin-right", LeggedPrimitiveKind::kSpin, {0.0, 0.0, 0.0}, -0.19634954084936207},
-        },
-    };
-  }
-  return HopperCapability{
-      .specific_impulse_s = 301.0,
-      .reference_total_mass_kg = 20.0,
-      .reference_propellant_mass_kg = 0.2,
-      .gravity_mps2 = {0.0, 0.0, -1.62},
-      .reference_horizontal_range_m = 100.0,
-      .reference_elevation_delta_m = 0.0,
-      .runtime_fallback_allowed = false,
-      .landing_support_radius_m = 0.45,
-      .flight_collision_radius_m = 0.55,
-      .maximum_landing_plane_residual_m = 0.05,
-      .landing_lateral_margin_m = 0.2,
-      .flight_map_margin_m = 0.2,
-      .reachability_delta_v_margin_ratio = 0.1,
-      .standard_gravity_mps2 = 9.80665,
-      .maximum_landing_slope_rad = 0.17453292519943295,
-  };
-}
-
-bool MatchesExpectedCapability(const PlatformCapability& actual,
-                               const std::string_view platform) {
-  const PlatformCapability expected = ExpectedCapability(platform);
-  if (platform == "wheel") {
-    const auto* actual_wheel = std::get_if<WheeledCapability>(&actual);
-    const auto* expected_wheel = std::get_if<WheeledCapability>(&expected);
-    return actual_wheel != nullptr && expected_wheel != nullptr &&
-        SameWheel(*actual_wheel, *expected_wheel);
-  }
-  if (platform == "legged") {
-    const auto* actual_legged = std::get_if<LeggedCapability>(&actual);
-    const auto* expected_legged = std::get_if<LeggedCapability>(&expected);
-    return actual_legged != nullptr && expected_legged != nullptr &&
-        SameLegged(*actual_legged, *expected_legged);
-  }
-  const auto* actual_hopper = std::get_if<HopperCapability>(&actual);
-  const auto* expected_hopper = std::get_if<HopperCapability>(&expected);
-  return actual_hopper != nullptr && expected_hopper != nullptr &&
-      SameHopper(*actual_hopper, *expected_hopper);
-}
-
 }  // namespace
 
 PlatformConfigResult LoadPlatformConfig(const std::filesystem::path& path,
@@ -561,13 +349,11 @@ PlatformConfigResult LoadPlatformConfig(const std::filesystem::path& path,
     const YAML::Node root = YAML::LoadFile(path.string());
     PlatformCapability capability = platform == "wheel" ? ParseWheel(root)
         : platform == "legged" ? ParseLegged(root) : ParseHopper(root);
-    if (!MatchesExpectedCapability(capability, platform)) {
-      Invalid();
-    }
     return {.capability = std::move(capability), .reason_code = {}};
-  } catch (const std::exception&) {
+  } catch (const std::exception& error) {
     return {.capability = std::nullopt,
-            .reason_code = std::string{kPlannerError}};
+            .reason_code = std::string{kPlannerError},
+            .error_detail = path.string() + ": " + error.what()};
   }
 }
 

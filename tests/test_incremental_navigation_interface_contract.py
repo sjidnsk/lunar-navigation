@@ -171,11 +171,13 @@ def test_incremental_explorer_consumes_only_the_published_three_state_map() -> N
     assert "-1, 0, or 100" in source
 
 
-def test_incremental_odometry_contract_is_odom_to_base_link_everywhere() -> None:
+def test_incremental_odometry_uses_configured_base_frame() -> None:
     """Reject a wheel-footprint frame from leaking into the external pose contract."""
     adapter = STATE_ADAPTER_SOURCE.read_text(encoding="utf-8")
 
-    assert 'odometry.child_frame_id != "base_link"' in adapter
+    assert 'odometry.child_frame_id != base_frame' in adapter
+    header = (STATE_ADAPTER_SOURCE.parent.parent / "include/lunar_incremental_navigation_ros/state_adapter.hpp").read_text(encoding="utf-8")
+    assert 'base_frame = "base_link"' in header
     assert "base_footprint" not in adapter
 
 

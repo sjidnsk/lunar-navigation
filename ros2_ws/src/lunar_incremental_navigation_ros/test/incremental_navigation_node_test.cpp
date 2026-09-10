@@ -762,6 +762,17 @@ TEST(IncrementalNavigationNode, LocalMapQosCanBeOverriddenForVolatileReplay) {
   EXPECT_EQ(profile.durability, RMW_QOS_POLICY_DURABILITY_VOLATILE);
 }
 
+TEST(IncrementalNavigationNode, StartupParametersRequireRestart) {
+  auto server = std::make_shared<IncrementalNavigationNode>(
+      ServerOptions("startup_parameters"), IncrementalNavigationNodeDependencies{});
+  const auto result = server->set_parameters_atomically(
+      {rclcpp::Parameter("map_frame", "world")});
+  EXPECT_FALSE(result.successful);
+  EXPECT_NE(result.reason.find("map_frame"), std::string::npos);
+  EXPECT_NE(result.reason.find("restart"), std::string::npos);
+  EXPECT_EQ(server->get_parameter("map_frame").as_string(), "map");
+}
+
 TEST(IncrementalNavigationNode, RejectsUnsupportedLocalMapQosParameters) {
   auto options = ServerOptions("invalid_map_qos");
   options.append_parameter_override("local_map_qos_durability", "volatilee");
@@ -936,7 +947,8 @@ TEST(IncrementalNavigationNode,
   ASSERT_TRUE(handle);
   ASSERT_TRUE(WaitFor([&] {
     return !system.FineStates().empty() && !system.GuidanceStates().empty() &&
-           !system.StartPatches().empty() && !system.Diagnostics().empty();
+           !system.StartPatches().empty() && !system.Diagnostics().empty() &&
+           !system.Paths().empty();
   }));
 
   const auto fine_states = system.FineStates();

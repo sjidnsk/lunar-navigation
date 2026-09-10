@@ -170,7 +170,7 @@ struct RuntimeParameters final {
   auto loaded = LoadPlatformConfig(config_path, platform);
   if (!loaded.capability.has_value()) {
     throw std::runtime_error{"PLANNER_ERROR: platform_config rejected: " +
-                             config_path.string()};
+                             loaded.error_detail};
   }
 
   const std::int64_t global_threshold = node.declare_parameter<std::int64_t>(

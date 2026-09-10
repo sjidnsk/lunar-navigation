@@ -31,6 +31,19 @@ namespace {
   return odometry;
 }
 
+TEST(StateAdapterTest, ConfiguredFramesComposeAndRejectMismatches) {
+  auto tf = MapFromOdom();
+  tf.header.frame_id = "world"; tf.child_frame_id = "local_odom";
+  auto odom = OdomState("robot_base"); odom.header.frame_id = "local_odom";
+  const auto transform = AdaptDirectMapFromOdom(tf, "world", "local_odom");
+  ASSERT_TRUE(transform.value);
+  const auto state = AdaptStateInput(*transform.value, odom, "world", "local_odom", "robot_base");
+  ASSERT_TRUE(state.value);
+  EXPECT_DOUBLE_EQ(state.value->base_link_pose.position_m.x, 12.0);
+  EXPECT_DOUBLE_EQ(state.value->base_link_pose.position_m.y, 1.0);
+  EXPECT_FALSE(AdaptStateInput(*transform.value, odom).value);
+}
+
 TEST(StateAdapterTest, RejectsNonDirectTransformAndUnsupportedFrames) {
   auto transform = MapFromOdom();
   transform.header.frame_id = "earth";

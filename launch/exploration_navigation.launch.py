@@ -44,19 +44,23 @@ def _load_config(path: str) -> dict[str, object]:
 
 def _require_common(config: dict[str, object]) -> dict[str, object]:
     common = config["common"]
-    if not isinstance(common, dict) or common.get("frames") != {
-        "map": "map", "odom": "odom", "base_link": "base_link"
-    }:
-        raise RuntimeError("exploration_navigation common frame contract is invalid")
-    if common.get("local_map_qos") != {
-        "reliability": "reliable", "durability": "transient_local"
-    } or common.get("exploration_map_qos") != {
-        "reliability": "reliable",
-        "durability": "transient_local",
-        "history": "keep_last",
-        "depth": 1,
-    }:
-        raise RuntimeError("exploration_navigation common QoS contract is invalid")
+    if not isinstance(common, dict):
+        raise RuntimeError("common: expected mapping")
+    frames = common.get("frames", {})
+    if not isinstance(frames, dict) or set(frames) != {"map", "odom", "base_link"}:
+        raise RuntimeError("common.frames: expected map, odom, base_link")
+    if any(not isinstance(v, str) or not v.strip() for v in frames.values()) or len(set(frames.values())) != 3:
+        raise RuntimeError("common.frames: names must be nonempty and distinct")
+    for name in ("local_map_qos", "exploration_map_qos"):
+        qos = common.get(name, {})
+        if not isinstance(qos, dict):
+            raise RuntimeError(f"common.{name}: expected mapping")
+        if qos.get("reliability") not in {"reliable", "best_effort"}:
+            raise RuntimeError(f"common.{name}.reliability: expected reliable or best_effort")
+        if qos.get("durability") not in {"transient_local", "volatile"}:
+            raise RuntimeError(f"common.{name}.durability: expected transient_local or volatile")
+        if qos.get("history", "keep_last") != "keep_last" or type(qos.get("depth", 1)) is not int or qos.get("depth", 1) <= 0:
+            raise RuntimeError(f"common.{name}: expected keep_last and positive depth")
     return common
 
 
@@ -89,6 +93,9 @@ def _incremental_parameters(
     config: dict[str, object], common: dict[str, object], platform_type: str,
     platform_config: str, use_sim_time: bool,
 ) -> tuple[dict[str, object], dict[str, object]]:
+    platform_config = common.get("platform_config", platform_config)
+    if not isinstance(platform_config, str) or not platform_config.strip():
+        raise RuntimeError("common.platform_config: expected a nonempty YAML path")
     navigation = {
         **dict(config["navigation"]),
         "platform_type": platform_type,
@@ -97,6 +104,7 @@ def _incremental_parameters(
         "local_map_topic": common["local_map_topic"],
         "local_map_qos_reliability": common["local_map_qos"]["reliability"],
         "local_map_qos_durability": common["local_map_qos"]["durability"],
+        "local_map_qos_depth": common["local_map_qos"].get("depth", 1),
         "odometry_topic": common["odometry_topic"],
         "tf_topic": common["tf_topic"],
         "action_name": common["navigation_action"],
@@ -113,6 +121,12 @@ def _incremental_parameters(
         "exploration_map_topic": common["exploration_map_topic"],
         "use_sim_time": ParameterValue(use_sim_time, value_type=bool),
     }
+    frames = common["frames"]
+    qos = common["exploration_map_qos"]
+    for parameters in (navigation, exploration):
+        parameters.update(map_frame=frames["map"], odom_frame=frames["odom"], base_frame=frames["base_link"],
+                          exploration_map_qos_reliability=qos["reliability"],
+                          exploration_map_qos_durability=qos["durability"], exploration_map_qos_depth=qos.get("depth", 1))
     return navigation, exploration
 
 

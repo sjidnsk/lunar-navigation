@@ -61,6 +61,17 @@ void ExpectPose(const std::optional<lunar::pure_exploration::Pose2>& pose,
   EXPECT_NEAR(pose->yaw, yaw, 1e-12);
 }
 
+TEST(PoseResolver, ConfiguredFramesComposeActualTransform) {
+  PoseResolver resolver("world", "local_odom", "robot_base");
+  auto odometry = Odometry(2.0, 3.0, 0.0, 0.0);
+  odometry.header.frame_id = "local_odom";
+  odometry.child_frame_id = "robot_base";
+  resolver.UpdateOdometry(odometry);
+  resolver.UpdateTransforms(Transforms({Transform(
+      "world", "local_odom", 10.0, -2.0, 0.0, 0.0)}));
+  ExpectPose(resolver.LatestPoseInMap(), 12.0, 1.0, 0.0);
+}
+
 TEST(PoseResolver, WaitsUntilBothRequiredCachesExist) {
   PoseResolver resolver;
   EXPECT_FALSE(resolver.LatestPoseInMap().has_value());

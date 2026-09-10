@@ -234,6 +234,20 @@ std::size_t PositionGroupCount(std::span<const CandidateView> views) {
   return positions.size();
 }
 
+TEST(CandidateGeneratorFlexibleConfig, GeneratesAllConfiguredHeadings) {
+  std::vector<std::int8_t> data(30U * 20U, 0);
+  data[10U * 30U + 20U] = -1;
+  const auto raster = Raster(30U, 20U, data);
+  const auto frontier = OneEdgeCluster(raster, GridIndex{19, 10}, GridIndex{20, 10}, 0U);
+  for (const std::size_t count : {3U, 7U}) {
+    CandidateParameters parameters;
+    for (std::size_t i = 0; i < count; ++i) parameters.yaw_offsets_rad.push_back(-0.3 + 0.6 * i / (count - 1));
+    const auto views = CandidateGenerator(WheelPlatform(), parameters, GenerousLimits()).Generate(raster, std::span<const FrontierCluster>(&frontier, 1U));
+    ASSERT_EQ(views.size(), count);
+    for (std::size_t i = 0; i < count; ++i) EXPECT_NEAR(views[i].pose.yaw, parameters.yaw_offsets_rad[i], 1e-12);
+  }
+}
+
 TEST(CandidateGeneratorTest, DerivesWheelDimensionsAndSearchBoundsAtPointTwoMeters) {
   const CandidateGenerator generator(WheelPlatform(), StandardYawOffsets(),
                                      GenerousLimits());

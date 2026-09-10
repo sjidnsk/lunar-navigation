@@ -111,3 +111,9 @@ def test_unrelated_or_invalid_tf_cannot_create_a_map_transform() -> None:
     invalid = make_tf_message(parent="map", child="odom")
     invalid.transforms[0].transform.rotation.w = 0.0
     assert parse_map_from_odom(invalid) == MapFromOdomUpdate(True, None)
+
+
+def test_configured_world_frame_is_checked():
+    path = make_path(frame_id="world", points=[(1., 2., 0.), (2., 2., 0.)])
+    assert parse_incremental_path(path, "world").reason is None
+    assert parse_incremental_path(path).reason == "INVALID_PATH"

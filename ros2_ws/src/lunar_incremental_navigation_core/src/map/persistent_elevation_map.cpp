@@ -50,7 +50,7 @@ struct ElevationLineage final {};
     return false;
   }
   const RigidTransform& transform = evidence.map_from_source;
-  if (transform.parent_frame != "map" ||
+  if (transform.parent_frame.empty() ||
       transform.child_frame != geometry.frame_id ||
       !Finite(transform.translation_m) || !Finite(transform.rotation)) {
     return false;
@@ -173,7 +173,7 @@ SparseGridGeometry::SparseGridGeometry(std::string frame_id,
       max_exclusive_(max_exclusive) {}
 
 bool SparseGridGeometry::valid() const noexcept {
-  if (frame_id_ != "map" || !std::isfinite(resolution_m_) ||
+  if (frame_id_.empty() || !std::isfinite(resolution_m_) ||
       resolution_m_ <= 0.0 || !std::isfinite(origin_m_.x) ||
       !std::isfinite(origin_m_.y) || !std::isfinite(origin_m_.z) || empty() ||
       CellCount() == 0U) {
@@ -376,6 +376,9 @@ ElevationUpdateResult PersistentElevationMap::Apply(
   double canonical_resolution_m{};
   Vec3 canonical_origin_m;
   if (impl_->state) {
+    if (impl_->state->geometry.frame_id() != evidence.map_from_source.parent_frame) {
+      return reject();
+    }
     canonical_resolution_m = impl_->state->geometry.resolution_m();
     canonical_origin_m = impl_->state->geometry.origin_m();
   } else {
@@ -493,7 +496,7 @@ ElevationUpdateResult PersistentElevationMap::Apply(
     dirty_tiles.push_back(tile_index);
   }
   next->changed_tiles = dirty_tiles;
-  next->geometry = SparseGridGeometry("map", canonical_resolution_m,
+  next->geometry = SparseGridGeometry(evidence.map_from_source.parent_frame, canonical_resolution_m,
                                       canonical_origin_m, min_inclusive,
                                       max_exclusive);
 

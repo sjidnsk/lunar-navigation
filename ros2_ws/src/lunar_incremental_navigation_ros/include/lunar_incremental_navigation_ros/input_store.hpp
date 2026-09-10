@@ -1,5 +1,8 @@
 #pragma once
 
+#include <string>
+#include <utility>
+
 #include <mutex>
 #include <optional>
 #include <string>
@@ -29,6 +32,8 @@ struct InputSnapshot final {
 
 class InputStore final {
  public:
+  InputStore(std::string map_frame = "map", std::string odom_frame = "odom")
+      : map_frame_(std::move(map_frame)), odom_frame_(std::move(odom_frame)) {}
   void UpdateLocal(grid_map_msgs::msg::GridMap::ConstSharedPtr message);
   void UpdateOdometry(nav_msgs::msg::Odometry::ConstSharedPtr message);
   void UpdateTf(const tf2_msgs::msg::TFMessage& message);
@@ -38,6 +43,8 @@ class InputStore final {
  private:
   mutable std::mutex mutex_;
   InputSnapshot latest_;
+  std::string map_frame_;
+  std::string odom_frame_;
 };
 
 }  // namespace lunar::incremental_navigation_ros

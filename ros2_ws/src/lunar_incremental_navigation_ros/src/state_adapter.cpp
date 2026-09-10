@@ -67,10 +67,11 @@ template <typename T>
 
 AdapterResult<lunar::incremental_navigation::RigidTransform>
 AdaptDirectMapFromOdom(
-    const geometry_msgs::msg::TransformStamped& transform) {
+    const geometry_msgs::msg::TransformStamped& transform,
+    std::string_view map_frame, std::string_view odom_frame) {
   const auto rotation = Normalize(transform.transform.rotation);
-  if (transform.header.frame_id != "map" ||
-      transform.child_frame_id != "odom" || !rotation ||
+  if (transform.header.frame_id != map_frame ||
+      transform.child_frame_id != odom_frame || !rotation ||
       !Finite(transform.transform.translation.x) ||
       !Finite(transform.transform.translation.y) ||
       !Finite(transform.transform.translation.z)) {
@@ -78,8 +79,8 @@ AdaptDirectMapFromOdom(
   }
   return {
       .value = lunar::incremental_navigation::RigidTransform{
-          .parent_frame = "map",
-          .child_frame = "odom",
+          .parent_frame = std::string{map_frame},
+          .child_frame = std::string{odom_frame},
           .stamp = {},
           .translation_m = {.x = transform.transform.translation.x,
                             .y = transform.transform.translation.y,
@@ -90,11 +91,12 @@ AdaptDirectMapFromOdom(
 
 AdapterResult<lunar::incremental_navigation::StateInput> AdaptStateInput(
     const lunar::incremental_navigation::RigidTransform& map_from_odom,
-    const nav_msgs::msg::Odometry& odometry) {
-  if (map_from_odom.parent_frame != "map" ||
-      map_from_odom.child_frame != "odom" ||
-      odometry.header.frame_id != "odom" ||
-      odometry.child_frame_id != "base_link" ||
+    const nav_msgs::msg::Odometry& odometry,
+    std::string_view map_frame, std::string_view odom_frame, std::string_view base_frame) {
+  if (map_from_odom.parent_frame != map_frame ||
+      map_from_odom.child_frame != odom_frame ||
+      odometry.header.frame_id != odom_frame ||
+      odometry.child_frame_id != base_frame ||
       !Finite(odometry.pose.pose.position.x) ||
       !Finite(odometry.pose.pose.position.y) ||
       !Finite(odometry.pose.pose.position.z)) {

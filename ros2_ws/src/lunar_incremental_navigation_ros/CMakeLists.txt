@@ -143,6 +143,10 @@ if(BUILD_TESTING)
     target_link_libraries(${target} ${PROJECT_NAME})
   endfunction()
 
+  lunar_add_ros_gtest(platform_config_test test/platform_config_test.cpp)
+  target_compile_definitions(platform_config_test PRIVATE
+    PLATFORM_CONFIG_DIR="${LUNAR_INCREMENTAL_NAVIGATION_CONFIG_SOURCE_DIR}")
+
   lunar_add_ros_gtest(elevation_pipeline_test
     test/elevation_pipeline_test.cpp)
   lunar_add_ros_gtest(exploration_map_projector_test

@@ -17,6 +17,8 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
 from tf2_msgs.msg import TFMessage
 
+from rcl_interfaces.msg import SetParametersResult
+
 from .frame import MapFromOdom, map_tracking_state, parse_map_from_odom
 from .incremental_path import ParsedIncrementalPath, parse_incremental_path
 from .reference import ParsedReference, parse_reference
@@ -81,6 +83,7 @@ class PureWheeledControllerNode(Node):
         super().__init__("lunar_pure_wheeled_controller")
         defaults = {
             "input_mode": "motion_reference",
+            "map_frame": "map", "odom_frame": "odom", "base_frame": "base_link",
             "platform_config": "",
             "path_reference_topic": "/Car/T4/planning/path_reference",
             "tracking_status_topic": "/Car/T4/control/tracking_status",
@@ -116,6 +119,12 @@ class PureWheeledControllerNode(Node):
                 "input_mode must be motion_reference, incremental_path or incremental_reference"
             )
         self._input_mode = input_mode
+        self._map_frame = self.get_parameter("map_frame").value
+        self._odom_frame = self.get_parameter("odom_frame").value
+        self._base_frame = self.get_parameter("base_frame").value
+        frame_names = (self._map_frame, self._odom_frame, self._base_frame)
+        if any(not isinstance(v, str) or not v.strip() for v in frame_names) or len(set(frame_names)) != 3:
+            raise ValueError("map_frame, odom_frame, base_frame must be nonempty and distinct")
         topic_parameters = ["odometry_topic", "command_topic"]
         if self._input_mode == "motion_reference":
             topic_parameters.extend(["reference_topic", "execution_cancel_topic"])
@@ -218,6 +227,13 @@ class PureWheeledControllerNode(Node):
                 state_input_qos(),
             )
         self.create_timer(1.0 / control_rate_hz, self._tick)
+        self.add_on_set_parameters_callback(self._validate_startup_parameters)
+
+    def _validate_startup_parameters(self, parameters):
+        for parameter in parameters:
+            if parameter.name != "use_sim_time" and self.has_parameter(parameter.name) and parameter.value != self.get_parameter(parameter.name).value:
+                return SetParametersResult(successful=False, reason=f"{parameter.name}: startup-only parameter; edit configuration and restart node")
+        return SetParametersResult(successful=True)
 
     @staticmethod
     def _absolute_topic_name(parameter_name: str, value: object) -> str:
@@ -247,7 +263,7 @@ class PureWheeledControllerNode(Node):
             self._clear_active_and_stop()
 
     def _on_path(self, path: Path) -> None:
-        parsed = parse_incremental_path(path)
+        parsed = parse_incremental_path(path, self._map_frame)
         if parsed.clear or parsed.reason is not None:
             self._clear_active_and_stop()
             return
@@ -287,7 +303,7 @@ class PureWheeledControllerNode(Node):
             and identity[1] <= self._invalidated_revision
         ):
             return
-        parsed = parse_incremental_path(reference.path)
+        parsed = parse_incremental_path(reference.path, self._map_frame)
         if parsed.clear or parsed.reason is not None or reference.segment_revision == 0:
             self._clear_active_and_stop()
             return
@@ -301,7 +317,7 @@ class PureWheeledControllerNode(Node):
             self._active = parsed
 
     def _on_tf(self, message: TFMessage) -> None:
-        update = parse_map_from_odom(message)
+        update = parse_map_from_odom(message, self._map_frame, self._odom_frame)
         if update.found:
             self._map_from_odom = update.transform
             self._map_from_odom_received_at = (
@@ -311,7 +327,7 @@ class PureWheeledControllerNode(Node):
                 self._publish_twist()
 
     def _on_odometry(self, odometry: Odometry) -> None:
-        if _yaw(odometry) is None:
+        if _yaw(odometry) is None or (self._input_mode != "motion_reference" and (odometry.header.frame_id != self._odom_frame or odometry.child_frame_id != self._base_frame)):
             self._odometry = None
             self._odometry_received_at = None
             self._publish_twist()
@@ -368,7 +384,7 @@ class PureWheeledControllerNode(Node):
         if self._tracking_status is not None and self._reference_identity is not None:
             message = TrackingStatus()
             message.header.stamp = self.get_clock().now().to_msg()
-            message.header.frame_id = "map"
+            message.header.frame_id = self._map_frame
             message.session_id.uuid = list(self._reference_identity[0])
             message.segment_revision = self._reference_identity[1]
             message.state = getattr(TrackingStatus, result.phase)

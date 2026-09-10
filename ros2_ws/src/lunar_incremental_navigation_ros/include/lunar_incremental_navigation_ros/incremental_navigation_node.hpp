@@ -68,6 +68,7 @@ class IncrementalNavigationNode final : public rclcpp::Node {
  private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr startup_parameters_;
 };
 
 }  // namespace lunar::incremental_navigation_ros

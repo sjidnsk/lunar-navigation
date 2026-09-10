@@ -374,3 +374,43 @@ def test_modes_are_exclusive_and_do_not_implement_runtime_fallback_or_control() 
     assert "eventhandler" not in source
     assert "lunar_pure_wheeled_controller" not in source
     assert "/car/t5/car_cmd_vel" not in source
+
+
+def test_configurable_frames_and_qos(monkeypatch):
+    module, _, _ = _launch_module(monkeypatch)
+    config = yaml.safe_load(STACK_CONFIG.read_text())
+    config['common']['frames'] = dict(map='world', odom='local_odom', base_link='robot_base')
+    config['common']['local_map_qos'] = dict(reliability='best_effort', durability='volatile')
+    config['common']['exploration_map_qos']['durability'] = 'volatile'
+    common = module._require_common(config)
+    navigation, exploration = module._incremental_parameters(config, common, 'wheel', '/tmp/wheel.yaml', False)
+    for parameters in (navigation, exploration):
+        assert parameters['map_frame'] == 'world'
+        assert parameters['odom_frame'] == 'local_odom'
+        assert parameters['base_frame'] == 'robot_base'
+        assert parameters['exploration_map_qos_durability'] == 'volatile'
+
+
+def test_shared_platform_profile_override(monkeypatch):
+    module, _, _ = _launch_module(monkeypatch)
+    config = yaml.safe_load(STACK_CONFIG.read_text())
+    config["common"]["platform_config"] = "/tmp/custom-wheel.yaml"
+    navigation, exploration = module._incremental_parameters(
+        config, module._require_common(config), "wheel", "/default/wheel.yaml", False
+    )
+    assert navigation["platform_config"] == "/tmp/custom-wheel.yaml"
+    assert exploration["platform_config"] == navigation["platform_config"]
+
+
+def test_qos_depth_defaults_to_one_and_invalid_depth_names_field(monkeypatch):
+    module, _, _ = _launch_module(monkeypatch)
+    config = yaml.safe_load(STACK_CONFIG.read_text())
+    del config["common"]["exploration_map_qos"]["depth"]
+    navigation, exploration = module._incremental_parameters(
+        config, module._require_common(config), "wheel", "/default/wheel.yaml", False
+    )
+    assert navigation["exploration_map_qos_depth"] == 1
+    assert exploration["exploration_map_qos_depth"] == 1
+    config["common"]["local_map_qos"]["depth"] = 0
+    with pytest.raises(RuntimeError, match="local_map_qos"):
+        module._require_common(config)

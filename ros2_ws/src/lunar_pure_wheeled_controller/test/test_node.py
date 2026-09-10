@@ -84,6 +84,8 @@ def make_producer_spin_reference(direction: float) -> MotionReference:
 
 def make_odometry(*, x: float, y: float = 0.0, yaw: float = 0.0) -> Odometry:
     odometry = Odometry()
+    odometry.header.frame_id = "odom"
+    odometry.child_frame_id = "base_link"
     odometry.pose.pose.position.x = x
     odometry.pose.pose.position.y = y
     odometry.pose.pose.orientation.z = math.sin(yaw / 2.0)
@@ -800,3 +802,15 @@ def test_incremental_feedback_reports_measured_stop_and_reference_identity(
     finally:
         controller.destroy_node()
         rclpy.shutdown()
+
+
+def test_startup_parameter_change_is_rejected_without_changing_value(controller_with_observer):
+    from rclpy.parameter import Parameter
+
+    controller, _, _, _ = controller_with_observer
+    original = controller.get_parameter("map_frame").value
+    result = controller.set_parameters([Parameter("map_frame", value="world")])[0]
+    assert not result.successful
+    assert "map_frame" in result.reason and "restart" in result.reason
+    assert controller.get_parameter("map_frame").value == original
+    assert controller.set_parameters([Parameter("map_frame", value=original)])[0].successful

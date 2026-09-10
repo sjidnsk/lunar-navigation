@@ -73,9 +73,9 @@ double CheckedFiniteDouble(const long double value) {
 }  // namespace
 
 void PoseResolver::UpdateOdometry(const nav_msgs::msg::Odometry& odometry) {
-  if (odometry.header.frame_id != "odom" ||
-      odometry.child_frame_id != "base_link") {
-    throw std::invalid_argument{"odometry must be exactly odom to base_link"};
+  if (odometry.header.frame_id != odom_frame_ ||
+      odometry.child_frame_id != base_frame_) {
+    throw std::invalid_argument{"odometry frame mismatch: expected " + odom_frame_ + " -> " + base_frame_};
   }
 
   const auto& position = odometry.pose.pose.position;
@@ -96,8 +96,8 @@ void PoseResolver::UpdateTransforms(
     const tf2_msgs::msg::TFMessage& transforms) {
   const geometry_msgs::msg::TransformStamped* selected = nullptr;
   for (const auto& transform : transforms.transforms) {
-    if (transform.header.frame_id == "map" &&
-        transform.child_frame_id == "odom") {
+    if (transform.header.frame_id == map_frame_ &&
+        transform.child_frame_id == odom_frame_) {
       selected = &transform;
     }
   }

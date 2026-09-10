@@ -86,7 +86,7 @@ lunar::pure_exploration::PlatformGeometry ParseWheel(
 
   if (RequireNonemptyString(root, "platform") != "wheel" ||
       RequireNonemptyString(root, "platform_type") != "WHEELED" ||
-      RequireNonemptyString(root, "base_frame_id") != "base_footprint") {
+      RequireNonemptyString(root, "base_frame_id").empty()) {
     InvalidConfig();
   }
   const std::string platform_id =
@@ -135,7 +135,7 @@ lunar::pure_exploration::PlatformGeometry ParseWheel(
   return lunar::pure_exploration::PlatformGeometry{
       .platform_id = platform_id,
       .platform_type = "WHEELED",
-      .base_frame_id = "base_footprint",
+      .base_frame_id = RequireNonemptyString(root, "base_frame_id"),
       .footprint_vertices = std::move(vertices),
       .minimum_clearance_m = minimum_clearance_m,
   };
@@ -149,7 +149,7 @@ lunar::pure_exploration::PlatformGeometry ParseLegged(
 
   if (RequireNonemptyString(root, "platform") != "legged" ||
       RequireNonemptyString(root, "platform_type") != "LEGGED" ||
-      RequireNonemptyString(root, "base_frame_id") != "base_link") {
+      RequireNonemptyString(root, "base_frame_id").empty()) {
     InvalidConfig();
   }
   const std::string platform_id =
@@ -195,7 +195,7 @@ lunar::pure_exploration::PlatformGeometry ParseLegged(
   return lunar::pure_exploration::PlatformGeometry{
       .platform_id = platform_id,
       .platform_type = "LEGGED",
-      .base_frame_id = "base_link",
+      .base_frame_id = RequireNonemptyString(root, "base_frame_id"),
       .footprint_vertices = {{half_length_m, half_width_m},
                              {half_length_m, -half_width_m},
                              {-half_length_m, -half_width_m},

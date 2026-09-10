@@ -12,6 +12,7 @@ namespace lunar::pure_planner_ros {
 struct PlatformConfigResult final {
   std::optional<lunar::pure_planning::PlatformCapability> capability;
   std::string reason_code;
+  std::string error_detail;
 };
 
 [[nodiscard]] PlatformConfigResult LoadPlatformConfig(
