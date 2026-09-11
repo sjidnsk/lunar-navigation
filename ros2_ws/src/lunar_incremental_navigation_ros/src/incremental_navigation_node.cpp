@@ -1422,6 +1422,13 @@ struct IncrementalNavigationNode::Impl final {
     return TryCommitPendingTerminal();
   }
 
+  ~Impl() {
+    // Goal-handle destruction auto-cancels unfinished goals. After context
+    // shutdown, the server can no longer publish their results. Drop its owner
+    // first so the handles' weak terminal callbacks cannot enter a dead server.
+    action_server.reset();
+  }
+
   IncrementalNavigationNode& node;
   RuntimeParameters parameters;
   InputStore input_store;

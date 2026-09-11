@@ -128,12 +128,14 @@ install(
   DESTINATION share/${PROJECT_NAME}/launch
   FILES_MATCHING
     PATTERN "incremental_exploration_navigation_rviz.launch.py"
-    PATTERN "incremental_rviz_goal_bridge.launch.py")
+    PATTERN "incremental_rviz_goal_bridge.launch.py"
+    PATTERN "navigation_rviz.launch.py")
 install(
   DIRECTORY "${LUNAR_INCREMENTAL_NAVIGATION_RVIZ_SOURCE_DIR}/"
   DESTINATION share/${PROJECT_NAME}/rviz
   FILES_MATCHING
-    PATTERN "incremental_exploration_navigation.rviz")
+    PATTERN "incremental_exploration_navigation.rviz"
+    PATTERN "navigation.rviz")
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)

@@ -13,6 +13,7 @@ from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.substitutions import FindPackageShare
 from launch_ros.parameter_descriptions import ParameterValue
 
 
@@ -240,7 +241,14 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument("use_sim_time", default_value=""),
             DeclareLaunchArgument("start_navigation", default_value="true"),
+            DeclareLaunchArgument("start_rviz", default_value="false"),
             DeclareLaunchArgument("start_exploration", default_value="true"),
             OpaqueFunction(function=_compose),
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource([FindPackageShare("lunar_incremental_navigation_ros"),
+                                               "/launch/navigation_rviz.launch.py"]),
+                launch_arguments={"config_file": LaunchConfiguration("config_file"),
+                                  "use_sim_time": LaunchConfiguration("use_sim_time")}.items(),
+                condition=IfCondition(LaunchConfiguration("start_rviz"))),
         ]
     )

@@ -6,6 +6,7 @@ import time
 
 import numpy as np
 import rclpy
+from rclpy.signals import SignalHandlerOptions
 from builtin_interfaces.msg import Time
 from geometry_msgs.msg import TransformStamped, Twist
 from grid_map_msgs.msg import GridMap
@@ -251,7 +252,7 @@ class VehicleNode(Node):
 
 
 def main(args=None):
-    rclpy.init(args=args)
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     node = VehicleNode()
     try:
         rclpy.spin(node)

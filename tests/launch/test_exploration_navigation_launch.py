@@ -95,6 +95,8 @@ def _launch_module(
     launch_ros = types.ModuleType("launch_ros")
     launch_ros_actions = types.ModuleType("launch_ros.actions")
     launch_ros_actions.Node = Node
+    launch_ros_substitutions = types.ModuleType("launch_ros.substitutions")
+    launch_ros_substitutions.FindPackageShare = LaunchConfiguration
     launch_ros_parameters = types.ModuleType("launch_ros.parameter_descriptions")
     launch_ros_parameters.ParameterValue = ParameterValue
     for name, module in {
@@ -107,6 +109,7 @@ def _launch_module(
         "launch.substitutions": launch_substitutions,
         "launch_ros": launch_ros,
         "launch_ros.actions": launch_ros_actions,
+        "launch_ros.substitutions": launch_ros_substitutions,
         "launch_ros.parameter_descriptions": launch_ros_parameters,
     }.items():
         monkeypatch.setitem(sys.modules, name, module)
@@ -168,10 +171,12 @@ def test_launch_declares_the_single_entrypoint_arguments_and_incremental_default
         "use_sim_time",
         "start_navigation",
         "start_exploration",
+        "start_rviz",
     }
     assert arguments["stack_mode"] == ""
     assert arguments["platform_type"] == ""
     assert arguments["use_sim_time"] == ""
+    assert arguments["start_rviz"] == "false"
     assert arguments["start_navigation"] == "true"
     assert arguments["start_exploration"] == "true"
     assert arguments["config_file"] is None

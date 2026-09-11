@@ -2,6 +2,7 @@
 import argparse
 import json
 import math
+import os
 from pathlib import Path
 import time
 
@@ -142,7 +143,7 @@ def main(args=None):
                   stopped and safe and reverse and rolling and geometry)
         report = dict(schema='lunar-controller-demo-evidence/v1', case=opts.case,
                       requested_goal=dict(x_m=x, y_m=y, yaw_rad=yaw),
-                      runtime='local Jazzy command-driven simulation', passed=passed, failure=failure,
+                      runtime=f"{os.environ.get('ROS_DISTRO', 'unknown')} command-driven simulation", passed=passed, failure=failure,
                       elapsed_wall_s=time.monotonic()-start, expected_session_id=expected_session, action_result=result,
                       gates=dict(plan_found_with_active_reference=planned, matching_final_completion=bool(completion),
                                  actual_stopped=stopped, no_speed_violation_or_collision=safe,
@@ -150,7 +151,7 @@ def main(args=None):
                                  goal_geometry=geometry), goal_distance_m=distance, goal_yaw_error_rad=yaw_error,
                       plant=node.plant, references=refs, tracking_transitions=node.tracking,
                       navigation_feedback=node.feedback, diagnostics=node.diagnostics,
-                      boundaries=dict(Humble='NOT_RUN', Orin='NOT_RUN', vehicle='NOT_RUN'))
+                      boundaries=dict(native_Orin='NOT_RUN', vehicle='NOT_RUN'))
         output = Path(opts.output)
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(report, ensure_ascii=False, indent=2)+'\n', encoding='utf-8')

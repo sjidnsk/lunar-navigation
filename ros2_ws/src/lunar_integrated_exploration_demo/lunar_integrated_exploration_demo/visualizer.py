@@ -5,6 +5,7 @@ import math
 import time
 import numpy as np
 import rclpy
+from rclpy.signals import SignalHandlerOptions
 from rclpy.node import Node
 from rclpy.clock import Clock, ClockType
 from rclpy.executors import ExternalShutdownException
@@ -149,7 +150,7 @@ class Visualizer(Node):
 
 
 def main(args=None):
-    rclpy.init(args=args);node=Visualizer()
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO);node=Visualizer()
     try:rclpy.spin(node)
     except (KeyboardInterrupt,ExternalShutdownException):pass
     finally:

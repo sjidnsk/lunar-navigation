@@ -1,6 +1,7 @@
 # 增量规划真实控制闭环：仿真器与记录器
 
-本包仅用于独立 ROS 2 Jazzy 仿真域。完整链路启动见仓库操作文档。
+本包用于独立 ROS 2 仿真域。部署根目录运行 `bash scripts/orin/start_controller_demo.sh`。
+启动、RViz 点选及记录器操作见根目录 `部署可视化与Demo.md`。
 `vehicle_sim` 只订阅 `cmd_vel` 决定运动；不订阅路径或目标，不发布 TrackingStatus。
 TrackingStatus 由正式控制器发布，本包只读用于 HUD 和证据。
 

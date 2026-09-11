@@ -3,6 +3,7 @@ import math
 import json
 import time
 import rclpy
+from rclpy.signals import SignalHandlerOptions
 from rclpy.node import Node
 from rclpy.clock import Clock, ClockType
 from rclpy.action import ActionClient
@@ -96,7 +97,7 @@ class TaskStarter(Node):
 
 
 def main(args=None):
-    rclpy.init(args=args); node = TaskStarter()
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO); node = TaskStarter()
     try:
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):

@@ -5,6 +5,7 @@ import time
 from dataclasses import asdict
 
 import rclpy
+from rclpy.signals import SignalHandlerOptions
 from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
@@ -173,7 +174,7 @@ class VehicleSim(Node):
 
 
 def main(args=None):
-    rclpy.init(args=args)
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     node = VehicleSim()
     try:
         rclpy.spin(node)

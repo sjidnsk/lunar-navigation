@@ -42,6 +42,9 @@ def compose(context):
         Node(package='lunar_pure_exploration_ros',executable='incremental_exploration_node',name='integrated_explorer',parameters=[explorer],output='screen'),
         Node(package='lunar_integrated_exploration_demo',executable='visualizer',name='integrated_visualizer',parameters=[dict(sim,**sensor,scene_size_m=scene_size)],output='screen'),
         Node(package='lunar_integrated_exploration_demo',executable='start_task',name='integrated_task_starter',parameters=[dict(sim,task_size_m=task_size,initial_scan=True)],condition=IfCondition(LaunchConfiguration('auto_start')),output='screen'),
+        Node(package='lunar_incremental_navigation_ros',executable='lunar_incremental_rviz_goal_bridge',
+             name='integrated_goal_bridge',parameters=[dict(sim,goal_topic=prefix+'/goal_pose',
+             action_name=prefix+'/navigate_to_pose',expected_frame='map')],output='screen'),
         Node(package='rviz2',executable='rviz2',name='integrated_global_rviz',parameters=[sim],arguments=['-d',share+'/rviz/global.rviz'],condition=IfCondition(LaunchConfiguration('start_rviz')),output='screen'),
         Node(package='rviz2',executable='rviz2',name='integrated_local_rviz',parameters=[sim],arguments=['-d',share+'/rviz/local.rviz'],condition=IfCondition(LaunchConfiguration('start_local_rviz')),output='screen'),
     ]

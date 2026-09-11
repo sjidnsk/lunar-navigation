@@ -127,7 +127,7 @@ def test_rviz_goal_bridge_start_script_launches_the_incremental_bridge(
     assert command[1:4] == [
         "launch",
         "lunar_incremental_navigation_ros",
-        "incremental_rviz_goal_bridge.launch.py",
+        "navigation_rviz.launch.py",
     ]
 
 
@@ -237,3 +237,36 @@ def test_deploy_script_syncs_without_requesting_remote_deletion(tmp_path: Path) 
     assert ssh[1:] == ["orin@example", "mkdir", "-p", "/opt/lunar"]
     assert "--delete" not in rsync
     assert "orin@example:/opt/lunar/" == rsync[-1]
+
+
+def test_navigation_can_enable_rviz_with_same_config(tmp_path):
+    _run(tmp_path, "start_navigation.sh", "wheel", "true", "/tmp/custom.yaml", "true")
+    command = _command(tmp_path / "logs", "ros2")
+    assert "start_rviz:=true" in command
+    assert "config_file:=/tmp/custom.yaml" in command
+    assert "start_exploration:=false" in command
+
+
+def test_demo_build_includes_transitive_runtime_packages(tmp_path):
+    _run(tmp_path, "build.sh", "demos")
+    command = _command(tmp_path / "logs", "colcon")
+    assert command[4] == "lunar_integrated_exploration_demo"
+
+
+def test_simple_demo_isolates_inherited_production_domain(tmp_path, monkeypatch):
+    monkeypatch.setenv("ROS_DOMAIN_ID", "0")
+    monkeypatch.delenv("DEMO_ROS_DOMAIN_ID", raising=False)
+    lines, log_dir = _run(tmp_path, "start_controller_demo.sh", "reverse", "false")
+    assert any("ROS_DOMAIN_ID=72" in line for line in lines)
+    command = _command(log_dir, "ros2")
+    assert "case:=reverse" in command
+    assert "start_rviz:=false" in command
+
+
+def test_integrated_demo_forwards_clock_and_extra_options(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEMO_ROS_DOMAIN_ID", "74")
+    lines, log_dir = _run(tmp_path, "start_exploration_demo.sh", "false", "10", "auto_start:=false")
+    assert any("ROS_DOMAIN_ID=74" in line for line in lines)
+    command = _command(log_dir, "ros2")
+    assert "start_rviz:=false" in command and "start_local_rviz:=false" in command
+    assert "time_scale:=10" in command and "auto_start:=false" in command

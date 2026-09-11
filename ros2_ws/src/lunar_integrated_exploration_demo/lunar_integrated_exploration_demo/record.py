@@ -2,6 +2,7 @@
 import argparse
 import json
 import math
+import os
 from pathlib import Path
 import time
 import rclpy
@@ -96,7 +97,8 @@ def main(args=None):
                     actual_terminal=node.status.get('state')==PureExplorationStatus.COMPLETED,
                     matching_stopped_completions=[list(k)for k in set(node.references)&set(node.plan_found)&node.completed if k[0] not in node.bootstrap_ids and node.references[k]['final'] and node.references[k]['fine_revision']==node.plan_found[k]],
                     distinct_map_revisions=len(node.map_revisions),events=node.events,
-                    boundaries={'Humble':'NOT_RUN','Orin':'NOT_RUN','vehicle':'NOT_RUN'})
+                    runtime=f"{os.environ.get('ROS_DISTRO', 'unknown')} command-driven simulation",
+                    boundaries={'native_Orin':'NOT_RUN','vehicle':'NOT_RUN'})
         p=Path(opts.output);p.parent.mkdir(parents=True,exist_ok=True);p.write_text(json.dumps(output,indent=2)+'\n')
         print(json.dumps({'output':str(p),'passed':passed,'gates':output['gates'],'exploration':node.status}))
         node.destroy_node()
