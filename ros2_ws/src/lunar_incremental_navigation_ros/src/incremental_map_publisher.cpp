@@ -1,5 +1,7 @@
 #include "lunar_incremental_navigation_ros/incremental_map_publisher.hpp"
 
+#include "lunar_incremental_navigation_ros/planning_snapshot_visualization.hpp"
+
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -31,7 +33,37 @@ IncrementalMapPublisher::IncrementalMapPublisher(rclcpp::Node& node,
                                                  std::string topic)
     : clock_(node.get_clock()),
       publisher_(node.create_publisher<nav_msgs::msg::OccupancyGrid>(
-          std::move(topic), ConfiguredExplorationMapQos(node))) {}
+          std::move(topic), ConfiguredExplorationMapQos(node))) {
+  const bool enabled = node.declare_parameter<bool>("publish_local_fine_map", false);
+  const auto fine_topic = node.declare_parameter<std::string>(
+      "local_fine_map_topic", "/Car/T4/mapping/local_fine_map");
+  local_fine_window_m_ = node.declare_parameter<double>("local_fine_map_window_m", 28.0);
+  if (!std::isfinite(local_fine_window_m_) || local_fine_window_m_ <= 0.0) {
+    throw std::invalid_argument("local_fine_map_window_m must be finite and positive");
+  }
+  if (enabled) {
+    local_fine_publisher_ = node.create_publisher<nav_msgs::msg::OccupancyGrid>(
+        fine_topic, ExplorationMapQos());
+  }
+}
+
+void IncrementalMapPublisher::PublishLocalFine(
+    const lunar::incremental_navigation::FineTraversabilitySnapshot& fine,
+    const lunar::incremental_navigation::Point2 center) {
+  if (!local_fine_publisher_ || local_fine_publisher_->get_subscription_count() == 0U) {
+    return;
+  }
+  const auto revision = fine.fine_traversability_revision();
+  if (last_fine_revision_ == revision && last_fine_center_ &&
+      std::hypot(center.x - last_fine_center_->x, center.y - last_fine_center_->y) <
+          fine.geometry().resolution_m()) return;
+  auto display = ProjectFineVisualization(
+      fine, {.center_map_m = center, .length_m = local_fine_window_m_}, 2.0);
+  display.state.header.stamp = clock_->now();
+  local_fine_publisher_->publish(std::move(display.state));
+  last_fine_revision_ = revision;
+  last_fine_center_ = center;
+}
 
 bool IncrementalMapPublisher::Publish(
     const lunar::incremental_navigation::SnapshotBundle& bundle) {

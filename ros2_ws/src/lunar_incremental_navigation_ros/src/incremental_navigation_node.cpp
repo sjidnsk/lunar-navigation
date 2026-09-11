@@ -949,6 +949,9 @@ struct IncrementalNavigationNode::Impl final {
       }
     }
     const core::SnapshotBundle bundle = CaptureBundle();
+    if (state && bundle.fine) {
+      exploration_map_publisher.PublishLocalFine(*bundle.fine, state->base_link_pose.position_m);
+    }
 #if defined(LUNAR_BUILD_DEMO)
     if (debug_publisher && state && bundle.fine) {
       debug_publisher->PublishSnapshots(bundle, state->base_link_pose.position_m);

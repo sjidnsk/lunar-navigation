@@ -38,6 +38,9 @@ exploration:
   diagnostics_topic: /Car/T4/exploration/diagnostics
 
 navigation:
+  publish_local_fine_map: true
+  local_fine_map_topic: /Car/T4/mapping/local_fine_map
+  local_fine_map_window_m: 28.0
   planning_sla_ms: 2000
   planning_hard_timeout_ms: 3000
   global_subdeadline_ms: 500

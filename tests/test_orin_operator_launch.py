@@ -29,6 +29,7 @@ def test_custom_operator_config(tmp_path, monkeypatch, start_rviz):
     config['common']['exploration_map_topic'] = '/custom/map'
     config['common']['exploration_map_qos'] = dict(reliability='best_effort', durability='volatile', depth=4)
     config['navigation']['local_path_topic'] = '/custom/path'
+    config['navigation']['local_fine_map_topic'] = '/custom/fine'
     path = tmp_path / 'runtime.yaml'
     path.write_text(yaml.safe_dump(config))
     context = LaunchContext()
@@ -54,4 +55,7 @@ def test_custom_operator_config(tmp_path, monkeypatch, start_rviz):
     assert displays['Exploration map']['Topic']['Durability Policy'] == 'Volatile'
     assert displays['Exploration map']['Topic']['Depth'] == 4
     assert displays['Local path']['Topic']['Value'] == '/custom/path'
+    assert displays['Local fine map']['Topic']['Value'] == '/custom/fine'
+    assert displays['Local fine map']['Enabled'] is True
+    assert displays['Exploration map']['Enabled'] is False
     assert view['Tools'][-1]['Topic'] == '/custom/goal'

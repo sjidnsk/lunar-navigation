@@ -31,7 +31,8 @@ def compose(context):
         view = yaml.safe_load((share / 'rviz/navigation.rviz').read_text(encoding='utf-8'))
         manager = view['Visualization Manager']
         manager['Global Options']['Fixed Frame'] = common['frames']['map']
-        topics = {'Exploration map': common['exploration_map_topic'],
+        topics = {'Local fine map': config['navigation'].get('local_fine_map_topic', '/Car/T4/mapping/local_fine_map'),
+                  'Exploration map': common['exploration_map_topic'],
                   'Global route': config['navigation']['global_route_topic'],
                   'Local path': config['navigation']['local_path_topic'],
                   'Odometry': common['odometry_topic'],

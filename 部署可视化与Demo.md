@@ -61,7 +61,13 @@ bash scripts/orin/start_rviz_goal_bridge.sh false config/exploration_navigation.
 bash scripts/orin/control_exploration.sh area-01 pause
 ```
 
-正式 RViz 显示探索地图、粗指导路线、局部路径、定位、探索前沿和目标；不加载模拟地形。
+正式 RViz 默认显示 **Local fine map**：以机器人为中心、默认 28 m 的细分辨率通行性图，细分辨率沿用 T3 输入（输入 0.2 m 时显示 0.2 m）。它已考虑平台尺寸/地形能力，是机器人中心是否可通行的图，不是原始高程或原始障碍像素图。白色可通行、黑色不可通行、灰色未知。
+
+**Exploration map** 是默认 1 m 的全局粗探索图，默认关闭，可勾选作全局参考。粗指导路线、局部路径、定位、探索前沿和目标同时可显示。界面不加载模拟地形。
+
+`navigation.publish_local_fine_map` 控制正式细图发布，`local_fine_map_topic` 与 `local_fine_map_window_m` 配置话题和显示窗口。没有订阅者时不生成显示栅格；地图变化或机器人移动至少一个细格距离后更新。显示图来自已有细图，不参与规划输入，不改变全局粗分辨率或搜索窗口。
+
+鼠标坐标不吸附粗格，但细图 FREE 也不保证全局粗规划一定接受目标；细图自由、粗图占据导致的全局拒绝仍是独立算法问题。小场景可按任务需要调整 `common.coarse_resolution_m` 并重启，例如从 1.0 改为 0.2；这会提高全局搜索与探索计算量，属于算法配置调整，界面不会自动修改它。
 
 ## 简单控制闭环 Demo
 

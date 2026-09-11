@@ -10,8 +10,8 @@ Visualization Manager:
   Displays:
   - Class: rviz_default_plugins/Map
     Name: Exploration map
-    Enabled: true
-    Value: true
+    Enabled: false
+    Value: false
     Topic:
       Value: /Car/T4/mapping/exploration_map
       Reliability Policy: Reliable
@@ -19,6 +19,17 @@ Visualization Manager:
       History Policy: Keep Last
       Depth: 1
     Alpha: 0.8
+  - Class: rviz_default_plugins/Map
+    Name: Local fine map
+    Enabled: true
+    Value: true
+    Alpha: 1.0
+    Topic:
+      Value: /Car/T4/mapping/local_fine_map
+      Reliability Policy: Reliable
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Depth: 1
   - Class: rviz_default_plugins/Path
     Name: Global route
     Enabled: true
@@ -94,7 +105,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/TopDownOrtho
-      Scale: 12
+      Scale: 30
       Target Frame: <Fixed Frame>
 Window Geometry:
   Width: 1280
