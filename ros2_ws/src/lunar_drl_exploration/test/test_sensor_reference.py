@@ -1,4 +1,6 @@
-"""Independent exhaustive center-ray oracle and effective measurement parity."""
+"""Independent exhaustive finite-beam oracle and effective measurement parity."""
+
+from beam_oracle import observe as oracle_observe
 
 import math
 import numpy as np
@@ -9,28 +11,6 @@ from lunar_drl_exploration.scene import TerrainGrid
 from lunar_drl_exploration.sensor import SensorModel
 from lunar_drl_exploration.reference import CoverageReference
 from lunar_drl_exploration.geometry import world_to_cell, polygon_mask
-
-
-def oracle_line(b, source, target):
-    # Independent continuous segment versus every closed cell square. Ties at
-    # corners touch both cells; the first-hit target itself is not an occluder.
-    sy, sx = source
-    ty, tx = target
-    for y, x in np.argwhere(b == 2):
-        if (y, x) in (source, target):
-            continue
-        lo, hi = 0.0, 1.0
-        for a, d, lower in ((sx + 0.5, tx - sx, x), (sy + 0.5, ty - sy, y)):
-            if d == 0:
-                if not lower <= a <= lower + 1:
-                    hi = -1
-                    break
-            else:
-                p, q = (lower - a) / d, (lower + 1 - a) / d
-                lo, hi = max(lo, min(p, q)), min(hi, max(p, q))
-        if lo <= hi and hi > 0 and lo < 1:
-            return False
-    return True
 
 
 def oracle_reachable(m, start):
@@ -58,15 +38,10 @@ def oracle_union(terrain, start, sensor):
     r = oracle_reachable(terrain.navigation, start)
     result = np.zeros(terrain.shape, bool)
     for source in r:
-        for target in np.ndindex(terrain.shape):
-            if (
-                math.dist(source, target) * terrain.resolution_m
-                <= sensor.range_m + 1e-10
-                and np.isfinite(terrain.heights[target])
-                and terrain.intrinsic[target] != 0
-                and oracle_line(terrain.intrinsic, source, target)
-            ):
-                result[target] = True
+        result |= oracle_observe(
+            terrain.intrinsic, source[::-1], sensor.range_m / terrain.resolution_m
+        )
+    result &= np.isfinite(terrain.heights) & (terrain.intrinsic != 0)
     return result
 
 
@@ -139,19 +114,10 @@ def test_origin_fractional_floor_actual_yaw_translation_rejected():
 
 def test_first_hit_exact_corner_and_range():
     t = terrain_fixture()
-    # Pick native-produced blockers, then independently check all center rays.
+    # Pick native-produced blockers, then independently check all emitted beam prefixes.
     p = Pose(*t.cell_center(3, 6), 0)
     got = SensorModel.observe(t, p, SensorSpec(range_m=4, fov_deg=360)).mask
-    want = np.array(
-        [
-            [
-                math.dist((6, 3), (y, x)) * 0.5 <= 4 + 1e-10
-                and oracle_line(t.intrinsic, (6, 3), (y, x))
-                for x in range(t.shape[1])
-            ]
-            for y in range(t.shape[0])
-        ]
-    )
+    want = oracle_observe(t.intrinsic, (3, 6), 8.0)
     assert np.array_equal(got, want)
 
 
@@ -255,7 +221,7 @@ def test_exact_corner_cannot_cut_blocker_and_disconnected_free_is_not_blocked():
     b = np.zeros((5, 5), np.uint8)
     b[1, 2] = 2
     out = np.empty_like(b)
-    native.observe(b, 1, 1, 4.0, math.pi / 4, math.pi * 2, out)
+    native.observe(b, 1, 1, 4.0, math.pi / 4, 0.001, out)
     assert out[1, 2] and not out[2, 2]  # side cell hit at the exact shared corner
     m = np.zeros((4, 4), np.uint8)
     m[1, 1] = 1
@@ -409,9 +375,7 @@ def test_random_small_native_union_independent_ray_and_reachability_oracle(seed)
     native.visible_union(b, rr, np.ones_like(m), 2.5, output)
     want = np.zeros(m.shape, bool)
     for source in sources:
-        for target in np.ndindex(m.shape):
-            if math.dist(source, target) <= 2.5 and oracle_line(b, source, target):
-                want[target] = True
+        want |= oracle_observe(b, source[::-1], 2.5)
     assert np.array_equal(output, want)
 
 

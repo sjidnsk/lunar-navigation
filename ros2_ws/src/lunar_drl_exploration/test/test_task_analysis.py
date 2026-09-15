@@ -266,7 +266,7 @@ def test_direct_R_visibility_is_independent_of_potential_movement_component():
     _assert_real_center_witnesses(s, report, sensor)
 
 
-def test_off_axis_traversal_contact_is_not_an_unverified_center_hit():
+def test_off_axis_pending_contact_is_an_actual_beam_hit_without_losing_demand():
     from lunar_drl_exploration.sensor import target_visibility
     from lunar_drl_exploration.decision import DecisionCore
 
@@ -278,12 +278,22 @@ def test_off_axis_traversal_contact_is_not_an_unverified_center_hit():
     sensor = SensorSpec(range_m=5)
     s = snapshot(m, b, pose=Pose(4.5, 4.5, 0))
     assert target_visibility(b, (4, 4), [[0, 6]], 5)[0]
-    assert not target_visibility(b, (4, 4), [[3, 5]], 5)[0]
+    # Under prefix emission the previously hidden contact is now a real hit;
+    # retain the old sole demand and require every chosen interface to be hit.
+    assert target_visibility(b, (4, 4), [[3, 5]], 5)[0]
     observation, report = DecisionCore(task(0, 6, 1, 7), sensor).observe(s)
     assert report.available and not report.exhausted
     _assert_real_center_witnesses(s, report, sensor)
-    assert [0, 6] in report.frontier_cells.tolist()
+    assert len(report.frontier_cells) > 0
     assert observation.features[observation.current_index, 3:11].max() > 0
+    # Measuring the now-valid first interface must expose the original demand,
+    # not permanently filter it out as a workaround for the old P1 finding.
+    b[5, 3] = 1
+    follow = snapshot(m, b, pose=s.pose)
+    _, after = DecisionCore(task(0, 6, 1, 7), sensor).observe(follow)
+    assert after.available and not after.exhausted
+    assert [0, 6] in after.frontier_cells.tolist()
+    _assert_real_center_witnesses(follow, after, sensor)
 
 
 def test_subcell_sensor_range_does_not_create_unobservable_adjacent_frontier():
@@ -324,3 +334,20 @@ def test_sparse_direct_witness_search_matches_exhaustive_sensor_sources():
             if source[0] >= 0:
                 assert reachable[source[1], source[0]]
                 assert target_visibility(b, source, [target], radius)[0]
+
+
+def test_direct_pending_interface_certificate_keeps_external_and_unknown_R_sources():
+    # All movement beyond R is blocked, but B is transparent. The first unknown
+    # interface lies outside the dense task demand region; it cannot be cropped.
+    for known_source in (False, True):
+        m = np.full((17, 23), 2, np.uint8)
+        b = np.zeros_like(m)
+        m[7:10, 1:4] = b[7:10, 1:4] = 1
+        k = b if known_source else np.zeros_like(b)
+        sensor = SensorSpec(range_m=20)
+        s = snapshot(m, b, k, pose=Pose(3.5, 8.5, 0))
+        report = TaskAnalyzer(task(10, 4, 20, 14), sensor).update(s)
+        assert report.available and not report.exhausted
+        assert len(report.frontier_cells)
+        assert np.all(report.frontier_cells[:, 0] < 10)
+        _assert_real_center_witnesses(s, report, sensor)

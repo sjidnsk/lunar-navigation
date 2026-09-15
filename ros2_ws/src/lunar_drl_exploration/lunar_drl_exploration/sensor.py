@@ -7,6 +7,9 @@ import lunar_drl_terrain_native as native
 from .contracts import freeze_array
 from .geometry import world_to_cell
 
+# Checkpoints/references must bind this semantic version, independent of graph shape.
+OBSERVATION_MODEL_VERSION = "finite_center_tip_prefix_v1"
+
 
 def validate_sensor(sensor):
     if sensor.offset_x_m != 0 or sensor.offset_y_m != 0:
@@ -96,8 +99,8 @@ class SensorModel:
 def target_visibility(intrinsic, source_xy, targets_xy, range_cells):
     """Full-heading geometric relation, using the same native rays as observe.
 
-    Coordinates are integer raster cells. Callers apply physical heading/FOV to
-    this single relation, avoiding eight duplicate raycasts.
+    Coordinates are integer raster cells. The relation is directed; heading
+    consumers must use directional_visibility, never target-center bearings.
     """
     targets = np.ascontiguousarray(targets_xy, dtype=np.int64).reshape(-1, 2)
     result = np.empty((len(targets), 1), np.uint8)
@@ -112,11 +115,10 @@ def target_visibility(intrinsic, source_xy, targets_xy, range_cells):
     return result[:, 0].astype(bool)
 
 
-def first_pending_cells(intrinsic, known, source_xy, targets_xy):
-    """First pending center with its own visible native ray; -1 if none.
+def first_pending_cells(intrinsic, known, source_xy, targets_xy, range_cells):
+    """First actually hit pending cell on a successful demand beam; -1 if none.
 
-    Supercover traversal contacts whose center rays are blocked are skipped.
-    A visible pending demand remains the fallback, so its opportunity is retained.
+    Uses the configured nominal fan, including simultaneous side-hit events.
     """
     targets = np.ascontiguousarray(targets_xy, dtype=np.int64).reshape(-1, 2)
     out = np.empty((len(targets), 1), np.int64)
@@ -125,6 +127,7 @@ def first_pending_cells(intrinsic, known, source_xy, targets_xy):
         np.ascontiguousarray(known, dtype=np.uint8),
         int(source_xy[0]),
         int(source_xy[1]),
+        float(range_cells),
         targets,
         out,
     )
@@ -132,7 +135,7 @@ def first_pending_cells(intrinsic, known, source_xy, targets_xy):
 
 
 def direct_witnesses(intrinsic, reachable, targets_xy, range_cells):
-    """First actual reachable center-ray source per target, or [-1,-1].
+    """First actual reachable finite-beam source per target, or [-1,-1].
 
     Movement components do not enter this optical relation. Sparse native
     first-source search avoids enumerating every source/target Python pair.
@@ -147,3 +150,56 @@ def direct_witnesses(intrinsic, reachable, targets_xy, range_cells):
         result,
     )
     return result
+
+
+def source_visibility(intrinsic, sources_xy, target_xy, range_cells):
+    """Forward each candidate stance to a fixed target; never assume reciprocity."""
+    sources = np.ascontiguousarray(sources_xy, dtype=np.int64).reshape(-1, 2)
+    result = np.empty((len(sources), 1), np.uint8)
+    native.visible_sources(
+        np.ascontiguousarray(intrinsic, dtype=np.uint8),
+        int(target_xy[0]),
+        int(target_xy[1]),
+        float(range_cells),
+        sources,
+        result,
+    )
+    return result[:, 0].astype(bool)
+
+
+def directional_visibility(
+    intrinsic, source_xy, targets_xy, range_cells, headings, fov_rad
+):
+    """Deduplicated target membership for eight actual optical world headings.
+
+    Multiple supporting beam angles are ORed after a shared prefix occlusion
+    check. No touched-center bearing filter is applied.
+    """
+    targets = np.ascontiguousarray(targets_xy, dtype=np.int64).reshape(-1, 2)
+    angles = np.ascontiguousarray(headings, dtype=np.float64).reshape(8, 1)
+    result = np.empty((len(targets), 8), np.uint8)
+    native.directional_targets(
+        np.ascontiguousarray(intrinsic, dtype=np.uint8),
+        int(source_xy[0]),
+        int(source_xy[1]),
+        float(range_cells),
+        targets,
+        angles,
+        float(fov_rad),
+        result,
+    )
+    return result.astype(bool)
+
+
+def optical_candidate_mask(intrinsic, sources):
+    """Necessary first-hit support, computed once per reference/map analysis.
+
+    Transmitting prefixes are cardinal-connected through B != BLOCKED (including
+    UNKNOWN). An emitted first blocker is cardinal-adjacent to that component,
+    including simultaneous side contacts. This mask never replaces exact range,
+    forward beam queries or native M reachability.
+    """
+    from scipy.ndimage import binary_dilation, binary_propagation
+
+    optical = binary_propagation(np.asarray(sources, bool), mask=intrinsic != 2)
+    return binary_dilation(optical)

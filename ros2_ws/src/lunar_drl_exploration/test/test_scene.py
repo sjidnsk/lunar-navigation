@@ -115,3 +115,29 @@ def test_largest_main_component_matches_native_no_corner_cut_partition(seed):
     m[1, 1] = 1
     assert not _largest_native_free_component(m)[1, 1]
     assert np.count_nonzero(_largest_native_free_component(m)) == 9
+
+
+@pytest.mark.parametrize("family", ["cave", "moon"])
+@pytest.mark.parametrize("extent", [100, 300, 1000])
+def test_provided_bounds_contain_complete_analytic_features_and_context(family, extent):
+    scene = Scene(20260915, family, extent)
+    boxes = []
+    for x, y, r, *_ in scene._rooms + scene._rocks:
+        boxes.append((x - r, y - r, x + r, y + r))
+    for x, y, r, *_ in scene._craters:
+        boxes.append((x - 2 * r, y - 2 * r, x + 2 * r, y + 2 * r))
+    for ax, ay, bx, by, r in scene._passages:
+        boxes.append(
+            (min(ax, bx) - r, min(ay, by) - r, max(ax, bx) + r, max(ay, by) + r)
+        )
+    for x0, y0, x1, y1 in boxes:
+        assert scene.bounds[0] <= x0 - 12 + 1e-9
+        assert scene.bounds[1] <= y0 - 12 + 1e-9
+        assert scene.bounds[2] >= x1 + 12 - 1e-9
+        assert scene.bounds[3] >= y1 + 12 - 1e-9
+    # Domain expansion retains the old world lattice and all RNG streams.
+    old_origin = -extent / 2 - 12
+    assert np.allclose(
+        (np.array(scene.origin) - old_origin) / scene.resolution_m,
+        np.rint((np.array(scene.origin) - old_origin) / scene.resolution_m),
+    )

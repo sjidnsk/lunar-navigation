@@ -50,3 +50,6 @@ PyObject* visible_union(PyObject*, PyObject*);
 PyObject* visible_targets(PyObject*, PyObject*);
 PyObject* first_pending(PyObject*, PyObject*);
 PyObject* visible_witnesses(PyObject*, PyObject*);
+PyObject* visible_sources(PyObject*, PyObject*);
+PyObject* directional_targets(PyObject*, PyObject*);
+PyObject* visibility_cache_info(PyObject*, PyObject*);

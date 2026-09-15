@@ -9,7 +9,7 @@ from scipy.ndimage import maximum_filter
 import lunar_drl_terrain_native as native
 from .contracts import freeze_array
 from .geometry import polygon_mask
-from .sensor import validate_sensor
+from .sensor import validate_sensor, OBSERVATION_MODEL_VERSION, optical_candidate_mask
 
 
 @dataclass(frozen=True)
@@ -46,6 +46,12 @@ class CoverageReference:
         # Raw finite hits with incomplete support remain publishable measurements,
         # but only native-classified centers belong to effective coverage E.
         candidate &= terrain.intrinsic != 0
+        # Necessary optical-component support only, not visibility or M proof:
+        # every transmitting beam prefix is cardinal-connected through B != 2.
+        # Its first-hit side/ordinary blocker is cardinal-adjacent to that set.
+        # UNKNOWN transmits; disconnected free plateaus/chambers can be rejected
+        # before expensive negative all-R searches. Exact queries still follow.
+        candidate &= optical_candidate_mask(terrain.intrinsic, reachable)
         visible = np.empty(terrain.shape, np.uint8)
         native.visible_union(
             terrain.intrinsic,
@@ -56,6 +62,7 @@ class CoverageReference:
         )
         packed = np.packbits(visible.ravel(), bitorder="little")
         digest = hashlib.sha256()
+        digest.update(OBSERVATION_MODEL_VERSION.encode())
         digest.update(terrain.terrain_id.encode())
         digest.update(task.polygon.tobytes())
         digest.update(

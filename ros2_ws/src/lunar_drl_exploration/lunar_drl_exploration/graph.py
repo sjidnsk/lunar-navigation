@@ -17,7 +17,7 @@ from .config import GraphConfig, load_platform_config
 from .contracts import DecisionObservation, PrivilegedScene
 from .geometry import world_to_cell
 from .history import HEADINGS
-from .sensor import target_visibility
+from .sensor import directional_visibility
 from .task_analysis import measured_workspace
 
 
@@ -368,18 +368,14 @@ class GraphBuilder:
                 if not candidates:
                     continue
                 targets = fronts[candidates]
-                targets = targets[
-                    target_visibility(w.intrinsic, source, targets, radius)
-                ]
-                delta = targets - source
-                angles = np.arctan2(delta[:, 1], delta[:, 0])
-                errors = (
-                    angles[:, None]
-                    - (HEADINGS + sensor.offset_yaw_rad)[None, :]
-                    + np.pi
-                ) % (2 * np.pi) - np.pi
-                visible = np.abs(errors) <= math.radians(sensor.fov_deg) / 2 + 1e-12
-                visible[np.all(delta == 0, axis=1)] = True
+                visible = directional_visibility(
+                    w.intrinsic,
+                    source,
+                    targets,
+                    radius,
+                    HEADINGS + sensor.offset_yaw_rad,
+                    math.radians(sensor.fov_deg),
+                )
                 feature[i, 3:11] = visible.sum(axis=0) / 100.0
         action_positions = [current] + sorted(boundary)
         action_nodes = np.repeat(action_positions, 8)

@@ -14,6 +14,7 @@ import numpy as np
 import lunar_drl_terrain_native as native
 from .contracts import Pose, TaskSpec
 from .geometry import cell_center, world_to_cell
+from .sensor import OBSERVATION_MODEL_VERSION
 
 
 def _segment_distance(x, y, ax, ay, bx, by):
@@ -23,7 +24,7 @@ def _segment_distance(x, y, ax, ay, bx, by):
 
 
 class Scene:
-    GENERATOR_VERSION = 4
+    GENERATOR_VERSION = 5
 
     def __init__(self, seed, family, extent_m, resolution_m=0.2, platform=None):
         if family not in ("moon", "cave"):
@@ -43,14 +44,6 @@ class Scene:
         self.platform = platform
         e = self.extent_m
         margin = 12.0
-        self.origin = (-e / 2 - margin, -e / 2 - margin)
-        n = math.ceil((e + 2 * margin) / resolution_m)
-        self.shape = (n, n)
-        self.bounds = (
-            *self.origin,
-            self.origin[0] + n * resolution_m,
-            self.origin[1] + n * resolution_m,
-        )
         identity = dict(
             version=self.GENERATOR_VERSION,
             seed=self.seed,
@@ -58,6 +51,7 @@ class Scene:
             extent_m=e,
             resolution_m=resolution_m,
             capability=dict(platform.capability),
+            observation_model_version=OBSERVATION_MODEL_VERSION,
         )
         self.scene_id = hashlib.sha256(
             json.dumps(identity, sort_keys=True).encode()
@@ -120,6 +114,32 @@ class Scene:
                 )
             self.sealed_room = (0.32 * e, 0.22 * e, max(2.0, 0.035 * e))
             self._rooms.append(self.sealed_room)
+
+        # Bounds include the complete analytic support plus ordinary context.
+        # Expand by whole old-lattice cells so existing world samples and RNG
+        # geometry/task/yaw/start streams do not shift with storage geometry.
+        boxes = [(-e / 2, -e / 2, e / 2, e / 2)]
+        for cx, cy, r, *_ in self._rooms + self._rocks:
+            boxes.append((cx - r, cy - r, cx + r, cy + r))
+        for cx, cy, r, *_ in self._craters:
+            boxes.append((cx - 2 * r, cy - 2 * r, cx + 2 * r, cy + 2 * r))
+        for ax, ay, bx, by, r in self._passages:
+            boxes.append(
+                (min(ax, bx) - r, min(ay, by) - r, max(ax, bx) + r, max(ay, by) + r)
+            )
+        boxes = np.asarray(boxes)
+        old_origin = np.array([-e / 2 - margin, -e / 2 - margin])
+        low = boxes[:, :2].min(axis=0) - margin
+        high = boxes[:, 2:].max(axis=0) + margin
+        origin = old_origin + np.floor((low - old_origin) / resolution_m) * resolution_m
+        nx, ny = np.ceil((high - origin) / resolution_m).astype(int)
+        self.origin = tuple(map(float, origin))
+        self.shape = (int(ny), int(nx))
+        self.bounds = (
+            *self.origin,
+            float(origin[0] + nx * resolution_m),
+            float(origin[1] + ny * resolution_m),
+        )
 
     def height_tile(self, x0, y0, width, height):
         if (
@@ -322,15 +342,21 @@ class TerrainGrid:
             scene.platform,
             terrain_id=scene.scene_id,
         )
-        terrain.generator_descriptor = MappingProxyType({
-            "generator_version": scene.GENERATOR_VERSION,
-            "seed": scene.seed,
-            "family": scene.family,
-            "extent_m": scene.extent_m,
-            "resolution_m": scene.resolution_m,
-            "capability_json": json.dumps(dict(scene.platform.capability), sort_keys=True),
-            "scene_id": scene.scene_id,
-        })
+        terrain.generator_descriptor = MappingProxyType(
+            {
+                "generator_version": scene.GENERATOR_VERSION,
+                "observation_model_version": OBSERVATION_MODEL_VERSION,
+                "provided_bounds": scene.bounds,
+                "seed": scene.seed,
+                "family": scene.family,
+                "extent_m": scene.extent_m,
+                "resolution_m": scene.resolution_m,
+                "capability_json": json.dumps(
+                    dict(scene.platform.capability), sort_keys=True
+                ),
+                "scene_id": scene.scene_id,
+            }
+        )
         return terrain
 
     def world_to_cell(self, x, y):

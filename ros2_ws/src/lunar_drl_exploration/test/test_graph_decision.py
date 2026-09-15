@@ -301,7 +301,11 @@ def test_scene_generator_descriptor_survives_terrain_to_privileged_handoff():
     reference = CoverageReference.build(terrain, start, scene.task, SensorSpec())
     privileged = GraphBuilder().build_truth(terrain, reference)
     descriptor = privileged.generator_descriptor
-    assert descriptor["seed"] == 92 and descriptor["generator_version"] == 4
+    assert descriptor["seed"] == 92 and descriptor["generator_version"] == 5
+    from lunar_drl_exploration.sensor import OBSERVATION_MODEL_VERSION
+
+    assert descriptor["observation_model_version"] == OBSERVATION_MODEL_VERSION
+    assert descriptor["provided_bounds"] == scene.bounds
     assert descriptor["family"] == "moon" and descriptor["extent_m"] == 20
     assert json.loads(descriptor["capability_json"])["maximum_forward_speed_mps"] == 0.2
 

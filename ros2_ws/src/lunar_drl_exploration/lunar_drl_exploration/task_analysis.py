@@ -15,7 +15,8 @@ from .maps import FREE, BLOCKED, UNKNOWN
 from .sensor import (
     direct_witnesses,
     first_pending_cells,
-    target_visibility,
+    optical_candidate_mask,
+    source_visibility,
     validate_sensor,
 )
 
@@ -157,11 +158,48 @@ class TaskAnalyzer:
         d = math.ceil(radius)
         # Most demands seed their movement component. Extra potential stances
         # need a cross-component ray; direct R visibility is a separate relation.
-        other = potential & ~relevant[components]
+        # A potential movement component can expose an R entry only when it
+        # actually touches R. Disconnected non-entry components cannot change
+        # frontier witnesses or exhaustion; direct R observation is independent.
+        entry = potential & binary_dilation(w.reachable, structure=CROSS)
+        has_entry = np.zeros(count + 1, bool)
+        has_entry[np.unique(components[entry])] = True
+        has_entry[0] = False
+        other = potential & has_entry[components] & ~relevant[components]
         near_other = maximum_filter(other, size=2 * d + 1, mode="constant", cval=0)
         near_r = maximum_filter(w.reachable, size=2 * d + 1, mode="constant", cval=0)
+        # Once-per-analysis necessary optical support rejects closed-barrier
+        # negative queries; UNKNOWN still transmits. Exact forward witnesses
+        # remain mandatory for every surviving demand.
+        near_r &= optical_candidate_mask(w.intrinsic, w.reachable)
         targets = _xy(pending & near_r)
-        sources = direct_witnesses(w.intrinsic, w.reachable, targets, radius)
+        reachable_bytes = np.asarray(w.reachable, dtype=np.uint8)
+        # Any beam reaching a pending demand first emits an UNKNOWN interface
+        # beside a known transmitting cell, or starts at an UNKNOWN R source.
+        # Include interfaces OUTSIDE the task. A visible demand and that first
+        # interface are each within radius of the same source, hence <=2*radius
+        # apart. This square-dilation support is necessary only; ordinary exact
+        # demand queries below still determine all positives and their witnesses.
+        interfaces = (
+            ~w.known
+            & binary_dilation(w.known & (w.intrinsic != BLOCKED), structure=CROSS)
+        ) | (w.reachable & ~w.known)
+        interface_cells = _xy(interfaces & near_r)
+        if len(interface_cells) < len(targets):
+            interface_sources = direct_witnesses(
+                w.intrinsic, reachable_bytes, interface_cells, radius
+            )
+            visible_interfaces = interface_cells[interface_sources[:, 0] >= 0]
+            if not len(visible_interfaces):
+                targets = empty
+            else:
+                interfaces.fill(False)
+                interfaces[visible_interfaces[:, 1], visible_interfaces[:, 0]] = True
+                support = maximum_filter(
+                    interfaces, size=4 * d + 1, mode="constant", cval=0
+                )
+                targets = _xy(pending & near_r & support)
+        sources = direct_witnesses(w.intrinsic, reachable_bytes, targets, radius)
         direct = {
             tuple(map(int, target)): tuple(map(int, source))
             for target, source in zip(targets, sources)
@@ -172,13 +210,18 @@ class TaskAnalyzer:
         for tx, ty in _xy(special):
             x0, x1 = max(0, tx - d), min(width, tx + d + 1)
             y0, y1 = max(0, ty - d), min(h, ty + d + 1)
-            wanted = potential[y0:y1, x0:x1] & ~relevant[components[y0:y1, x0:x1]]
+            local_components = components[y0:y1, x0:x1]
+            wanted = (
+                potential[y0:y1, x0:x1]
+                & has_entry[local_components]
+                & ~relevant[local_components]
+            )
             stances = _xy(wanted) + [x0, y0]
             if not len(stances):
                 continue
-            # Center rays are reciprocal when both endpoints are exempt from
-            # intermediate blocking; measured B alone determines occlusion.
-            seen = stances[target_visibility(w.intrinsic, (tx, ty), stances, radius)]
+            # Evaluate FORWARD from every potential stance. Prefix-cell hits
+            # are directed, even though the underlying lattice is symmetric.
+            seen = stances[source_visibility(w.intrinsic, stances, (tx, ty), radius)]
             if not len(seen):
                 continue
             relevant[components[seen[:, 1], seen[:, 0]]] = True
@@ -191,7 +234,9 @@ class TaskAnalyzer:
         witnesses = {}
         known_bytes = np.asarray(w.known, dtype=np.uint8)
         for target, source in direct.items():
-            first = first_pending_cells(w.intrinsic, known_bytes, source, [target])[0]
+            first = first_pending_cells(
+                w.intrinsic, known_bytes, source, [target], radius
+            )[0]
             if first >= 0:
                 witnesses[(int(first % width), int(first // width))] = source
         for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)) if radius + 1e-10 >= 1 else ():
@@ -215,9 +260,7 @@ class TaskAnalyzer:
             fronts, sources = empty, empty
         # Opportunity may be real even if there is insufficient measured support
         # to expose its next interface. This is unavailable, never false exhausted.
-        opportunity = bool(
-            np.any(relevant[components] & binary_dilation(w.reachable, structure=CROSS))
-        ) or bool(direct)
+        opportunity = bool(np.any(relevant[components] & entry)) or bool(direct)
         available = bool(len(fronts)) or not opportunity
         return TaskReport(
             area,
