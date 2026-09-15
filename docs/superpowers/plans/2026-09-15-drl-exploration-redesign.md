@@ -131,13 +131,14 @@ assert not before.tiles[(0, 0)].states.flags.writeable
 ```python
 union = np.zeros(terrain.shape, bool)
 for pose in all_reachable_grid_poses:
-    union |= sensor_model.observe(terrain, pose, full_circle).mask
+    hit = sensor_model.observe(terrain, pose, full_circle).mask
+    union |= hit & (terrain.intrinsic != UNKNOWN)  # effectively classified centers
 assert np.array_equal(reference.mask(), union & task_mask)
 ```
 - [ ] Implement native terrain/visibility loops releasing GIL and bounded buffers. Target native API has Evaluate, not old EvaluateStates. Native module name `lunar_drl_terrain_native` avoids accidental old extension loading. No Python second slope/footprint classifier.
 - [ ] Use the shared floor-to-cell center observation origin in sensor and reference; yaw remains actual and footprint/nativeM swept motion uses the same reachable-cell relation. Test fractional/negative coordinates and exact grid corners, comparing reference membership with every simulated observation. Reject nonzero virtual-sensor translation until its reference mapping is supported; mounting yaw does not change this rule.
 - [ ] Reference first computes native truth reachability including outside task; union visibility never shrinks with policy failures. Use native early-out checks, packed masks, chunked work and release temporary heights. Supply enumeration oracle on small maps to verify any optimized union algorithm rather than asserting equivalent by construction.
-- [ ] Adapt deterministic old scene geometry and plant-independent start terrain as needed, maintaining moon/cave, narrow passages/loops/disconnected chambers/external connections. Starts from legitimate main terrain, no map override. No asset download required. Retain source attribution for copied helpers.
+- [ ] Adapt deterministic old scene geometry and plant-independent start terrain as needed, maintaining moon/cave, narrow passages/loops/disconnected chambers/external connections. Seeded task polygon and main-component native-free start sampling; preserve the independently sampled yaw without visibility filtering. Starts from legitimate main terrain, no map override. No asset download required. Retain source attribution for copied helpers.
 - [ ] Test 40/80/150/300m initialization timing/peak memory and one 1km initialization in isolation if available budget permits; report measured scalability, no ten-minute precondition or reference baseline admission. Commit `feat: unify effective observations and fixed exploration reference` with tests and native build evidence.
 
 ### Task 4: 任务机会、稀疏图和联合位姿动作
