@@ -168,6 +168,46 @@ def test_store_consumes_generated_get_policy_map_wire_geometry_and_anchor():
     assert snapshot.origin == pytest.approx((1.0, 2.0, 3.0))
     assert snapshot.pose == Pose(4.0, 5.0, pytest.approx(.5))
     assert snapshot.start_connections.tolist() == [[7, 9]]
+    assert snapshot.start_connection_status == "READY"
+
+
+def test_real_wire_accepts_same_revision_refresh_and_journal_based_delta():
+    from lunar_planning_msgs.srv import GetPolicyMap
+    store = PolicyMapStore()
+    first = _response(revision=4, state=FREE, intrinsic=FREE, observed=FREE)
+    store.apply(first)
+    refresh = GetPolicyMap.Response()
+    refresh.ready, refresh.epoch, refresh.fine_revision = True, "epoch-a", 4
+    refresh.full_snapshot, refresh.base_revision = False, 4
+    refresh.frame_id, refresh.resolution_m = "map", .1
+    refresh.origin.x = refresh.origin.y = refresh.origin.z = 0.
+    refresh.anchor_pose.orientation.w = 1.
+    refreshed = store.apply(refresh)
+    assert refreshed.revision == 4
+    delta = _response(revision=6, full_snapshot=False, state=BLOCKED,
+                      intrinsic=FREE, observed=FREE)
+    delta.base_revision = 4
+    advanced = store.apply(delta)
+    assert advanced.revision == 6
+    assert advanced.cell_at(0, 0).state == FREE
+
+
+def test_raster_handles_negative_partial_tiles_and_keeps_prior_snapshot_immutable():
+    store = PolicyMapStore()
+    first = _response(state=FREE, intrinsic=FREE, observed=FREE)
+    first.tiles[0].tile_x, first.tiles[0].tile_y = -1, -1
+    before = store.apply(first)
+    second = _response(revision=2, full_snapshot=False, state=BLOCKED,
+                       intrinsic=FREE, observed=FREE)
+    second.base_revision = 1
+    second.tiles[0].tile_x, second.tiles[0].tile_y = -1, -1
+    after = store.apply(second)
+    raster = after.raster((-2, -2, 2, 2))
+    assert raster.states.shape == (4, 4)
+    assert raster.states[0, 0] == FREE
+    assert raster.states[-1, -1] == UNKNOWN
+    assert before.cell_at(-1, -1).state == FREE
+    assert not before.tiles[(-1, -1)].observed.flags.writeable
 
 
 def test_platform_config_reads_canonical_wheel_limits_and_actor_context_scaling():

@@ -173,6 +173,26 @@ TEST(ElevationPipelineTest, DuplicateRefreshesPublishedFineStampWithoutChangingM
   EXPECT_EQ(pipeline.CapturePolicyMapSnapshot().processed_map_stamp_ns, 202);
 }
 
+TEST(ElevationPipelineTest, JournalDeltaCoversCoalescedAcceptedRawTiles) {
+  ElevationPipeline pipeline(Capability(), Profile(), 1.0);
+  ASSERT_EQ(pipeline.ApplyLocal(Evidence(0.0F, 0.0), 10).status,
+            lunar::incremental_navigation::ElevationUpdateResult::Status::kApplied);
+  ASSERT_TRUE(pipeline.RunFineDerivation());
+  const auto base = pipeline.CapturePolicyMapSnapshot();
+  ASSERT_TRUE(base.bundle.fine);
+  const auto revision = base.bundle.fine->fine_traversability_revision();
+  ASSERT_EQ(pipeline.ApplyLocal(Evidence(0.1F, 0.0), 20).status,
+            lunar::incremental_navigation::ElevationUpdateResult::Status::kApplied);
+  ASSERT_EQ(pipeline.ApplyLocal(Evidence(0.2F, 60.0), 30).status,
+            lunar::incremental_navigation::ElevationUpdateResult::Status::kApplied);
+  ASSERT_TRUE(pipeline.RunFineDerivation());
+  const auto delta = pipeline.CapturePolicyMapSnapshot(revision);
+  EXPECT_FALSE(delta.full_snapshot);
+  EXPECT_EQ(delta.base_revision, revision);
+  EXPECT_GE(delta.dirty_tiles.size(), 2U);
+  EXPECT_EQ(delta.processed_map_stamp_ns, 30);
+}
+
 TEST(ElevationPipelineTest,
      MultipleRawRevisionsUseMergedDirtyHaloAndShareUnaffectedFineTile) {
   ElevationPipeline pipeline(Capability(), Profile(), 1.0);

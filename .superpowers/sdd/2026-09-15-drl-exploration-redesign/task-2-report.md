@@ -94,3 +94,7 @@ Round 1 GREEN：source Jazzy overlay 下 `python3 -m pytest ...test_contracts_ma
 Round 2 GREEN：Jazzy messages+ROS affected build 成功；`ctest -R
 'policy_map_exporter_test|elevation_pipeline_test'` 2/2 通过；source overlay Python contracts 7/7；
 `git diff --check` 通过。
+
+补充回归：`test_real_wire_accepts_same_revision_refresh_and_journal_based_delta`、
+`test_raster_handles_negative_partial_tiles_and_keeps_prior_snapshot_immutable` 已随 source overlay
+运行；`JournalDeltaCoversCoalescedAcceptedRawTiles` 已在 `elevation_pipeline_test` 运行。
