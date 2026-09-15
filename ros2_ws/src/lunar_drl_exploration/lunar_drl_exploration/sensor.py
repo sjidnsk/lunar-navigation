@@ -91,3 +91,37 @@ class SensorModel:
             terrain.heights[rows, cols],
             terrain.stats[rows, cols],
         )
+
+
+def target_visibility(intrinsic, source_xy, targets_xy, range_cells):
+    """Full-heading geometric relation, using the same native rays as observe.
+
+    Coordinates are integer raster cells. Callers apply physical heading/FOV to
+    this single relation, avoiding eight duplicate raycasts.
+    """
+    targets = np.ascontiguousarray(targets_xy, dtype=np.int64).reshape(-1, 2)
+    result = np.empty((len(targets), 1), np.uint8)
+    native.visible_targets(
+        np.ascontiguousarray(intrinsic, dtype=np.uint8),
+        int(source_xy[0]),
+        int(source_xy[1]),
+        float(range_cells),
+        targets,
+        result,
+    )
+    return result[:, 0].astype(bool)
+
+
+def first_pending_cells(intrinsic, known, source_xy, targets_xy):
+    """First pending interface on shared native rays; -1 for no visible pending hit."""
+    targets = np.ascontiguousarray(targets_xy, dtype=np.int64).reshape(-1, 2)
+    out = np.empty((len(targets), 1), np.int64)
+    native.first_pending(
+        np.ascontiguousarray(intrinsic, dtype=np.uint8),
+        np.ascontiguousarray(known, dtype=np.uint8),
+        int(source_xy[0]),
+        int(source_xy[1]),
+        targets,
+        out,
+    )
+    return out[:, 0]

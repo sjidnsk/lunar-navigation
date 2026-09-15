@@ -9,6 +9,7 @@ no old native binding, classifier, launch-surface override or learner is reused.
 import hashlib
 import json
 import math
+from types import MappingProxyType
 import numpy as np
 import lunar_drl_terrain_native as native
 from .contracts import Pose, TaskSpec
@@ -314,13 +315,23 @@ class TerrainGrid:
                 h = min(256, scene.shape[0] - y)
                 w = min(256, scene.shape[1] - x)
                 heights[y : y + h, x : x + w] = scene.height_tile(x, y, w, h)
-        return cls(
+        terrain = cls(
             heights,
             scene.resolution_m,
             scene.origin,
             scene.platform,
             terrain_id=scene.scene_id,
         )
+        terrain.generator_descriptor = MappingProxyType({
+            "generator_version": scene.GENERATOR_VERSION,
+            "seed": scene.seed,
+            "family": scene.family,
+            "extent_m": scene.extent_m,
+            "resolution_m": scene.resolution_m,
+            "capability_json": json.dumps(dict(scene.platform.capability), sort_keys=True),
+            "scene_id": scene.scene_id,
+        })
+        return terrain
 
     def world_to_cell(self, x, y):
         return world_to_cell(x, y, self.origin, self.resolution_m)

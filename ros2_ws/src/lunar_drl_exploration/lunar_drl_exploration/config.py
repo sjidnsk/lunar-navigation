@@ -12,6 +12,21 @@ from .contracts import Pose
 
 
 @dataclass(frozen=True)
+class GraphConfig:
+    """Graph geometry constants are independent of sensor range."""
+    position_unit_m: float = 10.0
+    frontier_unit_cells: float = 100.0
+    history_tolerance_m: float = 0.1
+    platform: "PlatformConfig | None" = None
+
+    def __post_init__(self):
+        if self.position_unit_m != 10.0 or self.frontier_unit_cells != 100.0:
+            raise ValueError("task_graph_v1 fixes position and frontier normalization")
+        if not np.isfinite(self.history_tolerance_m) or self.history_tolerance_m <= 0:
+            raise ValueError("positive history tolerance required")
+
+
+@dataclass(frozen=True)
 class PlatformConfig:
     maximum_forward_speed_mps: float
     maximum_reverse_speed_mps: float

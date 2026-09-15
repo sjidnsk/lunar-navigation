@@ -119,3 +119,89 @@ in version 3. Version 4 passed the package's 52 behavioral tests, including repe
 seeded main-region starts, independent native connectivity checks, and exclusion of
 boundary/interior-insufficient-support B UNKNOWN from coverage.
 Humble, Orin, DDS, rosbag, closed-loop controller and vehicle evidence: `NOT_RUN`.
+
+## Observed task graph and joint pose actions (Task 4)
+
+`TaskAnalyzer(task, sensor).update(snapshot)` returns a frozen `TaskReport`.
+Known area counts effective classified centers, including BLOCKED centers once;
+M never supplies the observed predicate or an optical blocker. Potential motion
+uses M != BLOCKED after removing native reachable R. Unknown task demands seed
+potential components; shared native B rays add cross-component observation
+witnesses, including nonstandable demands. The raster includes all measured
+evidence plus task/range margin, and its outer boundary joins a single external
+UNKNOWN component. An interface cannot recruit an unrelated branch by searching
+through R. `frontier_cells[N,2]` and aligned `witnesses[N,2]` use **snapshot global
+integer x,y cell indices**. Frontiers identify first pending center measurements,
+including legitimate task-external transit interfaces. Missing classified support
+at a native FREE task center remains pending. Each retained interface has a native
+R observation witness; it is not an executable UNKNOWN stance.
+
+`DecisionCore(task, sensor, config=None).observe(snapshot, velocity=(v,w))`
+returns `(DecisionObservation, TaskReport)`. No ROS, torch, Scene or reference
+module is imported by this observed path. A missing native start connection is
+`available=False, reason_code='INPUT_UNAVAILABLE', exhausted=False`; callers must
+gate execution on report availability. The observation still contains the actual
+anchor and its eight yaw choices. Task 7 owns live cold-start support integration.
+
+`GraphBuilder(GraphConfig()).build(snapshot, report, history, task, sensor, velocity)`
+uses native FREE row-run rectangles, physical portals and inserted observation
+witnesses. Sparse rectangle-local Euclidean trees remove empty-interior sampling
+cycles while retaining narrow corridors, physical obstacle loops and all witnesses.
+Edges are undirected `[E,2]` index pairs; edge lengths include compressed known
+routes. There is no graph node crop. Actual start connections attach an exact
+continuous anchor. Already-satisfied short portals are traversed before exposing
+moving actions. Overfull local arrival regions use deterministic world-aligned
+physical relay endpoints; no co-located dummy nodes or discarded unique branches
+are used. Each action is an adjacent endpoint with one of eight world vehicle yaws
+`k*pi/4`, including the actual anchor; at most 20 positions / 160 joint actions.
+Executable frozen `goals` are **float64**, even though network positions/features
+and action yaw metadata remain float32.
+
+The 19 node features are `(world XY - actual XY)/10`, task membership, eight
+visible-frontier center counts divided by the fixed **100 cells**, and eight actual
+observation-direction bits. A single sparse geometric visibility relation supplies
+all eight FOV counts; empty interiors do not cast full disks. The utility uses actual
+SensorModel origin/range/FOV/mounting-yaw rules, not optimistic unknown area.
+Polygon corners are relative XY/10; the existing eight-scalar platform/sensor
+context is unchanged. Zero-utility transit remains selectable.
+
+Call `core.record_observation(actual_pose, observed_cells)` after real sensor
+measurements, or `DirectionHistory.record(pose, observed_cells, sensor)` directly.
+The stored direction is the actual optical world heading, rounded to the nearest
+of eight sectors. History matches executed world positions within the exported
+native position tolerance (GraphConfig's 0.1 m fallback when unavailable), survives
+node resampling and clears on an epoch change. Issuing a goal does not mark a visit.
+
+`GraphBuilder.build_truth(terrain, reference)` is the explicit training-only entry
+point. It produces immutable `PrivilegedScene`: `scene_id`, static `positions`,
+`edges`, `edge_lengths`, `packed_reference`, `reference_shape`, and the CSR arrays
+`reference_offsets[N+1]` / `reference_indices`. Reference cells are assigned to the
+nearest static node; each CSR slice contains row-major linear indices usable for
+packed observed-fraction pooling. Packed masks retain little bit order. The scene
+owns these arrays and recursively frozen generator metadata. `TerrainGrid.from_scene`
+retains version, seed, family, extent, resolution, scene ID and canonical capability
+JSON for regeneration. Arbitrary `from_heights` terrain instead supplies its terrain
+identity/shape/origin/resolution descriptor; it does not claim to recover missing
+source heights. No truth data enters `DecisionObservation`.
+
+Task 4 local x86_64 Jazzy-core graph growth, 2026-09-15, synthetic measured open
+M/B/K FREE squares at 0.2 m with a 2 m pending task band outside each square and
+10 m / 90 degree sensor. Native 256-cell tiles own independent arrays. Timings
+include task analysis, sparse graph, features and frozen actions, excluding fixture
+construction; numeric threads=1, separate sequential processes. All four boundary
+interfaces are retained, and the graph remains non-exhausted.
+
+| Known square | Nodes / edges | Frontier centers | Graph build | Frozen graph | Process peak RSS |
+| --- | --- | --- | --- | --- | --- |
+| 100 m | 1,999 / 1,998 | 2,000 | 0.118 s | 0.214 MiB | 64.0 MiB |
+| 300 m | 5,999 / 5,998 | 6,000 | 0.486 s | 0.641 MiB | 133.7 MiB |
+| 1000 m | 19,999 / 19,998 | 20,000 | 3.705 s | 2.137 MiB | 878.7 MiB |
+
+The 1 km input tiles alone occupy 275 MiB; analysis still has raster-sized scratch.
+These measurements demonstrate perimeter graph growth and retained witnesses,
+not 2 Hz / 30x throughput at 1 km, terrain-generation performance, training, live
+navigation, Humble, Orin, DDS or vehicle readiness. Those runtime layers remain
+`NOT_RUN` for Task 4. Regressions also explore all 60 branches of an adversarial
+large arrival-region fixture after off-center actual arrivals and revision rebuilds;
+all graph degrees remain <=19. The separate normal 0.30 m arrival test proves
+that unchanged actual poses do not repeatedly expose already-satisfied portals.

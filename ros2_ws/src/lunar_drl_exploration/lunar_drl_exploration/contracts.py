@@ -22,6 +22,17 @@ def freeze_mapping(value: Mapping) -> Mapping:
     return MappingProxyType(dict(value))
 
 
+def _freeze_descriptor(value):
+    """Own serializable generator metadata, including nested lists/mappings."""
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze_descriptor(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_descriptor(item) for item in value)
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    raise TypeError("generator descriptor must contain serializable primitive metadata")
+
+
 @dataclass(frozen=True)
 class Pose:
     x: float
@@ -108,7 +119,7 @@ class DecisionObservation:
                             ("features", np.float32), ("edges", np.int64),
                             ("edge_lengths", np.float32), ("polygon", np.float32),
                             ("context", np.float32), ("action_nodes", np.int64),
-                            ("action_yaws", np.float32), ("goals", np.float32)):
+                            ("action_yaws", np.float32), ("goals", np.float64)):
             object.__setattr__(self, name, freeze_array(getattr(self, name), dtype=dtype))
         if self.features.ndim != 2 or self.features.shape[1] != 19:
             raise ValueError("features must contain 19 scalars per graph node")
@@ -135,6 +146,31 @@ class PrivilegedState:
 
     def __post_init__(self):
         object.__setattr__(self, "observed", freeze_array(self.observed, dtype=np.uint8))
+
+
+@dataclass(frozen=True)
+class PrivilegedScene:
+    """Owned static critic graph; packed cells use row-major little bit order.
+
+    The CSR mapping assigns each reference cell to its nearest static graph
+    node. It supports observed-fraction pooling without retaining terrain.
+    """
+    scene_id: str
+    positions: np.ndarray
+    edges: np.ndarray
+    edge_lengths: np.ndarray
+    reference_offsets: np.ndarray
+    reference_indices: np.ndarray
+    packed_reference: np.ndarray
+    reference_shape: tuple
+    generator_descriptor: Mapping
+
+    def __post_init__(self):
+        for name, dtype in (("positions", np.float32), ("edges", np.int64),
+                            ("edge_lengths", np.float32), ("reference_offsets", np.int64),
+                            ("reference_indices", np.int64), ("packed_reference", np.uint8)):
+            object.__setattr__(self, name, freeze_array(getattr(self, name), dtype=dtype))
+        object.__setattr__(self, "generator_descriptor", _freeze_descriptor(self.generator_descriptor))
 
 
 @dataclass(frozen=True)

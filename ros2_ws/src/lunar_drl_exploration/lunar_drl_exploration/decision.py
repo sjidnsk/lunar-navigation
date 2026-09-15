@@ -1,0 +1,39 @@
+"""Deployment-safe task graph decision inputs; no ROS, torch or truth imports."""
+
+import math
+from .config import GraphConfig
+from .graph import GraphBuilder
+from .history import DirectionHistory
+from .task_analysis import TaskAnalyzer
+
+
+class DecisionCore:
+    def __init__(self, task, sensor, config=None):
+        self.config = config or GraphConfig()
+        self.task, self.sensor = task, sensor
+        self.analyzer = TaskAnalyzer(task, sensor)
+        self.builder = GraphBuilder(self.config)
+        self.history = DirectionHistory(self.config.history_tolerance_m)
+        self._epoch = None
+
+    def observe(self, snapshot, velocity=(0.0, 0.0)):
+        if self._epoch is not None and self._epoch != snapshot.epoch:
+            self.history.clear()
+        self._epoch = snapshot.epoch
+        if (
+            math.isfinite(snapshot.goal_position_tolerance_m)
+            and snapshot.goal_position_tolerance_m > 0
+        ):
+            self.history.tolerance_m = snapshot.goal_position_tolerance_m
+        report = self.analyzer.update(snapshot)
+        self.builder.workspace = self.analyzer.workspace
+        return (
+            self.builder.build(
+                snapshot, report, self.history, self.task, self.sensor, velocity
+            ),
+            report,
+        )
+
+    def record_observation(self, pose, observed_cells):
+        """Call after a real sensor update at its executed physical pose."""
+        self.history.record(pose, observed_cells, self.sensor)
