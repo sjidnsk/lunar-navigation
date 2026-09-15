@@ -1,6 +1,7 @@
 """Read-only cache for GetPolicyMap full snapshots and tile deltas."""
 
 from dataclasses import dataclass
+from math import atan2
 from typing import Any
 
 import numpy as np
@@ -16,6 +17,28 @@ _TILE_CELLS = _TILE_WIDTH * _TILE_WIDTH
 
 def _field(value: Any, name: str, default=None):
     return value.get(name, default) if isinstance(value, dict) else getattr(value, name, default)
+
+
+def _wire_origin(value: Any) -> tuple:
+    if isinstance(value, (tuple, list, np.ndarray)):
+        return tuple(value)
+    if value is None:
+        raise ValueError("policy map response is missing origin")
+    return (float(value.x), float(value.y), float(value.z))
+
+
+def _wire_pose(response: Any) -> Pose:
+    pose = _field(response, "pose")
+    if isinstance(pose, Pose): return pose
+    if pose is not None:
+        return Pose(float(_field(pose, "x")), float(_field(pose, "y")), float(_field(pose, "yaw")))
+    anchor = _field(response, "anchor_pose")
+    if anchor is None:
+        raise ValueError("policy map response is missing anchor pose")
+    orientation = anchor.orientation
+    return Pose(float(anchor.position.x), float(anchor.position.y),
+                float(atan2(2.0 * (orientation.w * orientation.z + orientation.x * orientation.y),
+                            1.0 - 2.0 * (orientation.y ** 2 + orientation.z ** 2))))
 
 
 @dataclass(frozen=True)
@@ -90,15 +113,18 @@ class PolicyMapStore:
                 costs=_field(payload, "costs"),
                 elevation_m=_field(payload, "elevation_m"),
             )
-        pose = _field(response, "pose", Pose(0.0, 0.0, 0.0))
-        if not isinstance(pose, Pose):
-            pose = Pose(float(_field(pose, "x")), float(_field(pose, "y")),
-                        float(_field(pose, "yaw")))
+        pose = _wire_pose(response)
+        connections = _field(response, "start_connections")
+        if connections is None:
+            xs, ys = _field(response, "start_connection_x", ()), _field(response, "start_connection_y", ())
+            if len(xs) != len(ys):
+                raise ValueError("policy map start connection arrays differ in length")
+            connections = np.column_stack((xs, ys)) if xs else np.empty((0, 2), dtype=np.int64)
         self._snapshot = PolicyMapSnapshot(
             epoch=str(epoch), revision=revision,
             resolution_m=float(_field(response, "resolution_m")),
-            origin=tuple(_field(response, "origin")), tiles=tiles, pose=pose,
-            start_connections=_field(response, "start_connections", np.empty((0, 2))),
+            origin=_wire_origin(_field(response, "origin")), tiles=tiles, pose=pose,
+            start_connections=connections,
             local_bounds=tuple(_field(response, "local_bounds", (0, 0, 0, 0))),
             profile_hash=str(_field(response, "profile_hash", "")),
             start_connection_status=str(_field(response, "start_connection_status", "READY")),
@@ -128,12 +154,20 @@ class PolicyMapSnapshot(MapSnapshot):
         navigation = np.full(shape, UNKNOWN, dtype=np.uint8)
         costs = np.zeros(shape, dtype=np.float32)
         elevations = np.full(shape, np.nan, dtype=np.float32)
-        for row, iy in enumerate(range(min_y, max_y)):
-            for col, ix in enumerate(range(min_x, max_x)):
-                cell = self.cell_at(ix, iy)
-                states[row, col] = cell.state
-                intrinsic[row, col] = cell.intrinsic_state
-                navigation[row, col] = cell.navigation_state
-                costs[row, col] = cell.cost
-                elevations[row, col] = cell.elevation_m
+        first_tile_x, last_tile_x = min_x // _TILE_WIDTH, (max_x - 1) // _TILE_WIDTH
+        first_tile_y, last_tile_y = min_y // _TILE_WIDTH, (max_y - 1) // _TILE_WIDTH
+        for tile_y in range(first_tile_y, last_tile_y + 1):
+            for tile_x in range(first_tile_x, last_tile_x + 1):
+                tile = self.tiles.get((tile_x, tile_y))
+                if tile is None: continue
+                tile_min_x, tile_min_y = tile_x * _TILE_WIDTH, tile_y * _TILE_WIDTH
+                left, right = max(min_x, tile_min_x), min(max_x, tile_min_x + _TILE_WIDTH)
+                top, bottom = max(min_y, tile_min_y), min(max_y, tile_min_y + _TILE_WIDTH)
+                tile_slice = np.s_[top - tile_min_y:bottom - tile_min_y, left - tile_min_x:right - tile_min_x]
+                output_slice = np.s_[top - min_y:bottom - min_y, left - min_x:right - min_x]
+                states[output_slice] = tile.observed.reshape(_TILE_WIDTH, _TILE_WIDTH)[tile_slice]
+                intrinsic[output_slice] = tile.intrinsic_states.reshape(_TILE_WIDTH, _TILE_WIDTH)[tile_slice]
+                navigation[output_slice] = tile.states.reshape(_TILE_WIDTH, _TILE_WIDTH)[tile_slice]
+                costs[output_slice] = tile.costs.reshape(_TILE_WIDTH, _TILE_WIDTH)[tile_slice]
+                elevations[output_slice] = tile.elevation_m.reshape(_TILE_WIDTH, _TILE_WIDTH)[tile_slice]
         return PolicyMapRaster(bounds, states, intrinsic, navigation, costs, elevations)

@@ -62,3 +62,22 @@ Python 5/5 通过；`git diff --check` 通过。
   不进入 map/导航临界区。大面积 full snapshot 的延迟仍需在目标硬件测量。
 - 未改动既有 OccupancyGrid publisher 计数测试的已知基线问题，也未引入 TCP、Unreal、Isaac、
   新图生产者、全局认证或任何 `/Car/T5/Car_Cmd_Vel` publisher。
+
+## Round 1 修正
+
+- `PolicyMapStore` 现在直接消费生成的 ROS `GetPolicyMap.Response`：Point origin、Pose
+  quaternion 和 split start-connection arrays；不存在 pose/origin 不再静默替换为零值。
+- action node 索引按 graph node 数量验证，并要求每个 action 恰有一行 yaw/world goal。
+- `ElevationPipeline` 将每个 accepted raw revision 的输入地图 stamp 与 atomically published
+  fine snapshot 一起保存；服务不再把异步晚到的输入地图 stamp 绑定到旧 fine。
+- exporter 无完整历史时对 bootstrap 和任意 revision change 发送 true full snapshot；只有相同
+  revision 才是无 tile 的 pose refresh，供 yaw-only action 使用。
+- `load_platform_config()` 优先从 `lunar_incremental_navigation_ros` 已安装 share/config/wheel.yaml
+  读取，源码测试才回退仓库 canonical 文件；未复制能力阈值。
+
+Round 1 RED：生成 wire response 当前 client 抛 `TypeError: 'Point' object is not iterable`；
+200-node/one-goal action 当前错误拒绝；pipeline 新 stamp API 编译失败；direct Export bootstrap
+regression 失败（`full_snapshot=false`）。
+
+Round 1 GREEN：source Jazzy overlay 下 `python3 -m pytest ...test_contracts_maps.py -q` 为 `7 passed`；
+`ctest -R 'policy_map_exporter_test|elevation_pipeline_test'` 为 `2/2 passed`。

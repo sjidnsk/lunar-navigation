@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -38,6 +39,11 @@ struct ElevationPipelineDerivers final {
   Guidance guidance;
 };
 
+struct PolicyMapSnapshotCapture final {
+  lunar::incremental_navigation::SnapshotBundle bundle;
+  std::int64_t processed_map_stamp_ns{};
+};
+
 class ElevationPipeline final {
  public:
   ElevationPipeline(lunar::incremental_navigation::PlatformCapability capability,
@@ -46,13 +52,15 @@ class ElevationPipeline final {
                     ElevationPipelineDerivers derivers = {});
 
   [[nodiscard]] lunar::incremental_navigation::ElevationUpdateResult ApplyLocal(
-      const OwnedElevationEvidence& evidence);
+      const OwnedElevationEvidence& evidence, std::int64_t map_stamp_ns = 0);
   [[nodiscard]] lunar::incremental_navigation::ElevationUpdateResult ApplyLocal(
-      const AdapterResult<OwnedElevationEvidence>& adapted);
+      const AdapterResult<OwnedElevationEvidence>& adapted,
+      std::int64_t map_stamp_ns = 0);
   [[nodiscard]] bool RunFineDerivation();
   [[nodiscard]] bool RunGuidanceDerivation();
 
   [[nodiscard]] lunar::incremental_navigation::SnapshotBundle CaptureBundle() const;
+  [[nodiscard]] PolicyMapSnapshotCapture CapturePolicyMapSnapshot() const;
   [[nodiscard]] std::size_t PendingFineDirtyTileCount() const;
   [[nodiscard]] std::uint64_t GuidanceDerivationCount() const;
   [[nodiscard]] lunar::incremental_navigation::ElevationMapCounters LocalCounters()
@@ -73,7 +81,12 @@ class ElevationPipeline final {
   std::set<lunar::incremental_navigation::GridIndex> pending_fine_dirty_cells_;
   std::uint64_t consumed_fine_revision_{};
   std::uint64_t guidance_derivation_count_{};
-  std::shared_ptr<const lunar::incremental_navigation::SnapshotBundle> bundle_;
+  struct PipelineSnapshot final {
+    lunar::incremental_navigation::SnapshotBundle bundle;
+    std::int64_t processed_map_stamp_ns{};
+  };
+  std::map<std::uint64_t, std::int64_t> raw_map_stamps_;
+  std::shared_ptr<const PipelineSnapshot> bundle_;
 };
 
 }  // namespace lunar::incremental_navigation_ros

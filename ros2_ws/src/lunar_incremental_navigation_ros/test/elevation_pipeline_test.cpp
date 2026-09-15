@@ -149,6 +149,19 @@ TEST(ElevationPipelineTest, CallbacksOnlyWriteRawAndMergeDirtyWork) {
   EXPECT_EQ(pipeline.PendingFineDirtyTileCount(), 0U);
 }
 
+TEST(ElevationPipelineTest, FineSnapshotRetainsItsExactAcceptedMapStamp) {
+  ElevationPipeline pipeline(Capability(), Profile(), 1.0);
+  ASSERT_EQ(pipeline.ApplyLocal(Evidence(0.0F), 101).status,
+            lunar::incremental_navigation::ElevationUpdateResult::Status::kApplied);
+  ASSERT_TRUE(pipeline.RunFineDerivation());
+  ASSERT_EQ(pipeline.ApplyLocal(Evidence(0.1F), 202).status,
+            lunar::incremental_navigation::ElevationUpdateResult::Status::kApplied);
+
+  const auto captured = pipeline.CapturePolicyMapSnapshot();
+  ASSERT_TRUE(captured.bundle.fine);
+  EXPECT_EQ(captured.processed_map_stamp_ns, 101);
+}
+
 TEST(ElevationPipelineTest,
      MultipleRawRevisionsUseMergedDirtyHaloAndShareUnaffectedFineTile) {
   ElevationPipeline pipeline(Capability(), Profile(), 1.0);

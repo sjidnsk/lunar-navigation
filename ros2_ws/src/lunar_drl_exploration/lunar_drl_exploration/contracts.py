@@ -120,8 +120,12 @@ class DecisionObservation:
             raise ValueError("current_index is outside graph nodes")
         if self.goals.ndim != 2 or self.goals.shape[1] != 3:
             raise ValueError("goals must contain world x, y, yaw")
-        if np.any(self.action_nodes < 0) or np.any(self.action_nodes >= self.goals.shape[0]):
-            raise ValueError("action nodes must identify frozen world goals")
+        if (self.action_nodes.ndim != 1 or self.action_yaws.ndim != 1 or
+                self.goals.shape[0] != self.action_nodes.size or
+                self.action_yaws.size != self.action_nodes.size):
+            raise ValueError("each action requires one yaw and frozen world goal")
+        if np.any(self.action_nodes < 0) or np.any(self.action_nodes >= self.node_ids.size):
+            raise ValueError("action nodes must index graph nodes")
 
 
 @dataclass(frozen=True)

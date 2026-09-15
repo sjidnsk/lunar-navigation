@@ -558,14 +558,8 @@ struct IncrementalNavigationNode::Impl final {
             std::scoped_lock lock{event_mutex};
             state = latest_state;
           }
-          const auto bundle = CaptureBundle();
-          const InputSnapshot inputs = input_store.Capture();
-          std::int64_t map_stamp_ns{};
-          if (inputs.local_map) {
-            map_stamp_ns = static_cast<std::int64_t>(inputs.local_map->header.stamp.sec) *
-                               1000000000LL +
-                           static_cast<std::int64_t>(inputs.local_map->header.stamp.nanosec);
-          }
+          const auto policy_snapshot = pipeline.CapturePolicyMapSnapshot();
+          const auto& bundle = policy_snapshot.bundle;
           std::optional<core::Pose2> anchor;
           if (state && std::isfinite(state->base_link_pose.position_m.x) &&
               std::isfinite(state->base_link_pose.position_m.y) &&
@@ -576,7 +570,7 @@ struct IncrementalNavigationNode::Impl final {
               {.fine = bundle.fine, .anchor = anchor,
                .local_window_size_m = parameters.local_window_size_m,
                .epoch = policy_map_epoch,
-               .processed_stamp_ns = map_stamp_ns},
+               .processed_stamp_ns = policy_snapshot.processed_map_stamp_ns},
               request->since_revision, request->minimum_map_stamp_ns);
         });
 
@@ -808,8 +802,11 @@ struct IncrementalNavigationNode::Impl final {
       return;
     }
     const auto adapted = AdaptLocalElevation(input);
+    const std::int64_t map_stamp_ns =
+        static_cast<std::int64_t>(input.local_map->header.stamp.sec) * 1000000000LL +
+        static_cast<std::int64_t>(input.local_map->header.stamp.nanosec);
     const auto begin = std::chrono::steady_clock::now();
-    const core::ElevationUpdateResult update = pipeline.ApplyLocal(adapted);
+    const core::ElevationUpdateResult update = pipeline.ApplyLocal(adapted, map_stamp_ns);
     const double raw_ms = std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - begin)
                               .count();

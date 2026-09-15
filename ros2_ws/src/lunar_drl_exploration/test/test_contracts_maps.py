@@ -100,9 +100,7 @@ def test_decision_observation_freezes_action_indices_and_world_goals_at_construc
         current_index=0,
         polygon=np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=np.float32),
         context=np.zeros(8, dtype=np.float32),
-        action_nodes=np.array([1, 0], dtype=np.int64),
-        action_yaws=np.array([0.0, 1.57], dtype=np.float32),
-        goals=goals,
+        action_nodes=np.array([1, 0], dtype=np.int64), action_yaws=np.array([0.0, 1.57], dtype=np.float32), goals=goals,
         epoch="epoch-a",
         revision=2,
     )
@@ -116,6 +114,59 @@ def test_decision_observation_freezes_action_indices_and_world_goals_at_construc
         observation.action_nodes[0] = 0
     with pytest.raises(ValueError):
         observation.goals[1, 0] = 0.0
+
+
+def test_action_nodes_address_graph_nodes_not_goal_rows():
+    # Comparing action node indices to goal rows rejects a valid one-action
+    # decision on a 200-node graph and destroys action/world-goal identity.
+    common = dict(node_ids=np.arange(200), positions=np.zeros((200, 2)),
+                  features=np.zeros((200, 19)), edges=np.empty((0, 2)),
+                  edge_lengths=np.empty(0), current_index=0,
+                  polygon=np.zeros((3, 2)), context=np.zeros(8),
+                  action_yaws=np.array([0.0]), goals=np.array([[3., 4., .5]]),
+                  epoch="epoch", revision=1)
+    valid = DecisionObservation(action_nodes=np.array([199]), **common)
+    assert valid.action_nodes.tolist() == [199]
+    assert valid.goals.shape == (1, 3)
+    with pytest.raises(ValueError, match="graph nodes"):
+        DecisionObservation(action_nodes=np.array([200]), **common)
+
+
+def test_store_consumes_generated_get_policy_map_wire_geometry_and_anchor():
+    # The actual ROS wire has Point/Pose and split start-connection arrays;
+    # tuple placeholders hide broken client decoding.
+    from lunar_planning_msgs.msg import PolicyMapTile
+    from lunar_planning_msgs.srv import GetPolicyMap
+
+    response = GetPolicyMap.Response()
+    response.ready = True
+    response.reason_code = "READY"
+    response.epoch = "wire-epoch"
+    response.fine_revision = 1
+    response.full_snapshot = True
+    response.frame_id = "map"
+    response.resolution_m = 0.2
+    response.origin.x, response.origin.y, response.origin.z = 1.0, 2.0, 3.0
+    response.anchor_pose.position.x, response.anchor_pose.position.y = 4.0, 5.0
+    response.anchor_pose.orientation.w = np.cos(.25)
+    response.anchor_pose.orientation.z = np.sin(.25)
+    response.start_connection_x, response.start_connection_y = [7], [9]
+    response.start_connection_status = 1
+    response.local_bounds = [-256, -256, 256, 256]
+    response.profile_hash = "profile"
+    tile = PolicyMapTile()
+    tile.tile_x, tile.tile_y = 0, 0
+    tile.states = [BLOCKED] * (256 * 256)
+    tile.intrinsic_states = [FREE] * (256 * 256)
+    tile.observed = [FREE] * (256 * 256)
+    tile.costs = [.5] * (256 * 256)
+    tile.elevation_m = [1.] * (256 * 256)
+    response.tiles = [tile]
+
+    snapshot = PolicyMapStore().apply(response)
+    assert snapshot.origin == pytest.approx((1.0, 2.0, 3.0))
+    assert snapshot.pose == Pose(4.0, 5.0, pytest.approx(.5))
+    assert snapshot.start_connections.tolist() == [[7, 9]]
 
 
 def test_platform_config_reads_canonical_wheel_limits_and_actor_context_scaling():

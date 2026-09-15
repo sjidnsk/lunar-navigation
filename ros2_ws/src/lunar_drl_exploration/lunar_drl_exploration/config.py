@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import yaml
+from ament_index_python.packages import get_package_share_directory
 
 from .contracts import Pose
 
@@ -30,7 +31,10 @@ class PlatformConfig:
 def load_platform_config(path: Path | None = None) -> PlatformConfig:
     """Read wheel capability values from the native source of truth."""
     if path is None:
-        path = Path(__file__).resolve().parents[4] / "config" / "wheel.yaml"
+        try:
+            path = Path(get_package_share_directory("lunar_incremental_navigation_ros")) / "config" / "wheel.yaml"
+        except Exception:
+            path = Path(__file__).resolve().parents[4] / "config" / "wheel.yaml"
     with Path(path).open(encoding="utf-8") as stream:
         capability = yaml.safe_load(stream)["capability"]
     footprint = np.asarray(capability["footprint_xy_m"], dtype=np.float64)

@@ -67,7 +67,10 @@ lunar_planning_msgs::srv::GetPolicyMap::Response PolicyMapExporter::Export(
   FillTime(input.processed_stamp_ns, response.processed_stamp);
   response.raw_elevation_revision = fine.raw_elevation_revision();
   response.fine_revision = fine.fine_traversability_revision();
-  response.full_snapshot = since_revision + 1U != response.fine_revision;
+  // No retained complete export history exists.  A revision change therefore
+  // must be a true full snapshot; only an equal revision is a pose refresh.
+  response.full_snapshot = since_revision == 0U ||
+                           since_revision != response.fine_revision;
   const auto& geometry = fine.geometry();
   response.frame_id = geometry.frame_id();
   response.resolution_m = geometry.resolution_m();
@@ -106,7 +109,7 @@ lunar_planning_msgs::srv::GetPolicyMap::Response PolicyMapExporter::Export(
 
   const std::vector<core::TileIndex> indices = response.full_snapshot
       ? fine.tile_indices()
-      : std::vector<core::TileIndex>(fine.changed_tiles().begin(), fine.changed_tiles().end());
+      : std::vector<core::TileIndex>{};
   const auto intrinsic_evaluator = core::MakePlatformElevationEvaluator(capability_);
   for (const core::TileIndex index : indices) {
     const auto tile = fine.FindTile(index);
