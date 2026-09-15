@@ -27,6 +27,7 @@ class Adapter:
         self.snapshot=snapshot(m,pose=Pose(2.5,2.5,0))
         self.velocity=(0.,0.);self.pose=self.snapshot.pose
         self.inflight=False;self.goal=None;self.result=None;self.cancelled=False
+    def require_fresh_snapshot(self):pass  # Synchronous fixture always supplies current input.
     def poll_snapshot(self,*args):return self.snapshot
     def begin_goal(self,goal):self.goal=tuple(goal);self.inflight=True
     def cancel_goal(self):self.cancelled=True

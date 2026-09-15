@@ -38,6 +38,7 @@ class InferenceRuntime:
             self._pending_task=task;self._stop('RESTARTING');return
         self.core=DecisionCore(task,self.sensor,self.graph_config)
         self.report=None;self._stamp=-1;self.state='RUNNING';self.last_error=None
+        self.adapter.require_fresh_snapshot()
 
     def _stop(self,state):
         self.state=state
@@ -47,7 +48,8 @@ class InferenceRuntime:
         if self.state in ('RUNNING','WAITING_FOR_INPUT'):self._stop('PAUSING')
 
     def resume(self):
-        if self.state=='PAUSED':self.state='RUNNING'
+        if self.state=='PAUSED':
+            self.adapter.require_fresh_snapshot();self.state='RUNNING'
 
     def cancel(self):
         if self.core is not None:self._stop('CANCELING')
@@ -64,6 +66,11 @@ class InferenceRuntime:
 
     def tick(self):
         if self.core is None:return
+        if self.adapter.inflight:
+            result=self.adapter.poll_goal()
+            if result is not None:
+                self.last_result=result
+                self.adapter.require_fresh_snapshot()
         snap=self.adapter.poll_snapshot()
         if snap is not None:self.core.consume(snap)
         stamp=getattr(self.adapter,'processed_stamp_ns',0)
@@ -72,9 +79,6 @@ class InferenceRuntime:
             pose=self.adapter.observation_pose(stamp) if hasattr(self.adapter,'observation_pose') else self.adapter.pose
             if pose is not None and any(np.any(t.observed) for t in snap.tiles.values()):
                 self.core.record_observation(pose,(1,))
-        if self.adapter.inflight:
-            result=self.adapter.poll_goal()
-            if result is not None:self.last_result=result
         if self.state in ('PAUSING','CANCELING','RESTARTING'):
             if not self.adapter.inflight and velocity_is_stopped(self.adapter.velocity):
                 if self.state=='RESTARTING':

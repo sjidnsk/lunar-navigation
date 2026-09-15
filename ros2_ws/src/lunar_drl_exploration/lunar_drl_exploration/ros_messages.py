@@ -129,13 +129,15 @@ class RosNavigationAdapter:
         self.pose=None;self.pose_history=deque(maxlen=4096);self.velocity=(float("nan"),float("nan"));self.pose_received_monotonic=0.
         self.diagnostics=deque(maxlen=64);self.references=deque(maxlen=64);self.planning_evidence=deque(maxlen=64)
         qos=QoSProfile(depth=1,reliability=ReliabilityPolicy.RELIABLE,durability=DurabilityPolicy.TRANSIENT_LOCAL)
-        self.subscriptions=[node.create_subscription(Odometry,odometry_topic,self._pose,10),
+        state_qos=QoSProfile(depth=10,reliability=ReliabilityPolicy.BEST_EFFORT,durability=DurabilityPolicy.VOLATILE)
+        self.subscriptions=[node.create_subscription(Odometry,odometry_topic,self._pose,state_qos),
             node.create_subscription(DiagnosticArray,diagnostics_topic,self._diagnostic,10),
             node.create_subscription(PathReference,path_reference_topic,self._reference,qos),
-            node.create_subscription(TFMessage,tf_topic,self._tf,10)]
+            node.create_subscription(TFMessage,tf_topic,self._tf,state_qos)]
         self._map_future=None;self._send_future=None;self._handle=None;self._result_future=None
         self._cancel=False;self._cancel_future=None;self.sent_goal=None
         self._force_full=False;self.map_reason="NO_RESPONSE"
+        self._request_serial=0;self._minimum_response_serial=1;self._current_input=False
 
     def _tf(self,msg):
         for transform in msg.transforms:
@@ -172,23 +174,43 @@ class RosNavigationAdapter:
     @property
     def ready(self): return self.client.service_is_ready() and self.action.server_is_ready()
 
+    def require_fresh_snapshot(self):
+        """Require a successful request issued after this lifecycle boundary.
+
+        Keep the applied snapshot for delta recovery and cumulative evidence.
+        An already-outstanding request cannot certify the new current anchor.
+        """
+        self._minimum_response_serial=self._request_serial+1
+        self._current_input=False
+
     def poll_snapshot(self,minimum_map_stamp_ns=0):
+        service_ready=self.client.service_is_ready()
+        if not service_ready:
+            self.require_fresh_snapshot()
+            self.map_reason="SERVICE_UNAVAILABLE"
         if self._map_future is not None and self._map_future.done():
-            response=self._map_future.result();self._map_future=None
-            if response is not None:self.map_reason=response.reason_code
-            if response is not None and response.ready:
-                try: self.snapshot=self.store.apply(response)
-                except ValueError as exc:
-                    self.map_reason=str(exc);self._force_full=True
-                else:
-                    self._force_full=False
-                    self.processed_stamp_ns=stamp_ns(response.processed_stamp)
-        if self._map_future is None and self.client.service_is_ready():
+            future=self._map_future;self._map_future=None
+            self._current_input=False
+            try:response=future.result()
+            except Exception as exc:
+                self.map_reason="MAP_TRANSPORT_ERROR: "+str(exc)
+            else:
+                self.map_reason=response.reason_code if response is not None else "NO_RESPONSE"
+                if response is not None and response.ready:
+                    try:self.snapshot=self.store.apply(response)
+                    except (ValueError,TypeError,AttributeError) as exc:
+                        self.map_reason=str(exc);self._force_full=True
+                    else:
+                        self._force_full=False
+                        self.processed_stamp_ns=stamp_ns(response.processed_stamp)
+                        self._current_input=service_ready and self._request_serial>=self._minimum_response_serial
+        if self._map_future is None and service_ready:
             req=self._service_type.Request()
             req.since_revision=0 if self._force_full or self.snapshot is None else self.snapshot.revision
             req.minimum_map_stamp_ns=int(minimum_map_stamp_ns)
             self._map_future=self.client.call_async(req)
-        if self.snapshot is not None and self.processed_stamp_ns>=minimum_map_stamp_ns:
+            self._request_serial+=1
+        if self._current_input and self.snapshot is not None and self.processed_stamp_ns>=minimum_map_stamp_ns:
             return self.snapshot
         return None
 

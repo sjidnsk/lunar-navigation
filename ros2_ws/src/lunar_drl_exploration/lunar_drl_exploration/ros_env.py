@@ -212,9 +212,16 @@ class RosExplorationEnv:
         if snap is not None:
             self.buffer.acknowledge(self.adapter.processed_stamp_ns)
             self._apply_known(snap)
-        self._next_tick=max(self._next_tick,time.monotonic())+self.config.integration_step_s/self.config.target_rtf
-        remaining=self._next_tick-time.monotonic()
+        self._pace()
+
+    def _pace(self):
+        # Total wall-step budget includes computation. Overload resets the
+        # deadline without omitting physical steps or accumulating catch-up.
+        self._next_tick+=self.config.integration_step_s/self.config.target_rtf
+        now=time.monotonic()
+        remaining=self._next_tick-now
         if remaining>0:time.sleep(remaining)
+        else:self._next_tick=now
 
     @property
     def _known_area(self):return self.core.coverage.known_area_m2

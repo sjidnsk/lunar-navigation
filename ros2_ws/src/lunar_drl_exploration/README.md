@@ -739,3 +739,22 @@ LUNAR_DRL_RUN_ROS=1 python3 -m pytest -q \
 Use the new isolated overlay only. Torch tests additionally require the project
 training venv and `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`; ordinary package tests run
 from the repository root with `python3 -m pytest`.
+
+Task7 review corrections: odometry and dynamic TF subscriptions use the existing
+BEST_EFFORT, VOLATILE, depth-10 state contract; PathReference retains RELIABLE,
+TRANSIENT_LOCAL durability. `RosNavigationAdapter.require_fresh_snapshot()` marks
+a decision boundary without dropping the applied delta cache. START, RESUME and
+action completion wait for a successful service response to a request issued
+after that boundary, even when map revision stays unchanged. Earlier outstanding
+responses can update retained evidence but cannot authorize the next goal.
+Unavailable/invalid input or a missing service makes `poll_snapshot()` return
+`None` until current input recovers; cumulative K and pause history are preserved.
+
+Pacing now budgets the complete wall step, including computation: it sleeps only
+the remaining `0.05 / target_rtf` time and resets an overdue deadline without
+catch-up or omitted steps. A subsequent target-30 local cave probe used the full
+CPU Actor to select two executed goals, both GOAL_REACHED in the requested grid
+cell, with measured gains 1.04/0.52 m² and action RTF 18.31/16.56. All 951 physics
+steps remained 0.05 simulation seconds and sensor intervals remained 10 steps.
+This is actual single-environment CPU Actor selection evidence; it does not
+establish learning, GPU collection, eight-environment throughput or target30.

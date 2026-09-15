@@ -1,5 +1,6 @@
 import math
 import numpy as np
+import pytest
 from lunar_drl_exploration.contracts import Pose, SensorSpec
 from lunar_drl_exploration.config import load_platform_config
 from lunar_drl_exploration.scene import TerrainGrid
@@ -99,3 +100,24 @@ def test_deployment_history_pose_uses_actual_map_from_odom_transform():
     pose=pose_in_map(msg,tf)
     assert pose.x==pytest.approx(8.) and pose.y==pytest.approx(-2.)
     assert pose.yaw==pytest.approx(.25+math.pi/2)
+
+
+def test_pacing_counts_computation_and_never_catches_up_overdue_steps(monkeypatch):
+    from types import SimpleNamespace
+    from lunar_drl_exploration.ros_env import RosExplorationEnv
+    import lunar_drl_exploration.ros_env as module
+    clock=SimpleNamespace(now=0.,sleeps=[])
+    monkeypatch.setattr(module.time,'monotonic',lambda:clock.now)
+    def sleep(duration):clock.sleeps.append(duration);clock.now+=duration
+    monkeypatch.setattr(module.time,'sleep',sleep)
+    env=RosExplorationEnv.__new__(RosExplorationEnv)
+    env.config=SimpleNamespace(integration_step_s=.05,target_rtf=30.)
+    env._next_tick=0.
+    clock.now=.0007;env._pace()
+    assert clock.now==pytest.approx(.05/30)
+    assert clock.sleeps==pytest.approx([.05/30-.0007])
+    clock.now+=.003;env._pace()
+    assert len(clock.sleeps)==1  # Overloaded computation gets no added sleep.
+    assert env._next_tick==clock.now
+    clock.now+=.0007;env._pace()
+    assert clock.sleeps[-1]==pytest.approx(.05/30-.0007)
