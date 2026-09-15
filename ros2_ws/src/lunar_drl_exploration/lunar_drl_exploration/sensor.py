@@ -113,7 +113,11 @@ def target_visibility(intrinsic, source_xy, targets_xy, range_cells):
 
 
 def first_pending_cells(intrinsic, known, source_xy, targets_xy):
-    """First pending interface on shared native rays; -1 for no visible pending hit."""
+    """First pending center with its own visible native ray; -1 if none.
+
+    Supercover traversal contacts whose center rays are blocked are skipped.
+    A visible pending demand remains the fallback, so its opportunity is retained.
+    """
     targets = np.ascontiguousarray(targets_xy, dtype=np.int64).reshape(-1, 2)
     out = np.empty((len(targets), 1), np.int64)
     native.first_pending(
@@ -125,3 +129,21 @@ def first_pending_cells(intrinsic, known, source_xy, targets_xy):
         out,
     )
     return out[:, 0]
+
+
+def direct_witnesses(intrinsic, reachable, targets_xy, range_cells):
+    """First actual reachable center-ray source per target, or [-1,-1].
+
+    Movement components do not enter this optical relation. Sparse native
+    first-source search avoids enumerating every source/target Python pair.
+    """
+    targets = np.ascontiguousarray(targets_xy, dtype=np.int64).reshape(-1, 2)
+    result = np.empty((len(targets), 2), np.int64)
+    native.visible_witnesses(
+        np.ascontiguousarray(intrinsic, dtype=np.uint8),
+        np.ascontiguousarray(reachable, dtype=np.uint8),
+        targets,
+        float(range_cells),
+        result,
+    )
+    return result

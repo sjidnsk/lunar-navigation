@@ -127,12 +127,18 @@ Known area counts effective classified centers, including BLOCKED centers once;
 M never supplies the observed predicate or an optical blocker. Potential motion
 uses M != BLOCKED after removing native reachable R. Unknown task demands seed
 potential components; shared native B rays add cross-component observation
-witnesses, including nonstandable demands. The raster includes all measured
+witnesses, including nonstandable demands. Direct R visibility is independently
+checked for every nearby pending demand, even when its potential movement
+component has no entry from R. A sparse native first-source search preserves this
+relation without enumerating all Python source/target pairs. The raster includes all measured
 evidence plus task/range margin, and its outer boundary joins a single external
 UNKNOWN component. An interface cannot recruit an unrelated branch by searching
 through R. `frontier_cells[N,2]` and aligned `witnesses[N,2]` use **snapshot global
 integer x,y cell indices**. Frontiers identify first pending center measurements,
-including legitimate task-external transit interfaces. Missing classified support
+including legitimate task-external transit interfaces. Each traversal contact must
+also pass its own center-ray visibility test before becoming a pending center;
+occluded contacts are skipped and the visible demand remains a fallback. Adjacent
+interfaces beyond sensor range are not presented as observable witnesses. Missing classified support
 at a native FREE task center remains pending. Each retained interface has a native
 R observation witness; it is not an executable UNKNOWN stance.
 
@@ -193,11 +199,13 @@ interfaces are retained, and the graph remains non-exhausted.
 
 | Known square | Nodes / edges | Frontier centers | Graph build | Frozen graph | Process peak RSS |
 | --- | --- | --- | --- | --- | --- |
-| 100 m | 1,999 / 1,998 | 2,000 | 0.118 s | 0.214 MiB | 64.0 MiB |
-| 300 m | 5,999 / 5,998 | 6,000 | 0.486 s | 0.641 MiB | 133.7 MiB |
-| 1000 m | 19,999 / 19,998 | 20,000 | 3.705 s | 2.137 MiB | 878.7 MiB |
+| 100 m | 1,999 / 1,998 | 2,000 | 0.175 s | 0.214 MiB | 69.7 MiB |
+| 300 m | 5,999 / 5,998 | 6,000 | 0.665 s | 0.641 MiB | 147.8 MiB |
+| 1000 m | 19,999 / 19,998 | 20,000 | 4.405 s | 2.137 MiB | 879.0 MiB |
 
-The 1 km input tiles alone occupy 275 MiB; analysis still has raster-sized scratch.
+These measurements were rerun after the Task 4 direct-witness / center-hit review
+fixes and supersede the initial 3.705 s 1 km timing. The 1 km input tiles alone
+occupy 275 MiB; analysis still has raster-sized scratch.
 These measurements demonstrate perimeter graph growth and retained witnesses,
 not 2 Hz / 30x throughput at 1 km, terrain-generation performance, training, live
 navigation, Humble, Orin, DDS or vehicle readiness. Those runtime layers remain

@@ -158,6 +158,8 @@ static PyMethodDef methods[] = {
     {"derive", derive, METH_VARARGS,
      "Measure float32 terrain then classify B and native M."},
     {"observe", observe, METH_VARARGS, "Center-ray first-hit observations."},
+    {"visible_witnesses", visible_witnesses, METH_VARARGS,
+     "Direct native R center-observation witnesses."},
     {"first_pending", first_pending, METH_VARARGS,
      "First pending center on exact visible ray."},
     {"visible_targets", visible_targets, METH_VARARGS,

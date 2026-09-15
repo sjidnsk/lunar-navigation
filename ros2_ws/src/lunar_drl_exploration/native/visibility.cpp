@@ -13,13 +13,18 @@ bool line(const std::uint8_t *b, int w, int x, int y, int tx, int ty,
   const int dx = std::abs(tx - x), dy = std::abs(ty - y), sx = tx > x ? 1 : -1,
             sy = ty > y ? 1 : -1;
   int ix = 0, iy = 0;
+  const int source_x = x, source_y = y;
   if (first)
     *first = known[static_cast<std::size_t>(y) * w + x]
                  ? -1
                  : static_cast<std::int64_t>(y) * w + x;
   const auto blocked = [&](int cx, int cy) {
     const auto index = static_cast<std::int64_t>(cy) * w + cx;
-    if (first && *first < 0 && !known[index])
+    // A traversal contact is not necessarily a center measurement. Verify
+    // its own center ray and keep scanning if it is occluded; the visible
+    // pending demand itself remains a guaranteed final candidate.
+    if (first && *first < 0 && !known[index] &&
+        line(b, w, source_x, source_y, cx, cy))
       *first = index;
     return !(cx == tx && cy == ty) &&
            b[static_cast<std::size_t>(cy) * w + cx] == 2;
@@ -292,4 +297,59 @@ PyObject *first_pending(PyObject *, PyObject *args) {
   } catch (const std::exception &e) {
     return error(e);
   }
+}
+
+// Sparse direct-observation witnesses, independent of movement-component labels.
+// Reuse the exact center ray and stop at the first real R source for each demand.
+PyObject* visible_witnesses(PyObject*, PyObject* args) {
+  PyObject *bo, *ro, *to, *oo;
+  double radius;
+  if (!PyArg_ParseTuple(args, "OOOdO", &bo, &ro, &to, &radius, &oo)) return nullptr;
+  try {
+    Buffer b(bo, "B", 2), reachable(ro, "B", 2), targets(to, "l", 2),
+        out(oo, "l", 2, true);
+    int h, w;
+    dimensions(b, h, w);
+    reachable.shape(h, w);
+    range_check(radius);
+    if (targets.view.shape[1] != 2)
+      throw std::invalid_argument("invalid witness targets");
+    out.shape(targets.view.shape[0], 2);
+    for (Py_ssize_t i = 0; i < targets.view.shape[0]; ++i) {
+      const auto x = targets.data<std::int64_t>()[2*i];
+      const auto y = targets.data<std::int64_t>()[2*i+1];
+      if (x < 0 || x >= w || y < 0 || y >= h)
+        throw std::invalid_argument("witness target outside grid");
+    }
+    {
+      ReleasedGIL release;
+      std::vector<std::pair<int, int>> offsets;
+      const int d = static_cast<int>(std::ceil(radius));
+      for (int dy = -std::min(d, h-1); dy <= std::min(d, h-1); ++dy)
+        for (int dx = -std::min(d, w-1); dx <= std::min(d, w-1); ++dx)
+          if (std::hypot(double(dx), double(dy)) <= radius + 1e-10)
+            offsets.emplace_back(dx, dy);
+      std::sort(offsets.begin(), offsets.end(), [](auto a, auto b) {
+        const auto aa = std::int64_t(a.first)*a.first + std::int64_t(a.second)*a.second;
+        const auto bb = std::int64_t(b.first)*b.first + std::int64_t(b.second)*b.second;
+        return aa == bb ? a < b : aa < bb;
+      });
+      std::fill_n(out.data<std::int64_t>(), targets.view.shape[0]*2, -1);
+      for (Py_ssize_t i = 0; i < targets.view.shape[0]; ++i) {
+        const int tx = targets.data<std::int64_t>()[2*i];
+        const int ty = targets.data<std::int64_t>()[2*i+1];
+        for (const auto& [dx, dy] : offsets) {
+          const int x = tx + dx, y = ty + dy;
+          if (x < 0 || x >= w || y < 0 || y >= h ||
+              !reachable.data<std::uint8_t>()[static_cast<std::size_t>(y)*w+x]) continue;
+          if (line(b.data<std::uint8_t>(), w, x, y, tx, ty)) {
+            out.data<std::int64_t>()[2*i] = x;
+            out.data<std::int64_t>()[2*i+1] = y;
+            break;
+          }
+        }
+      }
+    }
+    Py_RETURN_NONE;
+  } catch (const std::exception& e) { return error(e); }
 }

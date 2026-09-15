@@ -49,3 +49,4 @@ PyObject* reachable(PyObject*, PyObject*);
 PyObject* visible_union(PyObject*, PyObject*);
 PyObject* visible_targets(PyObject*, PyObject*);
 PyObject* first_pending(PyObject*, PyObject*);
+PyObject* visible_witnesses(PyObject*, PyObject*);

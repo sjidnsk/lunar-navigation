@@ -193,6 +193,8 @@ def test_acceleration_matches_exhaustive_tiny_observation_witness_enumeration():
         entry = binary_dilation(w.reachable, structure=CROSS) & potential
         expected = direct or bool(relevant.intersection(set(labels[entry])))
         assert report.exhausted == (not expected), seed
+        if len(report.frontier_cells):
+            _assert_real_center_witnesses(s, report, sensor)
 
 
 def test_direct_visible_deep_demand_reports_first_unknown_interface_center():
@@ -212,3 +214,113 @@ def test_direct_visible_deep_demand_reports_first_unknown_interface_center():
     local = report.frontier_cells - np.array(w.bounds[:2])
     assert np.all(interface[local[:, 1], local[:, 0]])
     assert [6, 5] not in report.frontier_cells.tolist()
+
+
+def _assert_real_center_witnesses(snapshot_value, report, sensor):
+    from lunar_drl_exploration.sensor import target_visibility, visible_cells
+    from lunar_drl_exploration.task_analysis import measured_workspace
+
+    assert len(report.frontier_cells) == len(report.witnesses) > 0
+    extent_task = task(-10, -10, 30, 30)
+    workspace = measured_workspace(snapshot_value, extent_task, sensor)
+    shift = np.array(workspace.bounds[:2])
+    for frontier, witness in zip(
+        report.frontier_cells - shift, report.witnesses - shift
+    ):
+        assert workspace.reachable[witness[1], witness[0]]
+        assert not workspace.known[frontier[1], frontier[0]]
+        assert target_visibility(
+            workspace.intrinsic,
+            witness,
+            [frontier],
+            sensor.range_m / snapshot_value.resolution_m,
+        )[0]
+        yaw = np.arctan2(*(frontier - witness)[::-1]) - sensor.offset_yaw_rad
+        pose = Pose(
+            workspace.origin[0] + (witness[0] + 0.5) * snapshot_value.resolution_m,
+            workspace.origin[1] + (witness[1] + 0.5) * snapshot_value.resolution_m,
+            yaw,
+        )
+        rows, cols = visible_cells(
+            workspace.intrinsic,
+            workspace.origin,
+            snapshot_value.resolution_m,
+            pose,
+            sensor,
+        )
+        assert tuple(frontier) in set(zip(cols.tolist(), rows.tolist()))
+
+
+def test_direct_R_visibility_is_independent_of_potential_movement_component():
+    m = np.full((9, 15), 2, np.uint8)
+    b = m.copy()
+    m[3:6, 1:4] = 1
+    b[3:6, 1:4] = 1
+    b[4, 4:7] = 1
+    m[4, 7] = b[4, 7] = 0
+    sensor = SensorSpec(range_m=5)
+    s = snapshot(m, b, pose=Pose(3.5, 4.5, 0))
+    report = TaskAnalyzer(task(7, 4, 8, 5), sensor).update(s)
+    assert report.available and not report.exhausted
+    assert [7, 4] in report.frontier_cells.tolist()
+    _assert_real_center_witnesses(s, report, sensor)
+
+
+def test_off_axis_traversal_contact_is_not_an_unverified_center_hit():
+    from lunar_drl_exploration.sensor import target_visibility
+    from lunar_drl_exploration.decision import DecisionCore
+
+    b = np.ones((9, 9), np.uint8)
+    b[5, 4] = 2
+    b[5, 3] = b[6, 0] = 0
+    m = np.full_like(b, 2)
+    m[4, 4] = 1
+    sensor = SensorSpec(range_m=5)
+    s = snapshot(m, b, pose=Pose(4.5, 4.5, 0))
+    assert target_visibility(b, (4, 4), [[0, 6]], 5)[0]
+    assert not target_visibility(b, (4, 4), [[3, 5]], 5)[0]
+    observation, report = DecisionCore(task(0, 6, 1, 7), sensor).observe(s)
+    assert report.available and not report.exhausted
+    _assert_real_center_witnesses(s, report, sensor)
+    assert [0, 6] in report.frontier_cells.tolist()
+    assert observation.features[observation.current_index, 3:11].max() > 0
+
+
+def test_subcell_sensor_range_does_not_create_unobservable_adjacent_frontier():
+    m = np.zeros((5, 5), np.uint8)
+    m[2, 2] = 1
+    report = TaskAnalyzer(task(0, 0, 5, 5), SensorSpec(range_m=0.5)).update(snapshot(m))
+    assert not report.available and not report.exhausted
+    assert not len(report.frontier_cells)
+
+
+def test_sparse_direct_witness_search_matches_exhaustive_sensor_sources():
+    from lunar_drl_exploration.sensor import (
+        direct_witnesses,
+        target_visibility,
+        visible_cells,
+    )
+
+    rng = np.random.default_rng(941)
+    for radius in (0.5, 2.5, 5.0):
+        b = rng.choice([0, 1, 2], (9, 11), p=[0.3, 0.45, 0.25]).astype(np.uint8)
+        reachable = (b == 1) & (rng.random(b.shape) < 0.4)
+        targets = np.argwhere(np.ones_like(b, bool))[:, ::-1].copy()
+        sources = direct_witnesses(b, reachable, targets, radius)
+        expected = np.zeros_like(reachable)
+        for y, x in np.argwhere(reachable):
+            rows, cols = visible_cells(
+                b,
+                (0.0, 0.0),
+                1.0,
+                Pose(x + 0.5, y + 0.5, 0),
+                SensorSpec(range_m=radius, fov_deg=360),
+            )
+            expected[rows, cols] = True
+        assert np.array_equal(
+            sources[:, 0] >= 0, expected[targets[:, 1], targets[:, 0]]
+        )
+        for target, source in zip(targets, sources):
+            if source[0] >= 0:
+                assert reachable[source[1], source[0]]
+                assert target_visibility(b, source, [target], radius)[0]

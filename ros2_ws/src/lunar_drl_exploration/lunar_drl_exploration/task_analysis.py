@@ -12,7 +12,12 @@ from scipy.ndimage import binary_dilation, label, maximum_filter
 from .contracts import TaskReport
 from .geometry import polygon_mask, world_to_cell
 from .maps import FREE, BLOCKED, UNKNOWN
-from .sensor import first_pending_cells, target_visibility, validate_sensor
+from .sensor import (
+    direct_witnesses,
+    first_pending_cells,
+    target_visibility,
+    validate_sensor,
+)
 
 CROSS = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], bool)
 
@@ -150,20 +155,24 @@ class TaskAnalyzer:
         relevant[0] = False
         radius = self.sensor.range_m / snapshot.resolution_m
         d = math.ceil(radius)
-        direct = {}  # pending measurement -> actual R observation witness
-        # Most demands directly seed their movement component. Only stances in
-        # other components, and blocked-M/R demands, need additional ray tests.
+        # Most demands seed their movement component. Extra potential stances
+        # need a cross-component ray; direct R visibility is a separate relation.
         other = potential & ~relevant[components]
         near_other = maximum_filter(other, size=2 * d + 1, mode="constant", cval=0)
         near_r = maximum_filter(w.reachable, size=2 * d + 1, mode="constant", cval=0)
-        special = pending & (near_other | ((components == 0) & near_r))
+        targets = _xy(pending & near_r)
+        sources = direct_witnesses(w.intrinsic, w.reachable, targets, radius)
+        direct = {
+            tuple(map(int, target)): tuple(map(int, source))
+            for target, source in zip(targets, sources)
+            if source[0] >= 0
+        }
+        special = pending & near_other
         h, width = potential.shape
         for tx, ty in _xy(special):
             x0, x1 = max(0, tx - d), min(width, tx + d + 1)
             y0, y1 = max(0, ty - d), min(h, ty + d + 1)
             wanted = potential[y0:y1, x0:x1] & ~relevant[components[y0:y1, x0:x1]]
-            if components[ty, tx] == 0:
-                wanted |= w.reachable[y0:y1, x0:x1]
             stances = _xy(wanted) + [x0, y0]
             if not len(stances):
                 continue
@@ -174,9 +183,6 @@ class TaskAnalyzer:
                 continue
             relevant[components[seen[:, 1], seen[:, 0]]] = True
             relevant[0] = False
-            rr = seen[w.reachable[seen[:, 1], seen[:, 0]]]
-            if len(rr):
-                direct[(int(tx), int(ty))] = tuple(map(int, rr[0]))
         # Only pending center measurements at real interfaces contribute utility.
         frontier_mask = ~w.known & binary_dilation(w.known, structure=CROSS)
         frontier_mask &= relevant[components]
@@ -188,7 +194,7 @@ class TaskAnalyzer:
             first = first_pending_cells(w.intrinsic, known_bytes, source, [target])[0]
             if first >= 0:
                 witnesses[(int(first % width), int(first // width))] = source
-        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)) if radius + 1e-10 >= 1 else ():
             ys, xs = np.nonzero(
                 w.reachable & np.roll(frontier_mask, (-dy, -dx), axis=(0, 1))
             )
