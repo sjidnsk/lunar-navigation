@@ -38,7 +38,7 @@ setup(
             extra_compile_args=["-std=c++20", "-O3", "-Wall", "-Wextra"],
         )
     ],
-    entry_points={"console_scripts": ["lunar-drl = lunar_drl_exploration.cli:main"]},
+    entry_points={"console_scripts": ["lunar-drl = lunar_drl_exploration.cli:console_main"]},
     tests_require=["pytest"],
     install_requires=["numpy", "PyYAML", "scipy"],
 )

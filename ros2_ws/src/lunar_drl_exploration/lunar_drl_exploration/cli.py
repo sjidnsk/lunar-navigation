@@ -92,5 +92,10 @@ def main(argv=None):
     return infer(config, args.actor, task_topic=args.task_topic)
 
 
-if __name__ == '__main__':
+def console_main():
+    """Console exit status is independent of the structured Python API result."""
     main()
+
+
+if __name__ == '__main__':
+    console_main()

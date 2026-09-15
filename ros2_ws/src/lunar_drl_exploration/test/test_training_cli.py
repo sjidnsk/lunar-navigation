@@ -348,3 +348,20 @@ def test_training_final_transport_handoff_after_collector_exit_saves_or_reports_
     assert time.monotonic() - started < 12
     assert not coordinator.is_alive() and not mp.active_children()
     assert not [t for t in threading.enumerate() if t.name.startswith('drl-ipc-')]
+
+
+def test_installed_console_success_exits_zero_and_python_api_keeps_result(tmp_path):
+    torch = pytest.importorskip('torch')
+    ament = pytest.importorskip('ament_index_python.packages')
+    from lunar_drl_exploration.cli import main
+    from lunar_drl_exploration.sac import SACLearner
+    from lunar_drl_exploration.runtime import ActorPolicy
+    console = Path(ament.get_package_prefix('lunar_drl_exploration')) / 'lib/lunar_drl_exploration/lunar-drl'
+    assert console.is_file(), 'build the affected package before installed-console validation'
+    source, api_target, cli_target = [tmp_path / name for name in ('source.pt', 'api.pt', 'cli.pt')]
+    torch.save(SACLearner().actor_state(), source)
+    assert main(['export', '--checkpoint', str(source), '--output', str(api_target)]) == str(api_target)
+    result = subprocess.run([sys.executable, str(console), 'export', '--checkpoint', str(source),
+        '--output', str(cli_target)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert ActorPolicy.load(cli_target).actor is not None

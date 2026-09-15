@@ -220,7 +220,12 @@ def test_stack_config_launch_and_cpp_keep_the_exploration_map_contract_closed() 
     assert "result.data[output_index] = 100;" in projector
     assert "rclcpp::KeepLast{1}" in publisher
     assert ".reliable().transient_local()" in publisher
-    assert publisher.count("create_publisher<nav_msgs::msg::OccupancyGrid>") == 1
+    # One configured exploration endpoint; the optional fine diagnostic map has
+    # its own topic and must not be mistaken for another exploration owner.
+    assert publisher.count("std::move(topic), ConfiguredExplorationMapQos(node)") == 1
+    assert '"publish_local_fine_map", false' in publisher
+    assert '"local_fine_map_topic", "/Car/T4/mapping/local_fine_map"' in publisher
+    assert "fine_topic, ExplorationMapQos()" in publisher
     assert navigation.count(
         "exploration_map_publisher(node, parameters.exploration_map_topic)"
     ) == 1
