@@ -1,0 +1,3 @@
+include native/*.hpp
+include test/native_roundtrip.cpp
+include README.md

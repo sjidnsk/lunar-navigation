@@ -6,6 +6,9 @@
   <maintainer email="maintainers@example.invalid">Lunar Navigation Maintainers</maintainer>
   <license>Apache-2.0</license>
   <buildtool_depend>ament_python</buildtool_depend>
+  <depend>lunar_incremental_navigation_core</depend>
+  <build_depend>python3-dev</build_depend>
+  <exec_depend>python3-scipy</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
