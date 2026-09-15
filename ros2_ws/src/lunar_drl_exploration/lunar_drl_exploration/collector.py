@@ -4,7 +4,7 @@ Module imports are stdlib only. Each slot retains at most one observation and on
 finished transition. Static scene payloads are forwarded once and not archived.
 """
 import multiprocessing as mp
-from multiprocessing.connection import wait
+import threading
 import os
 import pickle
 import signal
@@ -15,6 +15,8 @@ def collector_main(pipe, config_record, initial_state, *, domain_base=210,
                    env_factory='lunar_drl_exploration.ros_env:RosExplorationEnv',
                    recovery_limit=3, worker_timeout_s=180., stop_timeout_s=10.):
     from .worker import numerical_threads, worker_main
+    from .ipc import Duplex
+    wake = threading.Event()
     numerical_threads(config_record['collector_threads'])
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     import torch
@@ -47,6 +49,7 @@ def collector_main(pipe, config_record, initial_state, *, domain_base=210,
         process = context.Process(target=worker_main, args=(child, config_record, env_id),
             kwargs=dict(domain_base=domain_base, env_factory=env_factory), name=f'drl-env-{env_id}')
         process.start(); child.close()
+        parent = Duplex(parent, wake=wake)
         slots[env_id] = dict(pipe=parent, process=process, mode='STARTING', observation=None,
             pending=None, token=None, failures=failures, since=time.monotonic(), closed=False)
         emit('OWNERSHIP', env=env_id, worker_pid=process.pid, child_pids=[])
@@ -83,7 +86,7 @@ def collector_main(pipe, config_record, initial_state, *, domain_base=210,
         if process.is_alive(): process.terminate()
         process.join(3)
         if process.is_alive(): process.kill(); process.join(3)
-        slot['pipe'].close(); slot['closed'] = True
+        slot['pipe'].close(flush=False); slot['closed'] = True
         emit('RECOVERY', env=env_id, reason=reason, attempt=slot['failures'] + 1)
         if stopping: return
         if slot['failures'] >= recovery_limit:
@@ -92,15 +95,21 @@ def collector_main(pipe, config_record, initial_state, *, domain_base=210,
             return
         spawn(env_id, slot['failures'] + 1)
 
+    interval = config_record['actor_publish_updates']
+    pipe = Duplex(pipe, config_record['environments'], wake,
+        publication_window=(config_record['max_update_credit'] + interval - 1) // interval)
     try:
         emit('COLLECTOR_HELLO', pid=os.getpid(), device='cpu', numeric_threads=torch.get_num_threads(),
             cuda_initialized=torch.cuda.is_initialized(), package_path=__file__)
         for env_id in range(config_record['environments']): spawn(env_id)
         while True:
             sources = [pipe] + ([] if frozen else [s['pipe'] for s in slots.values() if not s['closed']])
-            ready_pipes = wait(sources, timeout=.02)
-            # Commands take priority, notably STOP while a worker is blocked.
-            if pipe in ready_pipes:
+            wake.clear()
+            if not any(source.poll() for source in sources): wake.wait(.02)
+            # A bounded currently-readable control pass precedes each Actor call.
+            # No wait for other workers or for future grants.
+            for _ in range(pipe.capacity):
+                if not pipe.poll(): break
                 command = pipe.recv(); kind = command['kind']
                 if kind == 'STOP': request_stop()
                 elif kind == 'BARRIER':
@@ -170,7 +179,7 @@ def collector_main(pipe, config_record, initial_state, *, domain_base=210,
                             if not stopping: emit('NEED_RESET', env=env_id)
                         elif kind == 'CLOSED':
                             slot['closed'] = True
-                            slot['process'].join(3); connection.close()
+                            slot['process'].join(3); connection.close(flush=False)
                             emit('OWNERSHIP', env=env_id, worker_pid=None, child_pids=[])
                             if 'restart_reason' in slot and not stopping:
                                 recover(env_id, slot['restart_reason'])
@@ -182,7 +191,13 @@ def collector_main(pipe, config_record, initial_state, *, domain_base=210,
                             emit(kind, **{k: v for k, v in message.items() if k != 'kind'})
                         else: raise ValueError('unknown worker message ' + kind)
                     if slots.get(env_id) is not slot or slot['closed']: continue
-                    if not slot['process'].is_alive(): recover(env_id, 'worker exited unexpectedly')
+                    if not slot['process'].is_alive():
+                        # The reader may still be decoding a final large DONE.
+                        # Ordered EOF follows its inbox; do not discard that
+                        # frame merely because process exit won the race.
+                        deadline = slot.setdefault('exit_deadline', time.monotonic() + stop_timeout_s)
+                        if time.monotonic() > deadline:
+                            recover(env_id, 'worker exit transport drain timed out')
                     elif 'restart_reason' in slot:
                         if time.monotonic() > slot['restart_deadline'] and slot['pending'] is None:
                             recover(env_id, slot['restart_reason'] + '; cancellation join timed out')
@@ -193,7 +208,7 @@ def collector_main(pipe, config_record, initial_state, *, domain_base=210,
                         slot['restart_reason'] = 'bounded worker infrastructure watchdog'
                         slot['restart_deadline'] = time.monotonic() + stop_timeout_s
                         connection.send(dict(kind='STOP'))
-            if not paused:
+            if not paused and not pipe.poll():
                 for env_id, slot in slots.items():
                     if slot['mode'] == 'READY':
                         sequences[env_id] = sequences.get(env_id, 0) + 1
@@ -234,5 +249,5 @@ def collector_main(pipe, config_record, initial_state, *, domain_base=210,
             slot['process'].join(3)
             if slot['process'].is_alive(): slot['process'].terminate(); slot['process'].join(3)
             if slot['process'].is_alive(): slot['process'].kill(); slot['process'].join(3)
-            slot['pipe'].close()
+            slot['pipe'].close(flush=False)
         pipe.close()

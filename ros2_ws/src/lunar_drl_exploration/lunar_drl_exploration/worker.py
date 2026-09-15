@@ -19,11 +19,13 @@ def worker_main(pipe, config_record, env_id, *, domain_base=210,
                 env_factory='lunar_drl_exploration.ros_env:RosExplorationEnv'):
     numerical_threads(config_record['worker_threads'])
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    from .ipc import Duplex
     from .config import training_config_from_record
     from .replay import dumps_transport
     module, name = env_factory.split(':')
     factory = getattr(importlib.import_module(module), name)
     env = factory(training_config_from_record(config_record), env_id, domain_base=domain_base)
+    pipe = Duplex(pipe)
     pipe.send(dict(kind='HELLO', env=env_id, pid=os.getpid(),
         torch_loaded='torch' in sys.modules, numeric_threads=os.environ['OMP_NUM_THREADS'],
         package_path=__file__, native_path=getattr(sys.modules.get('lunar_drl_terrain_native'), '__file__', None)))

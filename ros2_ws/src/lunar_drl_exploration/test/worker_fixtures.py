@@ -92,3 +92,30 @@ class OwnedChildEnv(ControlledEnv):
     def close(self):
         super().close()
         if hasattr(self, 'children'): self.children.close()
+
+
+def large_transport_collector(child, record, state, large_kind, entered, sent):
+    from lunar_drl_exploration.collector import collector_main
+    class LargePipe:
+        def send(self, message):
+            if message['kind'] == large_kind:
+                message = dict(message, transport_probe_padding=b'x' * 1024**2)
+                entered.set()
+                child.send(message)
+                sent.set()
+            else: child.send(message)
+        def __getattr__(self, name): return getattr(child, name)
+    collector_main(LargePipe(), record, state, env_factory='worker_fixtures:ControlledEnv')
+
+
+def instrumented_batch_collector(child, record, state, sizes, count):
+    from lunar_drl_exploration.worker import numerical_threads
+    numerical_threads(record['collector_threads'])
+    from lunar_drl_exploration.collector import collector_main
+    from lunar_drl_exploration.model import Actor
+    original = Actor.forward
+    def forward(self, observations):
+        sizes[count.value] = len(observations); count.value += 1
+        return original(self, observations)
+    Actor.forward = forward
+    collector_main(child, record, state, env_factory='worker_fixtures:ControlledEnv')

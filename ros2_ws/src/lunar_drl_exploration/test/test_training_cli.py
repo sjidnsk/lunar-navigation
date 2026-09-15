@@ -76,6 +76,8 @@ def test_training_real_updates_save_actual_published_policy_and_resume_new_episo
     assert set(resumed['episode_ids']).isdisjoint(old_episodes)
     assert resumed['episodes_issued'] > result['episodes_issued']
     assert sorted(p.name for p in tmp_path.iterdir()) == ['metrics.jsonl', 'resume.pt', 'run.json']
+    import threading
+    assert not [thread for thread in threading.enumerate() if thread.name.startswith('drl-ipc-')]
 
 
 def test_frozen_evaluation_metrics_keep_failed_cases_and_late_path():
@@ -178,6 +180,8 @@ def test_partial_optimizer_failure_keeps_last_good_checkpoint_and_closes_childre
     assert saved['schedule']['updates'] == 0 and saved['schedule']['transitions'] == 0
     assert saved['learner']['updates'] == 0
     assert {p.pid for p in mp.active_children()} == before
+    import threading
+    assert not [thread for thread in threading.enumerate() if thread.name.startswith('drl-ipc-')]
     assert time.monotonic() - started < 8, 'finished messages need ACK draining even after update failure'
 
 

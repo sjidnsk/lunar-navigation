@@ -210,3 +210,224 @@ def test_worker_keeps_native_spawning_thread_alive_between_reset_and_step():
     finally:
         if process.is_alive(): process.terminate()
         process.join(3); parent.close()
+
+
+@pytest.mark.parametrize('large_kind', ['SCENE', 'DONE'])
+def test_large_bidirectional_actor_publication_and_stop_drain_without_external_reader(large_kind):
+    """Reproduce review I1 with real collector/Actor and a >socket-sized payload."""
+    torch = pytest.importorskip('torch')
+    import os
+    import pickle
+    import threading
+    from dataclasses import replace
+    from lunar_drl_exploration.collector import collector_main
+    from lunar_drl_exploration.config import ModelConfig
+    from lunar_drl_exploration.model import Actor
+    from lunar_drl_exploration.replay import ReplayBuffer
+    from lunar_drl_exploration.schedule import UpdateSchedule
+    from lunar_drl_exploration.training import AdmissionLedger
+    torch.set_num_threads(1)
+    actor = dict(schema='task_graph_v1', model_config=config_record(ModelConfig()),
+        version=0, state_dict=Actor().state_dict())
+    state = pickle.dumps(dict(actor_record=actor, actor_version=0, policy_rng=torch.get_rng_state()))
+    publication = dict(actor, version=16)
+    publication['state_dict'] = {key: value + .01 for key, value in actor['state_dict'].items()}
+    from worker_fixtures import large_transport_collector
+    context = mp.get_context('spawn')
+    parent, child = context.Pipe()
+    entered, sent = context.Event(), context.Event()
+    process = context.Process(target=large_transport_collector, args=(child,
+        config_record(replace(TrainingConfig(), environments=1)), state, large_kind, entered, sent))
+    process.start(); child.close()
+    ledger = AdmissionLedger(ReplayBuffer(), UpdateSchedule(warmup=0))
+    sender = None
+    publication_done = threading.Event()
+    worker_pids = []
+    stopped = None
+    try:
+        deadline = time.monotonic() + 10
+        while not entered.is_set() and time.monotonic() < deadline:
+            if large_kind == 'SCENE' and entered.wait(.01): break
+            if not parent.poll(.05): continue
+            message = parent.recv()
+            if message['kind'] == 'WORKER_HELLO': worker_pids.append(message['pid'])
+            elif message['kind'] == 'NEED_RESET':
+                parent.send(dict(kind='RESET', env=0,
+                    spec=dict(seed=1, family='moon', extent=40, episode_budget=10)))
+                if large_kind == 'SCENE': assert entered.wait(5); break
+            elif message['kind'] == 'SCENE': ledger.scene(0, loads_transport(message['payload']))
+            elif message['kind'] == 'RESERVE':
+                ledger.schedule.reserve_dispatch()
+                parent.send(dict(kind='GRANT', env=0, token=message['token']))
+                if large_kind == 'DONE': assert entered.wait(5); break
+        assert entered.is_set()
+        def publish():
+            parent.send(dict(kind='PUBLISH', payload=pickle.dumps(publication, protocol=5)))
+            publication_done.set()
+        sender = threading.Thread(target=publish, daemon=True)
+        sender.start()
+        # No learner-side reader intervention: the production receiver must keep
+        # draining while its independent writer uploads the large scene/result.
+        assert publication_done.wait(2), 'bidirectional large sends deadlocked'
+        parent.send(dict(kind='BARRIER')); parent.send(dict(kind='STOP'))
+        while stopped is None:
+            message = receive_any(parent, 10)
+            if message['kind'] == 'SCENE': ledger.scene(0, loads_transport(message['payload']))
+            elif message['kind'] == 'DONE':
+                ledger.admit(0, message['token'], loads_transport(message['payload']))
+                parent.send(dict(kind='ACK', env=0, token=message['token']))
+            elif message['kind'] == 'ABORTED': ledger.schedule.cancel_dispatch()
+            elif message['kind'] == 'STOPPED': stopped = pickle.loads(message['payload'])
+            elif message['kind'] == 'FATAL': pytest.fail(message['reason'])
+        process.join(5)
+        assert process.exitcode == 0 and sent.is_set()
+        assert ledger.schedule.inflight == 0
+        assert ledger.schedule.transitions == len(ledger.replay) == (large_kind == 'DONE')
+        assert ledger.schedule.credit == (.25 if large_kind == 'DONE' else 0)
+        assert stopped['actor_version'] == stopped['actor_record']['version'] == 16
+        for key, value in publication['state_dict'].items():
+            torch.testing.assert_close(stopped['actor_record']['state_dict'][key], value, atol=0, rtol=0)
+        assert all(not os.path.exists(f'/proc/{pid}') for pid in worker_pids)
+    finally:
+        # Failure-only dismantling of the old deadlock; never part of PASS criteria.
+        if sender is not None and sender.is_alive():
+            if parent.poll(1): parent.recv()
+            sender.join(3)
+        if process.is_alive():
+            try: parent.send(dict(kind='STOP'))
+            except (EOFError, OSError): pass
+            deadline = time.monotonic() + 3
+            while process.is_alive() and time.monotonic() < deadline:
+                if parent.poll(.05):
+                    try:
+                        message = parent.recv()
+                        if message['kind'] == 'DONE': parent.send(dict(kind='ACK', env=0, token=message['token']))
+                    except (EOFError, OSError): break
+            process.join(2)
+        if process.is_alive(): process.terminate()
+        process.join(3); parent.close()
+
+
+@pytest.mark.parametrize('control', [None, 'BARRIER', 'STOP'])
+def test_currently_queued_grants_batch_and_queued_stop_or_barrier_prevents_inference(control):
+    """Real Actor.forward instrumentation; no probability/action substitution."""
+    torch = pytest.importorskip('torch')
+    import os
+    import pickle
+    import signal
+    from dataclasses import replace
+    from lunar_drl_exploration.collector import collector_main
+    from lunar_drl_exploration.config import ModelConfig
+    from lunar_drl_exploration.model import Actor
+    torch.set_num_threads(1)
+    actor = dict(schema='task_graph_v1', model_config=config_record(ModelConfig()), version=0,
+        state_dict=Actor().state_dict())
+    rng_state = torch.get_rng_state()
+    state = pickle.dumps(dict(actor_record=actor, actor_version=0, policy_rng=rng_state))
+    from worker_fixtures import instrumented_batch_collector
+    context = mp.get_context('spawn')
+    parent, child = context.Pipe()
+    sizes, count = context.Array('i', 8), context.Value('i', 0)
+    process = context.Process(target=instrumented_batch_collector, args=(child,
+        config_record(replace(TrainingConfig(), environments=2)), state, sizes, count))
+    process.start(); child.close()
+    requests, completed, canceled = {}, 0, 0
+    stopped = None
+    try:
+        while stopped is None:
+            message = receive_any(parent, 10); kind = message['kind']; env = message.get('env')
+            if kind == 'NEED_RESET':
+                parent.send(dict(kind='RESET', env=env,
+                    spec=dict(seed=1, family='moon', extent=40, episode_budget=10)))
+            elif kind == 'RESERVE' and len(requests) < 2:
+                requests[env] = message['token']
+                if len(requests) == 2:
+                    # Queue all controls while this exact owned process is paused.
+                    # This proves already-readable batching, not an artificial wait
+                    # in production to collect a slow environment.
+                    os.kill(process.pid, signal.SIGSTOP)
+                    for env_id, token in requests.items(): parent.send(dict(kind='GRANT', env=env_id, token=token))
+                    if control: parent.send(dict(kind=control))
+                    os.kill(process.pid, signal.SIGCONT)
+            elif kind == 'DONE':
+                completed += 1
+                parent.send(dict(kind='ACK', env=env, token=message['token']))
+                if completed == 2: parent.send(dict(kind='STOP'))
+            elif kind == 'ABORTED': canceled += 1
+            elif kind == 'BARRIER':
+                snapshot = pickle.loads(message['payload'])
+                torch.testing.assert_close(snapshot['policy_rng'], rng_state, atol=0, rtol=0)
+                parent.send(dict(kind='STOP'))
+            elif kind == 'STOPPED': stopped = message
+            elif kind == 'FATAL': pytest.fail(message['reason'])
+        process.join(5)
+        assert process.exitcode == 0
+        assert list(sizes[:count.value]) == ([2] if control is None else [])
+        assert completed + canceled == 2
+    finally:
+        if process.is_alive():
+            os.kill(process.pid, signal.SIGCONT)
+            process.terminate()
+        process.join(3); parent.close()
+
+
+def test_duplex_shutdown_joins_blocked_large_writer_and_reader():
+    import threading
+    from lunar_drl_exploration.ipc import Duplex
+    raw, peer = mp.Pipe()
+    entered = threading.Event()
+    class ObservedPipe:
+        def send(self, message):
+            entered.set()
+            raw.send(message)
+        def __getattr__(self, name): return getattr(raw, name)
+    endpoint = Duplex(ObservedPipe())
+    endpoint.send(dict(kind='SCENE', payload=b'x' * 1024**2))
+    assert entered.wait(1)
+    # The peer deliberately never reads. A flush failure must be explicit and
+    # shutdown must interrupt both native syscalls, joining non-daemon owners.
+    started = time.monotonic()
+    with pytest.raises(BrokenPipeError, match='before reliable messages drained'):
+        endpoint.close(timeout=.1)
+    assert time.monotonic() - started < 1
+    assert all(not thread.is_alive() and not thread.daemon for thread in endpoint.threads)
+    peer.close()
+
+
+def test_duplex_mailbox_preserves_reliable_order_and_distinct_transition_tokens():
+    from collections import deque
+    from lunar_drl_exploration.ipc import Duplex
+    endpoint = object.__new__(Duplex)
+    endpoint.capacity = 20
+    messages = deque()
+    for message in [dict(kind='SCENE'), dict(kind='DONE', env=0, token=1),
+            dict(kind='STATUS', env=0, sample=1), dict(kind='ACK', token=1),
+            dict(kind='DONE', env=0, token=1), dict(kind='STATUS', env=0, sample=2),
+            dict(kind='DONE', env=0, token=2), dict(kind='PUBLISH'), dict(kind='BARRIER')]:
+        endpoint._append(messages, message)
+    assert [(m['kind'], m.get('token')) for m in messages] == [
+        ('SCENE', None), ('DONE', 1), ('ACK', 1), ('STATUS', None),
+        ('DONE', 2), ('PUBLISH', None), ('BARRIER', None)]
+    assert messages[3]['sample'] == 2
+
+
+def test_duplex_delivers_final_large_completion_before_peer_eof():
+    import threading
+    from lunar_drl_exploration.ipc import Duplex
+    raw, peer = mp.Pipe()
+    endpoint = Duplex(raw)
+    payload = b'final-transition' * 100000
+    def finish():
+        peer.send(dict(kind='DONE', env=0, token=7, payload=payload))
+        peer.close()
+    sender = threading.Thread(target=finish)
+    sender.start()
+    try:
+        assert endpoint.poll(2)
+        assert endpoint.recv() == dict(kind='DONE', env=0, token=7, payload=payload)
+        assert endpoint.poll(2)
+        with pytest.raises(EOFError): endpoint.recv()
+    finally:
+        endpoint.close(flush=False)
+        sender.join(2)
+    assert not sender.is_alive()

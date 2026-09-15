@@ -72,6 +72,7 @@ def run_training(config, *, resume=False, device='cuda', max_transitions=None,
     import torch
     from .checkpoint import CheckpointManager, TrainingState, UpdateBoundary
     from .collector import collector_main
+    from .ipc import Duplex
     from .config import config_record
     from .metrics import MetricsWriter, ResourceMonitor, ResourceLimitError
     from .replay import ReplayBuffer, loads_transport
@@ -189,6 +190,9 @@ def run_training(config, *, resume=False, device='cuda', max_transitions=None,
         # An initial good checkpoint also protects a first-update infrastructure failure.
         if not resume: save()
         process.start(); child.close()
+        connection = Duplex(connection, config.environments,
+            publication_window=(config.max_update_credit + config.actor_publish_updates - 1) //
+                config.actor_publish_updates)
         record_run()
         while not stopped:
             if connection.poll(.01):
@@ -378,4 +382,6 @@ def run_training(config, *, resume=False, device='cuda', max_transitions=None,
                 process.join(12)
             if process.is_alive(): process.terminate(); process.join(5)
             if process.is_alive(): process.kill(); process.join(5)
-        child.close(); connection.close()
+        child.close()
+        if isinstance(connection, Duplex): connection.close(flush=False)
+        else: connection.close()

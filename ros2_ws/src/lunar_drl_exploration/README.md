@@ -811,6 +811,15 @@ Only unfinished/unconstructable actions cancel a reservation. Static scenes are
 sent once per episode; the learner keeps one active scene per slot and replay
 keeps independent reference-counted ownership. There is no scene archive.
 
+Both learner/collector and collector/worker connections have independent socket
+reader and writer owners with bounded mailboxes. Large scenes/completions and
+Actor publication can cross without blocking either protocol loop. Reliable
+messages retain FIFO order; only STATUS and identical pending DONE retries
+coalesce. Socket shutdown interrupts blocked I/O and both owners are joined.
+Before each Actor call, the collector consumes a bounded pass of currently
+readable controls, batching all granted ready slots and honoring queued STOP or
+BARRIER without waiting for slower environments.
+
 Curriculum engineering defaults use cumulative valid admissions: before20k all
 small; 20k–60k small/medium25/75%; thereafter small/medium/large15/25/60%.
 `curriculum_transition_boundaries` and `curriculum_mixtures` are configurable
