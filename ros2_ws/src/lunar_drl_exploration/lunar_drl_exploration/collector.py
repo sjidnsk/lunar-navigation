@@ -73,7 +73,7 @@ def collector_main(pipe, config_record, initial_state, *, domain_base=210,
                 try: slot['pipe'].send(dict(kind='STOP'))
                 except (EOFError, BrokenPipeError): pass
 
-    def recover(env_id, reason):
+    def recover(env_id, reason, stage=None):
         slot = slots[env_id]
         if slot['pending'] is not None:
             # A constructed transition is already retained in this process and
@@ -87,7 +87,8 @@ def collector_main(pipe, config_record, initial_state, *, domain_base=210,
         process.join(3)
         if process.is_alive(): process.kill(); process.join(3)
         slot['pipe'].close(flush=False); slot['closed'] = True
-        emit('RECOVERY', env=env_id, reason=reason, attempt=slot['failures'] + 1)
+        emit('RECOVERY', env=env_id, reason=reason, attempt=slot['failures'] + 1,
+            stage=stage or slot['mode'], reset_spec=slot.get('reset_spec'))
         if stopping: return
         if slot['failures'] >= recovery_limit:
             emit('FATAL', env=env_id, reason=f'infrastructure recovery exhausted: {reason}')
@@ -135,6 +136,7 @@ def collector_main(pipe, config_record, initial_state, *, domain_base=210,
                                 except (EOFError, BrokenPipeError): recover(env_id, 'worker died after completion')
                     elif kind == 'RESET':
                         if not stopping:
+                            slot['reset_spec'] = dict(command['spec'])
                             slot['pipe'].send(dict(kind='RESET', spec=command['spec']))
                             slot['mode'] = 'RESETTING'; slot['since'] = time.monotonic()
                     else:
@@ -168,12 +170,13 @@ def collector_main(pipe, config_record, initial_state, *, domain_base=210,
                             slot['observation'] = None
                             emit('DONE', **{k: v for k, v in message.items() if k != 'kind'})
                         elif kind in ('ABORTED', 'ERROR'):
+                            failed_stage = slot['mode']
                             # Retire exactly the reservation associated with this action.
                             if slot['mode'] == 'ACTIVE':
                                 emit('ABORTED', env=env_id, token=slot['token'], reason=message['reason'])
                             slot['mode'] = 'WAITING'
                             if not stopping and 'restart_reason' not in slot:
-                                recover(env_id, message['reason'])
+                                recover(env_id, message['reason'], stage=failed_stage)
                         elif kind == 'HELLO':
                             emit('WORKER_HELLO', **{k: v for k, v in message.items() if k != 'kind'})
                             if not stopping: emit('NEED_RESET', env=env_id)

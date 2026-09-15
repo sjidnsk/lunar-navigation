@@ -105,16 +105,17 @@ class RosExplorationEnv:
             initial_turn=self.plant.turn_rad;initial_time=self.plant.simulation_s
             # A finite initialization scan uses exactly the same native action,
             # public controller and real sensor path as a policy action.
+            self.observation,self.report=self.core.observe(snap,self.adapter.velocity)
             for quarter in range(4):
-                if len(snap.start_connections): break
+                if len(snap.start_connections) and self.report.available: break
                 goal=(self.plant.pose.x,self.plant.pose.y,pose.yaw+(quarter+1)*math.pi/2)
                 result=self._execute_goal(goal)
                 snap=self._snapshot()
                 if result.outcome!=0:
                     raise InputUnavailable(f'initialization {result.reason_code}')
+                self.observation,self.report=self.core.observe(snap,self.adapter.velocity)
             if not len(snap.start_connections):
                 raise InputUnavailable('bounded initialization produced no native start connection')
-            self.observation,self.report=self.core.observe(snap,self.adapter.velocity)
             if not self.report.available: raise InputUnavailable(self.report.reason_code)
             self.privileged=self._privileged()
             self.episode_metadata=dict(descriptor or {},episode_id=self.episode_id,

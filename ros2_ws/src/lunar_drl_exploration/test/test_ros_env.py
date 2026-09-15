@@ -121,3 +121,42 @@ def test_pacing_counts_computation_and_never_catches_up_overdue_steps(monkeypatc
     assert env._next_tick==clock.now
     clock.now+=.0007;env._pace()
     assert clock.sleeps[-1]==pytest.approx(.05/30-.0007)
+
+
+@pytest.mark.parametrize('ready_after,exhausted', [(2, False), (0, True), (5, False)])
+def test_initialization_requires_measured_report_within_existing_four_scans(monkeypatch, ready_after, exhausted):
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from lunar_drl_exploration.ros_env import RosExplorationEnv, InputUnavailable
+    from lunar_drl_exploration.config import TrainingConfig
+    from lunar_drl_exploration.decision import DecisionCore
+    from lunar_drl_exploration.contracts import Pose
+    from test_task_analysis import snapshot, task
+    config=TrainingConfig(); env=RosExplorationEnv(config,0)
+    terrain=TerrainGrid.from_heights(np.zeros((12,12),np.float32),1.,(0.,0.),config.platform)
+    pose=Pose(3.5,3.5,0.); snap=snapshot(np.ones((12,12),np.uint8),pose=pose)
+    assert len(snap.start_connections)>0
+    goals=[]; real_observe=DecisionCore.observe
+    def observe(core,*args):
+        obs,report=real_observe(core,*args)
+        return obs,replace(report,available=len(goals)>=ready_after,exhausted=exhausted,
+            reason_code='READY' if len(goals)>=ready_after else 'INPUT_UNAVAILABLE')
+    monkeypatch.setattr(DecisionCore,'observe',observe)
+    monkeypatch.setattr(env,'close',lambda:None)
+    monkeypatch.setattr(env,'_start_ros',lambda:setattr(env,'adapter',SimpleNamespace(ready=True,velocity=(0.,0.))))
+    monkeypatch.setattr(env,'_wait',lambda *a,**k:None)
+    monkeypatch.setattr(env,'_snapshot',lambda:snap)
+    def execute(goal):
+        goals.append(goal); env.plant.turn_rad+=math.pi/2; env.plant.simulation_s+=1
+        return SimpleNamespace(outcome=0,reason_code='GOAL_REACHED')
+    monkeypatch.setattr(env,'_execute_goal',execute)
+    if ready_after>4:
+        with pytest.raises(InputUnavailable,match='INPUT_UNAVAILABLE'):
+            env.reset_scene(terrain,pose,task(0,0,12,12))
+        assert len(goals)==4
+    else:
+        env.reset_scene(terrain,pose,task(0,0,12,12))
+        assert len(goals)==ready_after and env.report.available and env.report.exhausted==exhausted
+        assert env.episode_metadata['initialization_turn_rad']==pytest.approx(ready_after*math.pi/2)
+    assert all(g[:2]==(pose.x,pose.y) for g in goals)
+    assert [g[2] for g in goals]==[pose.yaw+(i+1)*math.pi/2 for i in range(len(goals))]

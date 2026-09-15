@@ -176,7 +176,10 @@ def test_collector_recovery_is_bounded_and_reports_every_unfinished_reservation(
             elif msg['kind'] == 'RESERVE': parent.send(dict(kind='GRANT', env=0, token=msg['token']))
             elif msg['kind'] == 'ABORTED':
                 aborts.append(msg['token']); reasons.append(msg['reason'])
-            elif msg['kind'] == 'RECOVERY': retries.append(msg['attempt'])
+            elif msg['kind'] == 'RECOVERY':
+                retries.append(msg['attempt'])
+                assert msg['reset_spec'] == dict(seed=seed, family='moon', extent=40, episode_budget=2)
+                assert msg['stage'] in ('ACTIVE', 'WAITING')
             elif msg['kind'] == 'FATAL': fatal = msg['reason']
             elif msg['kind'] == 'STOPPED': break
         process.join(5)

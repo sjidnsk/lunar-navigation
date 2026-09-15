@@ -1,6 +1,16 @@
 """Single learner owner of replay, exact update credit and continuation state."""
 
 
+def _merge_progress(status, progress):
+    """Never attach an earlier episode's completion fields to reset progress."""
+    if status.get('state') == 'RESETTING':
+        return dict(status)
+    if (progress.get('episode_id') is not None and status.get('episode_id') is not None
+            and progress['episode_id'] != status['episode_id']):
+        return dict(progress)
+    return dict(status, **progress)
+
+
 class AdmissionLedger:
     def __init__(self, replay, schedule):
         self.replay, self.schedule = replay, schedule
@@ -204,6 +214,8 @@ def run_training(config, *, resume=False, device='cuda', max_transitions=None,
                 if kind == 'NEED_RESET':
                     if not stopping:
                         spec = curriculum.next(env_id, schedule.transitions)
+                        env_status[env_id] = dict(state='RESETTING', seed=spec['seed'],
+                            family=spec['family'], extent_m=spec['extent'], budget=spec['episode_budget'])
                         connection.send(dict(kind='RESET', env=env_id, spec=spec))
                 elif kind == 'SCENE':
                     scenes = loads_transport(message['payload'])
@@ -281,7 +293,8 @@ def run_training(config, *, resume=False, device='cuda', max_transitions=None,
                     if message['torch_loaded']: raise RuntimeError('Torch imported in ROS worker')
                 elif kind == 'COLLECTOR_HELLO': observations['collector'] = message
                 elif kind == 'STATUS':
-                    progress = message['progress']; env_status.setdefault(env_id, {}).update(progress)
+                    progress = message['progress']
+                    env_status[env_id] = _merge_progress(env_status.get(env_id, {}), progress)
                     worker_pid = observations['workers'].get(str(env_id), {}).get('pid')
                     env_owners[env_id] = ([worker_pid] if worker_pid else []) + list(progress.get('owned_pids', []))
                 elif kind == 'EPISODE_END': metrics.append(dict(message, event='episode_end'))

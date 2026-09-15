@@ -365,3 +365,16 @@ def test_installed_console_success_exits_zero_and_python_api_keeps_result(tmp_pa
         '--output', str(cli_target)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert ActorPolicy.load(cli_target).actor is not None
+
+
+def test_episode_progress_does_not_mix_old_reward_and_new_reset_pose():
+    from lunar_drl_exploration.training import _merge_progress
+    old = dict(episode_id='old', state='READY', seed=7, reference_coverage=.8,
+        new_area_m2=48., reason_code='GOAL_REACHED', distance_m=30.)
+    reset_progress = dict(episode_id='new', state='READY', steps=0, known_area_m2=0., distance_m=0.)
+    fresh = _merge_progress(old, reset_progress)
+    assert fresh == reset_progress
+    assert old['new_area_m2'] == 48.
+    resetting = dict(state='RESETTING', seed=8, family='moon', extent_m=40., budget=8)
+    assert _merge_progress(resetting, dict(old, steps=8)) == resetting
+    assert _merge_progress(fresh, dict(episode_id='new', steps=1))['known_area_m2'] == 0.
