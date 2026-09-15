@@ -43,6 +43,7 @@
 7. 新构建写 `/home/kai/.cache/lunar-drl-redesign/jazzy/{build,install,log}`。已有 `/home/kai/.cache/lunar-drl-training/venv/bin/python` 可复用 PyTorch 依赖，但不能混用旧 native 扩展或 ROS overlay。
 8. 课程按有效采集数推进：0～19999小图；20000～59999以0.25小/0.75中混合；60000以后0.15小/0.25中/0.60大混合。每槽新回合再换课程，槽号奇偶保持月表/洞穴4+4。这些是可配置工程初值，不是收敛门槛。
 9. 参考计算可用紧凑布尔/位集合和分块原生循环；不为每条经验存全图。1km验证不对2500万格建立Python逐格对象或密集注意力。
+10. 仿真、参考、utility 共用站位格中心观测原点（floor世界坐标/分辨率，格边界归正侧格）及格角扫掠规则，yaw与控制实际位姿不量化。参考与plant合法移动共用真值M格/扫掠连通。首版虚拟传感器平移外参为零，非零值明确报不支持，不能静默丢弃；安装偏航仍支持。
 
 ## File ownership
 
@@ -81,7 +82,7 @@ EXPECT_EQ(evaluator->Evaluate(*raw_only, hit_floor).state,
 
 **Files:** Create `ros2_ws/src/lunar_planning_msgs/msg/PolicyMapTile.msg`, `srv/GetPolicyMap.srv`; modify its CMakeLists. Create ROS `include/lunar_incremental_navigation_ros/policy_map_exporter.hpp`, `src/policy_map_exporter.cpp`, `test/policy_map_exporter_test.cpp`; modify ROS CMakeLists and `src/incremental_navigation_node.cpp`. Create DRL package `package.xml`, `setup.py`, `setup.cfg`, `resource/lunar_drl_exploration`, Python `__init__.py`, `contracts.py`, `config.py`, `maps.py`; create `test/test_contracts_maps.py`.
 
-**Interfaces:** GetPolicyMap request has since_revision/minimum_map_stamp_ns; response ready/reason_code, epoch, processed stamp, raw/fine revisions, full_snapshot, geometry/profile, native start connections, local window and tile deltas. Tile arrays: states(uint8), intrinsic_states(uint8), observed(uint8 effective classification), costs(float32), elevation_m(float32). Unknown=0, FREE=1, BLOCKED=2. Exported observed requires finite center and known intrinsic state, never only M state.
+**Interfaces:** GetPolicyMap request has since_revision/minimum_map_stamp_ns; response ready/reason_code, epoch, processed stamp, raw/fine revisions, full_snapshot, geometry/profile, native start connections, local window, goal_position_tolerance_m/goal_yaw_tolerance_rad and tile deltas. Tile arrays: states(uint8), intrinsic_states(uint8), observed(uint8 effective classification), costs(float32), elevation_m(float32). Unknown=0, FREE=1, BLOCKED=2. Exported observed requires finite center and known intrinsic state, never only M state. Export实际导航容差，训练controller及访问历史读取该值对齐，不混用TCP分支或公共节点的不同默认值。
 
 Python frozen types:
 ```python
@@ -134,6 +135,7 @@ for pose in all_reachable_grid_poses:
 assert np.array_equal(reference.mask(), union & task_mask)
 ```
 - [ ] Implement native terrain/visibility loops releasing GIL and bounded buffers. Target native API has Evaluate, not old EvaluateStates. Native module name `lunar_drl_terrain_native` avoids accidental old extension loading. No Python second slope/footprint classifier.
+- [ ] Use the shared floor-to-cell center observation origin in sensor and reference; yaw remains actual and footprint/nativeM swept motion uses the same reachable-cell relation. Test fractional/negative coordinates and exact grid corners, comparing reference membership with every simulated observation. Reject nonzero virtual-sensor translation until its reference mapping is supported; mounting yaw does not change this rule.
 - [ ] Reference first computes native truth reachability including outside task; union visibility never shrinks with policy failures. Use native early-out checks, packed masks, chunked work and release temporary heights. Supply enumeration oracle on small maps to verify any optimized union algorithm rather than asserting equivalent by construction.
 - [ ] Adapt deterministic old scene geometry and plant-independent start terrain as needed, maintaining moon/cave, narrow passages/loops/disconnected chambers/external connections. Starts from legitimate main terrain, no map override. No asset download required. Retain source attribution for copied helpers.
 - [ ] Test 40/80/150/300m initialization timing/peak memory and one 1km initialization in isolation if available budget permits; report measured scalability, no ten-minute precondition or reference baseline admission. Commit `feat: unify effective observations and fixed exploration reference` with tests and native build evidence.
@@ -192,11 +194,11 @@ assert schedule.credit == 0
 - [ ] Implement memory/resource accounting based on owned process PSS plus system reserve, avoiding sum-RSS shared-memory false positives. Resource exception contains observed budget/reason, saves orderly; no new hardware admission prerequisite. Check available CPU/GPU/memory/disk live and put selected operational settings in run.json.
 - [ ] Checkpoint snapshot includes only finished transitions, does not wait for episodes; temporary file and old file counted in20GiB. Keep one resume, optional best only evaluated, one bounded metrics file and run.json. SIGINT requests consistent save after complete optimizer step; new env episodes on restore, no unfinished action stitching. Finish default config and commit `feat: bound exploration replay and support consistent training resume`.
 
-### Task 7: ROS 闭环、并行训练及部署入口
+### Task 7: ROS 导航控制环境及部署运行器
 
-**Files:** Create DRL `plant.py`, `ros_env.py`, `processes.py`, `worker.py`, `collector.py`, `training.py`, `runtime.py`, `cli.py`, `ros_messages.py`; configuration `config/drl_exploration.yaml`; scripts `scripts/drl/{build.sh,_run.sh,train.sh,evaluate.sh,infer.sh}`; update package entry points. Tests `test/test_plant.py`, `test/test_runtime.py`, `test/test_collector.py`, `test/test_ros_env.py`.
+**Files:** Create DRL `plant.py`, `ros_env.py`, `processes.py`, `runtime.py`, `ros_messages.py`; tests `test/test_plant.py`, `test/test_runtime.py`, `test/test_ros_env.py`.
 
-**Interfaces:** `RosExplorationEnv(config, env_id).reset(seed, family, extent) -> (obs, priv)`; `.step(action_index) -> Transition/result` executes frozen goal via NavigateToPose and returns final snapshot before any reset. `.close()` ordered owned-process cleanup. `InferenceRuntime` shares DecisionCore and Actor, owns START/PAUSE/RESUME/CANCEL exploration state only. `python -m lunar_drl_exploration.cli {train,evaluate,infer,export}` and script wrappers; train supports `--resume`, `--max-transitions`, `--probe`; evaluate seed/family/extent/budget/frozenactor; infer loads actor only and real readonly map/pose/TF/task input.
+**Interfaces:** `RosExplorationEnv(config, env_id).reset(seed, family, extent) -> (obs, priv)`; `.step(action_index) -> Transition/result` executes frozen goal via NavigateToPose and returns final snapshot before any reset. `.close()` ordered owned-process cleanup. `InferenceRuntime` shares DecisionCore and Actor, owns START/PAUSE/RESUME/CANCEL exploration state only. InferenceRuntime loads Actor only and real readonly map/pose/TF/task input; shared runtime and observation adapters are callable by Task8 CLI.
 
 - [ ] Test motion0.2cap, forward/reverse curved motion, in-place rotation, swept footprint collisions, actual distance/absolute angle; controller never duplicated. Stub only transport in unit tests, not in later ROS validation. Test one slow environment does not block other completed transitions; pause/backpressure retains inflight output; infrastructure restart excludes only unfinished action and does not silently stall a slot.
 ```python
@@ -206,15 +208,33 @@ assert transition.parts.turn_rad >= abs(wrapped_end_yaw_minus_start)
 assert not (transition.truncated and transition.terminated)
 ```
 - [ ] Adapt old read-only ROS message encoding/process ownership/plant code to new contracts. Launch target overlay navigation and public controller per isolated `/lunar_training/env_N` and separate DDS domains; no `/Car/T5` publisher. Use sim clock for plant/control/observation, monotonic wall time for pacing/watchdogs/save. Observation publishes only visible centers and optional measured stats to navigation map producer, then waits for processed map revision before next decision.
-- [ ] Collect8async pipes, CPU ready-batch inference, a separate GPU learner process, bounded messages/credit and actor update publication every16updates. CPU learner work cannot stop 30min timer/status. Finish valid navigation failures as transitions; infrastructure recovery has bounded retries and visible status, collision never fake success/zero terminal. No heuristic zero-gain reset.
-- [ ] Implement course mixture, small/mid/large budgets, rewardparts, progressbar+perenv statuses+actualRTF+sample/update rates+credit+actorsave countdown. Explicit frozen evaluation uses no train replay; score80/99/exhaustion/latepath. Export one actor with schema+required preprocessing config; inference requires no scene/critic/reference and preserves pause history. Existing traditional exploration interfaces unchanged.
-- [ ] Scripts resolve root/ROS cache/venv without old overlays; build sourceROS before strict unset checks. CLI help plus transport/unit tests pass. Commit `feat: connect graph exploration training and inference to the ROS control loop`.
+- [ ] Finish valid navigation failures as transitions with measured motion and final snapshot; collision has explicit non-success result, never fake completion. Implement inference task START/PAUSE/RESUME/CANCEL, cancel-and-stop before pause, preserve measured map/history, resume fresh decision. Status explicitly omits unavailable AE rather than misuse traditional coverage_ratio.
+- [ ] Run transport/plant/runtime tests and one isolated navigation goal against the new overlay. Commit `feat: execute graph exploration goals through native navigation and control`.
 
-### Task 8: 闭环验证、修复和操作文档
+### Task 8: 异步采集、训练调度及可运行命令
+
+**Files:** Create DRL `worker.py`, `collector.py`, `training.py`, `cli.py`, `evaluation.py`; configuration `config/drl_exploration.yaml`; scripts `scripts/drl/{build.sh,_run.sh,train.sh,evaluate.sh,infer.sh}`; modify `setup.py` entry points; tests `test/test_collector.py`, `test/test_training_cli.py`.
+
+**Interfaces:** Consume RosExplorationEnv/InferenceRuntime, Actor/SACLearner, ReplayBuffer/UpdateSchedule/CheckpointManager. `python -m lunar_drl_exploration.cli {train,evaluate,infer,export}` and script wrappers. Train has --resume, --max-transitions and --probe; evaluate has seed/family/extent/budget/frozen-actor parameters; export emits one actor schema/config/weights file. Learner process owns replay, admitted-transition count and update credit; collector owns ROS workers and acknowledges admission before treating a finished message as collected.
+
+- [ ] Write tests for independent slow/fast workers, bounded inflight transitions under backpressure, accepted-transition/update-credit equality across save barrier, no warmup debt, actor version publication and resumed episode separation. Verify CLI main config remains8env/30x/1024warmup/64batch, probe overrides are explicit.
+```python
+collector.receive(fast_worker_done)
+assert collector.ready_to_dispatch(fast_worker_id)
+assert not collector.waiting_for_all_environments
+saved = learner.snapshot_at_barrier()
+assert saved.counters.transitions == saved.schedule.admitted_transitions
+```
+- [ ] Implement8async pipes, CPU ready-batch actor inference, separate GPU learner and bounded messages. Finished messages are retained until learner admission acknowledgment. Learner owns credit and replay consistently; collector pauses dispatch at backpressure while inflight actions finish. Every16complete updates publish CPU Actor weights for the next decisions. Bounded lifecycle retries publicly identify env/reason; exclude only unfinished infrastructure-damaged actions, no silent permanent paused or zero-gain reset.
+- [ ] Implement curriculum/size budgets, fixed rewardparts, progressbar+perenv scenes/reasons/actualRTF and sample/update rates/credit/actor/save countdown. Periodic snapshot captures admitted transitions at a learner barrier after a complete optimizer update, does not wait for long episodes; graceful exit drains already finished transitions and cancels unfinished goals before final save.
+- [ ] Implement frozen evaluation with no train replay, metrics80/99/exhaustion/latepath and actor export. Inference uses Task7 runtime and Task2 measured contracts, no scene/critic/reference import requirement. Scripts resolve root/ROS cache/venv without old overlays; sourceROS before strict unset checks, build affected dependencies including controller/exploration messages.
+- [ ] Run CLI help, collector/recovery tests and a short real ROS sampling command; commit `feat: run asynchronous graph exploration training and frozen evaluation`.
+
+### Task 9: 闭环验证、修复和操作文档
 
 **Files:** Create `docs/validation/2026-09-15-drl-exploration-redesign-implementation.md`, new appropriate integration tests under DRL test; update `README.md`, `docs/操作指令.md`, spec implementation status and review doc. Only amend implementation files when evidence reveals a defect within this design.
 
-**Interfaces:** scripts and CLI from Task7 must be runnable from this target worktree. Short probe executes real native nav/public controller/plant, categorical Actor, replay, at least one64sample GPU update, save, resume and actor-only load. It does not claim trained policy success or convergence.
+**Interfaces:** scripts and CLI from Task8 must be runnable from this target worktree. Short probe executes real native nav/public controller/plant, categorical Actor, replay, at least one64sample GPU update, save, resume and actor-only load. It does not claim trained policy success or convergence.
 
 - [ ] Run `python3 -m pytest` for affected core Python/controller/contracts tests and torch-venv package tests. Rebuild affected ROS packages and CTests sequentially including existing contracts; note exact commands/results and skips. Run `git diff --check` and explicit UTF-8 doc reads.
 - [ ] Execute isolated one-env translational goal plus in-place yaw: require PLAN_FOUND/has_reference and GOAL_REACHED, verify one cmd publisher, speed<=0.2, measured L/Θ and along-path observations. Verify static obstacle footprint/nav/collision agreement; no shortcuts via direct endpoint teleport.
