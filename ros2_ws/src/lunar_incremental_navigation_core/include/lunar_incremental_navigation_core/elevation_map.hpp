@@ -13,10 +13,25 @@
 
 namespace lunar::incremental_navigation {
 
+// Platform-neutral native 3x3 measurements, never a traversability label.
+struct LocalTerrainMeasurements final {
+  bool center_known{};
+  bool neighborhood_complete{};
+  double slope_rad{};
+  double relief_m{};
+  double positive_rise_m{};
+
+  auto operator<=>(const LocalTerrainMeasurements&) const = default;
+};
+
 struct ElevationEvidence final {
   GridGeometry geometry;
   std::span<const float> elevation_m;
   RigidTransform map_from_source;
+  // Empty preserves height-only input. Otherwise one entry per source cell;
+  // center_known=false means absent. Scalars require an upright quarter-turn
+  // transform and the same resolution and aligned lattice as the canonical map.
+  std::span<const LocalTerrainMeasurements> terrain_measurements{};
 };
 
 struct ElevationRange final {
@@ -85,6 +100,8 @@ class ElevationRangeView {
   [[nodiscard]] virtual const SparseGridGeometry& geometry() const noexcept = 0;
   [[nodiscard]] virtual std::optional<ElevationRange> ElevationRangeAt(
       GridIndex index) const noexcept = 0;
+  [[nodiscard]] virtual std::optional<LocalTerrainMeasurements>
+  TerrainMeasurementsAt(GridIndex) const noexcept { return std::nullopt; }
 };
 
 class ElevationSnapshot final : public ElevationRangeView {
@@ -95,6 +112,8 @@ class ElevationSnapshot final : public ElevationRangeView {
   [[nodiscard]] const SparseGridGeometry& geometry() const noexcept override;
   [[nodiscard]] std::uint64_t raw_elevation_revision() const noexcept;
   [[nodiscard]] std::optional<ElevationRange> ElevationRangeAt(
+      GridIndex index) const noexcept override;
+  [[nodiscard]] std::optional<LocalTerrainMeasurements> TerrainMeasurementsAt(
       GridIndex index) const noexcept override;
   [[nodiscard]] std::optional<ElevationRange> ElevationRangeAtWorld(
       double x_m, double y_m) const noexcept;

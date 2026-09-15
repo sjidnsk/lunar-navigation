@@ -478,5 +478,59 @@ TEST(PersistentElevationMap, ReportsTileAllocationAndCopyCounters) {
   EXPECT_GT(counters.estimated_bytes, 256U * 256U * sizeof(float));
 }
 
+
+TEST(PersistentElevationMap, CenterStatisticsRevisionDuplicateAndSnapshotIsolation) {
+  PersistentElevationMap map;
+  const auto geometry = Geometry(1, 1, 1.0);
+  std::vector<float> heights{0};
+  std::vector<LocalTerrainMeasurements> stats{{true, true, 0.2, 0.3, 0.1}};
+  const auto apply = [&] { return map.Apply({.geometry = geometry,
+    .elevation_m = heights, .map_from_source = MapFromSource(), .terrain_measurements = stats}); };
+  ASSERT_EQ(apply().status, ElevationUpdateResult::Status::kApplied);
+  const auto before = map.Snapshot();
+  const auto measured_bytes = map.Counters().estimated_bytes;
+  EXPECT_EQ(apply().status, ElevationUpdateResult::Status::kDuplicate);
+  stats[0].relief_m = 0.5;
+  auto changed = apply();
+  EXPECT_EQ(changed.status, ElevationUpdateResult::Status::kApplied);
+  EXPECT_EQ(changed.updated_cells, 1U);
+  EXPECT_EQ(changed.raw_elevation_revision, 2U);
+  EXPECT_EQ(map.Snapshot()->changed_cells().size(), 1U);
+  ASSERT_TRUE(before->TerrainMeasurementsAt({0, 0}));
+  EXPECT_DOUBLE_EQ(before->TerrainMeasurementsAt({0, 0})->relief_m, 0.3);
+  EXPECT_DOUBLE_EQ(map.Snapshot()->TerrainMeasurementsAt({0, 0})->relief_m, 0.5);
+  // Incomplete recomputation and identical height-only evidence cannot erase a valid measurement.
+  stats[0] = {true, false, 0, 0, 0};
+  EXPECT_EQ(apply().status, ElevationUpdateResult::Status::kDuplicate);
+  EXPECT_EQ(Apply(map, geometry, heights).status, ElevationUpdateResult::Status::kDuplicate);
+  EXPECT_DOUBLE_EQ(map.Snapshot()->TerrainMeasurementsAt({0, 0})->relief_m, 0.5);
+  heights[0] = 1;
+  EXPECT_EQ(Apply(map, geometry, heights).status, ElevationUpdateResult::Status::kApplied);
+  EXPECT_EQ(map.Snapshot()->TerrainMeasurementsAt({0, 0}), std::nullopt);
+  EXPECT_LT(map.Counters().estimated_bytes, measured_bytes);
+  EXPECT_DOUBLE_EQ(before->TerrainMeasurementsAt({0, 0})->relief_m, 0.3);
+}
+
+TEST(PersistentElevationMap, ScalarMeasurementsRejectUnsupportedGeometryAtomically) {
+  const auto geometry = Geometry(1, 1, 1.0);
+  const std::vector<float> heights{0};
+  std::vector<LocalTerrainMeasurements> stats{{true, true, 0.2, 0.3, 0.1}};
+  PersistentElevationMap map;
+  ASSERT_EQ(Apply(map, geometry, heights).status, ElevationUpdateResult::Status::kApplied);
+  auto evidence = ElevationEvidence{.geometry = geometry, .elevation_m = heights,
+      .map_from_source = MapFromSource(), .terrain_measurements = stats};
+  evidence.map_from_source.rotation = {.w = std::cos(0.2), .x = std::sin(0.2)};
+  EXPECT_EQ(map.Apply(evidence).status, ElevationUpdateResult::Status::kRejected);
+  evidence.map_from_source = MapFromSource({}, 0.3);
+  EXPECT_EQ(map.Apply(evidence).status, ElevationUpdateResult::Status::kRejected);
+  evidence.map_from_source = MapFromSource({.x = 0.25});
+  EXPECT_EQ(map.Apply(evidence).status, ElevationUpdateResult::Status::kRejected);
+  evidence.map_from_source = MapFromSource();
+  stats[0].relief_m = -1;
+  EXPECT_EQ(map.Apply(evidence).status, ElevationUpdateResult::Status::kRejected);
+  EXPECT_EQ(map.Snapshot()->raw_elevation_revision(), 1U);
+  EXPECT_EQ(map.Snapshot()->TerrainMeasurementsAt({0, 0}), std::nullopt);
+}
+
 }  // namespace
 }  // namespace lunar::incremental_navigation

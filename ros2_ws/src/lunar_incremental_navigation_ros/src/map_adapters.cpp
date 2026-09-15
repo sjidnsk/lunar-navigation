@@ -1,6 +1,7 @@
 #include "lunar_incremental_navigation_ros/map_adapters.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -142,6 +143,58 @@ struct LayerLayout final {
   if (!elevation) {
     return Invalid<OwnedElevationEvidence>();
   }
+  constexpr std::array<const char*, 4> terrain_layers{
+      "terrain_slope", "terrain_relief", "terrain_positive_rise", "terrain_complete"};
+  std::array<std::optional<std::vector<float>>, 4> terrain;
+  std::size_t terrain_count = 0U;
+  for (std::size_t i = 0; i < terrain_layers.size(); ++i) {
+    const auto layer = std::find(message.layers.begin(), message.layers.end(), terrain_layers[i]);
+    if (layer == message.layers.end()) continue;
+    if (std::count(message.layers.begin(), message.layers.end(), terrain_layers[i]) != 1) {
+      return Invalid<OwnedElevationEvidence>();
+    }
+    const auto index = static_cast<std::size_t>(std::distance(message.layers.begin(), layer));
+    const auto terrain_layout = ParseLayout(message.data[index], *width, *height);
+    if (!terrain_layout) return Invalid<OwnedElevationEvidence>();
+    terrain[i] = UnwrapLayer(message.data[index], *terrain_layout, *width, *height,
+                            message.outer_start_index, message.inner_start_index);
+    if (!terrain[i]) return Invalid<OwnedElevationEvidence>();
+    ++terrain_count;
+  }
+  std::vector<lunar::incremental_navigation::LocalTerrainMeasurements> measurements;
+  if (terrain_count != 0U) {
+    if (terrain_count != terrain_layers.size()) return Invalid<OwnedElevationEvidence>();
+    // Native 3x3 scalar neighborhoods are preserved by upright quarter turns.
+    const auto q = map_from_source.rotation;
+    constexpr double tolerance = 1.0e-6;
+    const double axis_x = 1.0 - 2.0 * q.z * q.z;
+    const double axis_y = 2.0 * q.w * q.z;
+    if (std::abs(q.x) > tolerance || std::abs(q.y) > tolerance ||
+        std::abs(axis_x - std::round(axis_x)) > tolerance ||
+        std::abs(axis_y - std::round(axis_y)) > tolerance) {
+      return Invalid<OwnedElevationEvidence>();
+    }
+    measurements.resize(elevation->size());
+    for (std::size_t i = 0; i < measurements.size(); ++i) {
+      const double slope = (*terrain[0])[i];
+      const double relief = (*terrain[1])[i];
+      const double rise = (*terrain[2])[i];
+      const double complete = (*terrain[3])[i];
+      // Four NaNs denote absent optional evidence for this cell. Finite height
+      // may still flow through the ordinary height-only fallback.
+      if (std::isnan(slope) && std::isnan(relief) &&
+          std::isnan(rise) && std::isnan(complete)) continue;
+      if (!Finite((*elevation)[i]) || !Finite(slope) || slope < 0.0 ||
+          !Finite(relief) || relief < 0.0 || !Finite(rise) || rise < 0.0 ||
+          (complete != 0.0 && complete != 1.0)) {
+        return Invalid<OwnedElevationEvidence>();
+      }
+      measurements[i] = {.center_known = true,
+                         .neighborhood_complete = complete == 1.0,
+                         .slope_rad = slope, .relief_m = relief,
+                         .positive_rise_m = rise};
+    }
+  }
   map_from_source.stamp = {};
   return {.value = OwnedElevationEvidence{
               .geometry = lunar::incremental_navigation::GridGeometry{
@@ -156,7 +209,8 @@ struct LayerLayout final {
                            message.info.length_y / 2.0,
                       .z = message.info.pose.position.z}},
               .elevation_m = std::move(*elevation),
-              .map_from_source = std::move(map_from_source)},
+              .map_from_source = std::move(map_from_source),
+              .terrain_measurements = std::move(measurements)},
           .reason_code = {}};
 }
 
@@ -238,7 +292,8 @@ lunar::incremental_navigation::ElevationEvidence OwnedElevationEvidence::View()
     const noexcept {
   return {.geometry = geometry,
           .elevation_m = elevation_m,
-          .map_from_source = map_from_source};
+          .map_from_source = map_from_source,
+          .terrain_measurements = terrain_measurements};
 }
 
 AdapterResult<OwnedElevationEvidence> AdaptLocalElevation(

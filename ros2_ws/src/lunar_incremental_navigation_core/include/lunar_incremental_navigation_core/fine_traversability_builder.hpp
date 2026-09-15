@@ -12,6 +12,11 @@
 
 namespace lunar::incremental_navigation {
 
+// Uses optional center evidence when available, otherwise the native 3x3
+// elevation neighborhood. Thresholds remain in PlatformElevationEvaluator.
+[[nodiscard]] LocalTerrainMeasurements MeasureLocalTerrain(
+    const ElevationRangeView& elevation, GridIndex index);
+
 enum class IntrinsicCellState : std::uint8_t {
   kUnknown,
   kFree,

@@ -17,14 +17,6 @@
 namespace lunar::incremental_navigation {
 namespace {
 
-struct LocalElevationMeasurements final {
-  bool center_known{};
-  bool neighborhood_complete{};
-  double slope_rad{};
-  double relief_m{};
-  double positive_rise_m{};
-};
-
 [[nodiscard]] bool FiniteNonnegative(const double value) noexcept {
   return std::isfinite(value) && value >= 0.0;
 }
@@ -155,8 +147,101 @@ struct LocalElevationMeasurements final {
   return std::isfinite(sum) ? sum : kLargestFinite;
 }
 
-[[nodiscard]] LocalElevationMeasurements MeasureLocalElevation(
+class WheelElevationEvaluator final : public PlatformElevationEvaluator {
+ public:
+  explicit WheelElevationEvaluator(WheeledCapability capability)
+      : capability_(std::move(capability)) {
+    if (!FiniteNonnegative(capability_.maximum_slope_rad) ||
+        !FiniteNonnegative(capability_.maximum_local_obstacle_relief_m) ||
+        !FiniteNonnegative(capability_.minimum_underbody_clearance_m)) {
+      throw std::invalid_argument(
+          "wheel elevation limits must be finite and nonnegative");
+    }
+  }
+
+  [[nodiscard]] IntrinsicTraversalEvaluation Evaluate(
+      const ElevationRangeView& elevation,
+      const GridIndex index) const override {
+    const LocalTerrainMeasurements measured =
+        MeasureLocalTerrain(elevation, index);
+    if (!measured.center_known) {
+      return {};
+    }
+    const bool exceeds_physical_limit =
+        measured.slope_rad > capability_.maximum_slope_rad ||
+        measured.relief_m > capability_.maximum_local_obstacle_relief_m ||
+        measured.positive_rise_m >
+            capability_.minimum_underbody_clearance_m;
+    if (exceeds_physical_limit) {
+      return IntrinsicTraversalEvaluation{
+          .state = IntrinsicCellState::kBlocked,
+          .slope_rad = measured.slope_rad,
+          .relief_m = measured.relief_m,
+      };
+    }
+    return IntrinsicTraversalEvaluation{
+        .state = measured.neighborhood_complete
+                     ? IntrinsicCellState::kFree
+                     : IntrinsicCellState::kUnknown,
+        .slope_rad = measured.slope_rad,
+        .relief_m = measured.relief_m,
+    };
+  }
+
+ private:
+  WheeledCapability capability_;
+};
+
+class LeggedElevationEvaluator final : public PlatformElevationEvaluator {
+ public:
+  explicit LeggedElevationEvaluator(LeggedCapability capability)
+      : capability_(std::move(capability)) {
+    if (!FiniteNonnegative(capability_.maximum_slope_rad) ||
+        !FiniteNonnegative(capability_.maximum_step_height_m) ||
+        !FiniteNonnegative(capability_.maximum_gap_width_m)) {
+      throw std::invalid_argument(
+          "legged elevation limits must be finite and nonnegative");
+    }
+  }
+
+  [[nodiscard]] IntrinsicTraversalEvaluation Evaluate(
+      const ElevationRangeView& elevation,
+      const GridIndex index) const override {
+    const LocalTerrainMeasurements measured =
+        MeasureLocalTerrain(elevation, index);
+    if (!measured.center_known) {
+      return {};
+    }
+    const bool exceeds_physical_limit =
+        measured.slope_rad > capability_.maximum_slope_rad ||
+        measured.relief_m > capability_.maximum_step_height_m;
+    if (exceeds_physical_limit) {
+      return IntrinsicTraversalEvaluation{
+          .state = IntrinsicCellState::kBlocked,
+          .slope_rad = measured.slope_rad,
+          .relief_m = measured.relief_m,
+      };
+    }
+    return IntrinsicTraversalEvaluation{
+        .state = measured.neighborhood_complete
+                     ? IntrinsicCellState::kFree
+                     : IntrinsicCellState::kUnknown,
+        .slope_rad = measured.slope_rad,
+        .relief_m = measured.relief_m,
+    };
+  }
+
+ private:
+  LeggedCapability capability_;
+};
+
+}  // namespace
+
+[[nodiscard]] LocalTerrainMeasurements MeasureLocalTerrain(
     const ElevationRangeView& elevation, const GridIndex center) {
+  if (const auto measured = elevation.TerrainMeasurementsAt(center)) {
+    return *measured;
+  }
   const std::optional<ElevationRange> center_range =
       elevation.ElevationRangeAt(center);
   if (!center_range) {
@@ -203,7 +288,7 @@ struct LocalElevationMeasurements final {
           static_cast<double>(neighbor->max_m) - center_mid);
     }
   }
-  return LocalElevationMeasurements{
+  return LocalTerrainMeasurements{
       .center_known = true,
       .neighborhood_complete = complete,
       .slope_rad = maximum_slope,
@@ -211,96 +296,6 @@ struct LocalElevationMeasurements final {
       .positive_rise_m = std::max(0.0, maximum_positive_rise),
   };
 }
-
-class WheelElevationEvaluator final : public PlatformElevationEvaluator {
- public:
-  explicit WheelElevationEvaluator(WheeledCapability capability)
-      : capability_(std::move(capability)) {
-    if (!FiniteNonnegative(capability_.maximum_slope_rad) ||
-        !FiniteNonnegative(capability_.maximum_local_obstacle_relief_m) ||
-        !FiniteNonnegative(capability_.minimum_underbody_clearance_m)) {
-      throw std::invalid_argument(
-          "wheel elevation limits must be finite and nonnegative");
-    }
-  }
-
-  [[nodiscard]] IntrinsicTraversalEvaluation Evaluate(
-      const ElevationRangeView& elevation,
-      const GridIndex index) const override {
-    const LocalElevationMeasurements measured =
-        MeasureLocalElevation(elevation, index);
-    if (!measured.center_known) {
-      return {};
-    }
-    const bool exceeds_physical_limit =
-        measured.slope_rad > capability_.maximum_slope_rad ||
-        measured.relief_m > capability_.maximum_local_obstacle_relief_m ||
-        measured.positive_rise_m >
-            capability_.minimum_underbody_clearance_m;
-    if (exceeds_physical_limit) {
-      return IntrinsicTraversalEvaluation{
-          .state = IntrinsicCellState::kBlocked,
-          .slope_rad = measured.slope_rad,
-          .relief_m = measured.relief_m,
-      };
-    }
-    return IntrinsicTraversalEvaluation{
-        .state = measured.neighborhood_complete
-                     ? IntrinsicCellState::kFree
-                     : IntrinsicCellState::kUnknown,
-        .slope_rad = measured.slope_rad,
-        .relief_m = measured.relief_m,
-    };
-  }
-
- private:
-  WheeledCapability capability_;
-};
-
-class LeggedElevationEvaluator final : public PlatformElevationEvaluator {
- public:
-  explicit LeggedElevationEvaluator(LeggedCapability capability)
-      : capability_(std::move(capability)) {
-    if (!FiniteNonnegative(capability_.maximum_slope_rad) ||
-        !FiniteNonnegative(capability_.maximum_step_height_m) ||
-        !FiniteNonnegative(capability_.maximum_gap_width_m)) {
-      throw std::invalid_argument(
-          "legged elevation limits must be finite and nonnegative");
-    }
-  }
-
-  [[nodiscard]] IntrinsicTraversalEvaluation Evaluate(
-      const ElevationRangeView& elevation,
-      const GridIndex index) const override {
-    const LocalElevationMeasurements measured =
-        MeasureLocalElevation(elevation, index);
-    if (!measured.center_known) {
-      return {};
-    }
-    const bool exceeds_physical_limit =
-        measured.slope_rad > capability_.maximum_slope_rad ||
-        measured.relief_m > capability_.maximum_step_height_m;
-    if (exceeds_physical_limit) {
-      return IntrinsicTraversalEvaluation{
-          .state = IntrinsicCellState::kBlocked,
-          .slope_rad = measured.slope_rad,
-          .relief_m = measured.relief_m,
-      };
-    }
-    return IntrinsicTraversalEvaluation{
-        .state = measured.neighborhood_complete
-                     ? IntrinsicCellState::kFree
-                     : IntrinsicCellState::kUnknown,
-        .slope_rad = measured.slope_rad,
-        .relief_m = measured.relief_m,
-    };
-  }
-
- private:
-  LeggedCapability capability_;
-};
-
-}  // namespace
 
 std::unique_ptr<const PlatformElevationEvaluator>
 MakePlatformElevationEvaluator(const PlatformCapability& capability) {

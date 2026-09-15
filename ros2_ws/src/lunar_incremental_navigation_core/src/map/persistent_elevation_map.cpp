@@ -17,6 +17,16 @@ namespace {
 
 struct ElevationTile final {
   std::array<ElevationRange, kGridTileCellCount> values;
+  // Allocate one contiguous measurement block only on measured tiles.
+  using MeasurementArray = std::array<LocalTerrainMeasurements, kGridTileCellCount>;
+  std::unique_ptr<MeasurementArray> measurements;
+  std::size_t measured_cells{};
+
+  ElevationTile(const ElevationTile& other)
+      : values(other.values),
+        measurements(other.measurements
+            ? std::make_unique<MeasurementArray>(*other.measurements) : nullptr),
+        measured_cells(other.measured_cells) {}
 
   ElevationTile() {
     const float unknown = std::numeric_limits<float>::quiet_NaN();
@@ -94,6 +104,47 @@ struct ElevationLineage final {};
               .z = rotated.z + transform.translation_m.z};
 }
 
+// Scalar native 3x3 measurements survive only upright lattice isometries.
+[[nodiscard]] bool MeasurementsAligned(const ElevationEvidence& evidence,
+                                       const Vec3 canonical_origin) noexcept {
+  if (evidence.terrain_measurements.empty()) return true;
+  if (evidence.terrain_measurements.size() != evidence.elevation_m.size()) {
+    return false;
+  }
+  constexpr double tolerance = 1.0e-6;
+  const auto q = Normalized(evidence.map_from_source.rotation);
+  if (std::abs(q.x) > tolerance || std::abs(q.y) > tolerance) return false;
+  const auto axis = Rotate(q, {.x = 1.0});
+  if (std::abs(axis.x - std::round(axis.x)) > tolerance ||
+      std::abs(axis.y - std::round(axis.y)) > tolerance) return false;
+  const auto origin =
+      TransformPoint(evidence.map_from_source, evidence.geometry.origin_m);
+  const double resolution = evidence.geometry.resolution_m;
+  for (const double offset : {(origin.x - canonical_origin.x) / resolution,
+                              (origin.y - canonical_origin.y) / resolution}) {
+    if (!Finite(offset) || std::abs(offset - std::round(offset)) > tolerance) {
+      return false;
+    }
+  }
+  for (std::size_t i = 0; i < evidence.terrain_measurements.size(); ++i) {
+    const auto& value = evidence.terrain_measurements[i];
+    if (!value.center_known) {
+      if (value.neighborhood_complete) return false;
+      continue;
+    }
+    if (!std::isfinite(evidence.elevation_m[i]) ||
+        !Finite(value.slope_rad) || value.slope_rad < 0.0 ||
+        !Finite(value.relief_m) || value.relief_m < 0.0 ||
+        !Finite(value.positive_rise_m) || value.positive_rise_m < 0.0) return false;
+  }
+  return true;
+}
+
+struct ProjectedCell final {
+  ElevationRange elevation;
+  std::optional<LocalTerrainMeasurements> measurements;
+};
+
 [[nodiscard]] std::optional<std::int64_t> CellCoordinate(
     const double world_m, const double origin_m,
     const double resolution_m) noexcept {
@@ -148,7 +199,12 @@ struct ElevationSnapshot::Impl final {
   }
 
   [[nodiscard]] std::size_t EstimatedBytes() const noexcept {
-    return tiles.size() * sizeof(ElevationTile);
+    std::size_t bytes = tiles.size() * sizeof(ElevationTile);
+    for (const auto& [index, tile] : tiles) {
+      static_cast<void>(index);
+      if (tile->measurements) bytes += sizeof(ElevationTile::MeasurementArray);
+    }
+    return bytes;
   }
 };
 
@@ -284,6 +340,16 @@ std::optional<ElevationRange> ElevationSnapshot::ElevationRangeAtWorld(
                 : std::nullopt;
 }
 
+std::optional<LocalTerrainMeasurements> ElevationSnapshot::TerrainMeasurementsAt(
+    const GridIndex index) const noexcept {
+  if (!impl_) return std::nullopt;
+  const auto tile = impl_->tiles.find(TileForCell(index));
+  if (tile == impl_->tiles.end()) return std::nullopt;
+  if (!tile->second->measurements) return std::nullopt;
+  const auto& measured = (*tile->second->measurements)[TileCellOffset(index)];
+  return measured.center_known ? std::optional(measured) : std::nullopt;
+}
+
 std::optional<float> ElevationSnapshot::ElevationAt(
     const GridIndex index) const noexcept {
   const auto range = ElevationRangeAt(index);
@@ -391,7 +457,9 @@ ElevationUpdateResult PersistentElevationMap::Apply(
     canonical_origin_m = canonical_origin;
   }
 
-  std::map<GridIndex, ElevationRange> projected;
+  if (!MeasurementsAligned(evidence, canonical_origin_m)) return reject();
+
+  std::map<GridIndex, ProjectedCell> projected;
   for (std::size_t source_y = 0U; source_y < evidence.geometry.height;
        ++source_y) {
     for (std::size_t source_x = 0U; source_x < evidence.geometry.width;
@@ -425,23 +493,36 @@ ElevationUpdateResult PersistentElevationMap::Apply(
           static_cast<float>(canonical_point.z);
       const GridIndex target{.x = *target_x, .y = *target_y};
       const auto [found, inserted] = projected.try_emplace(
-          target, ElevationRange{.min_m = canonical_elevation_m,
-                                 .max_m = canonical_elevation_m});
+          target, ProjectedCell{.elevation = {.min_m = canonical_elevation_m,
+                                              .max_m = canonical_elevation_m}});
+      if (!evidence.terrain_measurements.empty() &&
+          evidence.terrain_measurements[offset].center_known) {
+        found->second.measurements = evidence.terrain_measurements[offset];
+      }
       if (!inserted) {
-        found->second.min_m =
-            std::min(found->second.min_m, canonical_elevation_m);
-        found->second.max_m =
-            std::max(found->second.max_m, canonical_elevation_m);
+        found->second.elevation.min_m =
+            std::min(found->second.elevation.min_m, canonical_elevation_m);
+        found->second.elevation.max_m =
+            std::max(found->second.elevation.max_m, canonical_elevation_m);
       }
     }
   }
 
-  std::map<TileIndex, std::vector<std::pair<GridIndex, ElevationRange>>> changed;
-  for (const auto& [index, elevation_range] : projected) {
+  std::map<TileIndex, std::vector<std::pair<GridIndex, ProjectedCell>>> changed;
+  for (auto& [index, cell] : projected) {
     const std::optional<ElevationRange> old_value =
         impl_->state ? impl_->state->ElevationRangeAt(index) : std::nullopt;
-    if (!old_value || *old_value != elevation_range) {
-      changed[TileForCell(index)].emplace_back(index, elevation_range);
+    const auto old_measurements = impl_->snapshot
+        ? impl_->snapshot->TerrainMeasurementsAt(index) : std::nullopt;
+    const bool height_changed = !old_value || *old_value != cell.elevation;
+    // Identical heights or an incomplete recomputation do not erase prior
+    // center evidence. A genuinely changed height invalidates its old stats.
+    if (!height_changed && old_measurements &&
+        (!cell.measurements || !cell.measurements->neighborhood_complete)) {
+      cell.measurements = old_measurements;
+    }
+    if (height_changed || old_measurements != cell.measurements) {
+      changed[TileForCell(index)].emplace_back(index, cell);
     }
   }
 
@@ -483,8 +564,22 @@ ElevationUpdateResult PersistentElevationMap::Apply(
       mutable_tile = std::make_shared<ElevationTile>(*old_tile->second);
       ++impl_->counters.tile_copies;
     }
-    for (const auto& [index, elevation_range] : values) {
-      mutable_tile->values[TileCellOffset(index)] = elevation_range;
+    for (const auto& [index, cell] : values) {
+      const auto offset = TileCellOffset(index);
+      mutable_tile->values[offset] = cell.elevation;
+      if (cell.measurements) {
+        if (!mutable_tile->measurements) {
+          mutable_tile->measurements =
+              std::make_unique<ElevationTile::MeasurementArray>();
+        }
+        auto& measured = (*mutable_tile->measurements)[offset];
+        if (!measured.center_known) ++mutable_tile->measured_cells;
+        measured = *cell.measurements;
+      } else if (mutable_tile->measurements) {
+        auto& measured = (*mutable_tile->measurements)[offset];
+        if (measured.center_known) --mutable_tile->measured_cells;
+        measured = {};
+      }
       next->changed_cells.push_back(index);
       min_inclusive.x = std::min(min_inclusive.x, index.x);
       min_inclusive.y = std::min(min_inclusive.y, index.y);
@@ -492,6 +587,7 @@ ElevationUpdateResult PersistentElevationMap::Apply(
       max_exclusive.y = std::max(max_exclusive.y, index.y + 1);
       ++updated_cells;
     }
+    if (mutable_tile->measured_cells == 0U) mutable_tile->measurements.reset();
     next->tiles[tile_index] = std::move(mutable_tile);
     dirty_tiles.push_back(tile_index);
   }
