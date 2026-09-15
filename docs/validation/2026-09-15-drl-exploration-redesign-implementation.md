@@ -12,7 +12,7 @@
 不证明未训练策略能达到 80/99、耗尽、收敛或泛化。Tasks1–9 各任务独立复审已完成，
 Task9 Spec/Quality 为 Approved。全分支 `5c23c13cd0605955412ba6f470ee051d4fe8a9a2`→
 `ff60e7c08760a3b85dec34d14d5dd98d302c4d9d` 首轮结论为 With fixes（无 Critical；
-I1 安装角历史、I2 评估绝对面积、M1 过期状态）。本轮修正待限定范围复审，见末节。
+I1 安装角历史、I2 评估绝对面积、M1 过期状态）。修正后的限定范围复审已通过，全部发现关闭，未发现新增问题；本机开发实现复审通过，见末节。
 
 ## 1. 已实现接口与不变约束
 
@@ -291,19 +291,18 @@ L=0、Θ=0的已到位动作，.25仿真秒/3.15508墙钟秒，控制/消息握�
 | task9-native-gpu-160/resume.pt |原103271078，已移除|冗余中间模型；SHA256与恢复审计已留存|
 | task9-native-gpu-160/metrics.jsonl |751435|含原失败/Actor16和32执行证据|
 | task9-native-gpu-160/run.json |42811|主恢复段实际参数、路径、进程和计数|
-| task9-final-acceptance/resume.pt |92687910|最终源码唯一可恢复状态|
+| task9-final-acceptance/resume.pt |92687910|a35c74e 有界探针可恢复状态，保留原运行身份|
 | task9-final-acceptance/metrics.jsonl |342898|最终fresh/resume实测记录|
 | task9-final-acceptance/run.json |47212|最终源码运行身份|
 
 中间 `task9-final-init-probe` 的39条遥测/run文本保留，其44,730,287B的resume.pt与上表主探针冗余模型
 在记录精确路径/字节/SHA256后已逐文件移除，共148,001,365B；
-只保留一份Task9最终源码可恢复模型。`task9-redundant-model-{inventory,cleanup}.json`记录操作。
-Task8及旧训练产物、共享venv/build均未清理，不递归删除目录。保存的三个失败测量快照合计约4.13MiB在外部缓存，
+Task9 的清单由 `task9-redundant-model-{inventory,cleanup}.json` 记录。最终复审后，另按精确路径/字节/SHA256清单逐文件移除3份Task8冗余模型，共123,810,056B；记录为外部缓存中的 `root-final-redundant-model-{inventory,cleanup}.json`。本次验证合计移除5份冗余模型、271,811,421B；项目训练输出仅保留上述92,687,910B检查点及小型运行/评估记录。旧训练产物、共享venv和当前有效构建保留，未递归删除仓库目录。保存的三个失败测量快照合计约4.13MiB在外部缓存，
 属于可复现失败输入，不是默认训练输出。正式默认输出根目录没有开始无界训练；以上全部为显式探针子目录。
 最终 `task9-source-provenance.json` 记录当前安装源码与扩展SHA256、
 模型以外证据路径和精确字节清单。Humble/Orin/field与策略质量边界仍如第6节。
 
-## 9. 全分支复审修正（2026-09-16，待限定范围复审）
+## 9. 全分支复审修正与最终结论（2026-09-16）
 
 Task9 独立 Spec/Quality 已 Approved；全分支首轮检查范围和 With fixes 结论见本文开头。
 本轮源码提交 `bdd26730b0dc33155002a4c253635ee7ea588741` 修正两个 Important 项：
@@ -316,7 +315,7 @@ Task9 独立 Spec/Quality 已 Approved；全分支首轮检查范围和 With fix
 - I2：冻结评估逐案例保存 `covered_area_m2` 和 `coverable_area_m2`，直接使用
   `CoverageReference.covered_area(observed)` 与 `area_m2`，不以全部任务已知面积替代分子。
   初始化失败两者为 null，执行失败保留最后确认值，空参考两面积及比例均为0；
-  JSON 保存全部有效 SensorSpec（量程、FOV、XY偏移和安装yaw）。真实 Actor 加载/推理、
+  JSON 保存全部 SensorSpec（量程、FOV、XY偏移和安装yaw）；测试中的非零XY偏移只检查配置序列化，首版虚拟传感器平移外参仍为零。真实 Actor 加载/推理、
   参考相交及 JSON 测试仅替换外部执行传输，保留相同0.5比例下1/2与2/4m²的区别、
   参考外观测排除、初始化后立即失败/成功一步后失败、初始化失败与空参考案例。
 - M1：设计§16、执行清单和历史复审当前状态已同步；没有将历史 NOT_RUN 或 With fixes 改写为部署批准。
@@ -339,5 +338,6 @@ Task9 独立 Spec/Quality 已 Approved；全分支首轮检查范围和 With fix
 本轮只改 Python 特征映射和评估输出，未重复原生/控制器/750m CTest 或GPU训练探针。
 既有零安装角的 `a35c74e` 四种子与103条/8更新、较早230条/40更新及Actor16/32证据按原版本复用，
 不是本轮源码重新执行的运行证明。旧NO_PATH注入基线失败及§6未验证边界仍有效。
-本轮未生成训练模型、未删除既有模型；三个 Task8 冗余模型由根会话在复审后按精确清单处理，
-当前仍保留，唯一最终 Task9 可恢复检查点及所有小型失败/审计记录继续保留。
+源码修正未生成训练模型；最终复审后已完成§8的精确冗余模型清理，保留一份验证检查点和小型失败/审计记录。
+
+最终限定范围复审覆盖 `ff60e7c08760a3b85dec34d14d5dd98d302c4d9d`→`22e7568b8f73b84809e6bd72aef24a05e441b5a9`，确认 I1、I2、M1 均为 ADDRESSED，无新增或范围外问题；此前 With fixes 的阻断已解除。本机隔离开发实现复审通过。复审核读225项通过/2项显式跳过的日志、受影响包构建及源码/安装SHA256一致性，没有重复运行测试或探针。随后仅同步本结论与产物清单，执行代码仍为 `bdd26730b0dc33155002a4c253635ee7ea588741`；部署与学习质量边界保持§6所列状态。

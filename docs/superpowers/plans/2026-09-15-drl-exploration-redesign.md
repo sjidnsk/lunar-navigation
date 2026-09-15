@@ -14,7 +14,7 @@
 
 Tasks1–9 的实现、测试执行、文档和各任务独立复审已完成；下列勾选表示对应工作已执行并记录结果，
 不表示每个历史测试均通过或学习质量达标。Task9 独立 Spec/Quality 复审 Approved。
-全分支 `5c23c13..ff60e7c` 首轮复审为 With fixes；I1/I2/M1 已修正，限定范围复审待完成。
+全分支 `5c23c13..ff60e7c` 首轮复审为 With fixes；I1/I2/M1 已修正，`ff60e7c..22e7568` 限定范围复审于 2026-09-16 通过，未发现新增问题。本机开发实现已完成复审。
 [实施验证](../../validation/2026-09-15-drl-exploration-redesign-implementation.md)保留实际测试、历史 NO_PATH 基线失败、
 源码版本与性能范围；正式学习质量、Humble/Orin 和现场证据仍为 NOT_RUN。未合并、推送或启动无界训练。
 
