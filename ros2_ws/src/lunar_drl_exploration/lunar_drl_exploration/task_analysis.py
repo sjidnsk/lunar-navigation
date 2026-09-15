@@ -233,9 +233,10 @@ class TaskAnalyzer:
             relevant[0] = False
         # Only pending center measurements at real interfaces contribute utility.
         frontier_mask = ~w.known & binary_dilation(w.known, structure=CROSS)
-        frontier_mask &= relevant[components]
-        # Bind every R/potential interface to its native R-side cell, preserving
-        # external transit even when its pending center lies outside the task.
+        frontier_mask &= relevant[components] & has_entry[components] & near_r
+        # Optical K boundaries may lie beyond a measured non-R footprint band.
+        # Preserve the movement component's R entry, but bind its visible first
+        # pending interface to an exact native R optical witness, not adjacency.
         witnesses = {}
         known_bytes = np.asarray(w.known, dtype=np.uint8)
         for target, source in direct.items():
@@ -244,13 +245,20 @@ class TaskAnalyzer:
             )[0]
             if first >= 0:
                 witnesses[(int(first % width), int(first // width))] = source
-        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)) if radius + 1e-10 >= 1 else ():
-            ys, xs = np.nonzero(
-                w.reachable & np.roll(frontier_mask, (-dy, -dx), axis=(0, 1))
+        movement_targets = _xy(frontier_mask)
+        movement_sources = direct_witnesses(
+            w.intrinsic, reachable_bytes, movement_targets, radius
+        )
+        by_source = {}
+        for target, source in zip(movement_targets, movement_sources):
+            if source[0] >= 0:
+                by_source.setdefault(tuple(map(int, source)), []).append(target)
+        for source, targets in by_source.items():
+            firsts = first_pending_cells(
+                w.intrinsic, known_bytes, source, targets, radius
             )
-            for x, y in zip(xs, ys):
-                target = (int(x + dx), int(y + dy))
-                witnesses.setdefault(target, (int(x), int(y)))
+            for first in firsts[firsts >= 0]:
+                witnesses.setdefault((int(first % width), int(first // width)), source)
         # A height-only input can have measured FREE movement with unclassified
         # centers. Those are pending observations from R, not exhausted coverage.
         for x, y in _xy(pending & w.reachable):

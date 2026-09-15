@@ -351,3 +351,42 @@ def test_direct_pending_interface_certificate_keeps_external_and_unknown_R_sourc
         assert len(report.frontier_cells)
         assert np.all(report.frontier_cells[:, 0] < 10)
         _assert_real_center_witnesses(s, report, sensor)
+
+
+def _outside_task_known_band(*, no_entry=False, opaque=False):
+    # Native footprint support ends at x=5, while center measurements extend
+    # through x=8. The task is beyond range, reached via the unknown corridor.
+    m=np.full((17,35),2,np.uint8); b=m.copy()
+    m[6:11,2:6]=1
+    m[7:10,6:33]=0
+    b[6:11,2:9]=1
+    b[7:10,9:33]=0
+    if no_entry: m[7:10,6]=2  # Transparent, impassable separation.
+    if opaque: m[7:10,8]=b[7:10,8]=2
+    return snapshot(m,b,pose=Pose(5.5,8.5,0))
+
+
+def test_outside_task_transit_witness_crosses_known_nonreachable_footprint_band():
+    s=_outside_task_known_band(); sensor=SensorSpec(range_m=5)
+    report=TaskAnalyzer(task(29,7,32,10),sensor).update(s)
+    assert report.available and not report.exhausted
+    assert [9,8] in report.frontier_cells.tolist()
+    assert np.all(report.frontier_cells[:,0]<29)
+    assert np.all(report.witnesses[:,0]<=5)
+    _assert_real_center_witnesses(s,report,sensor)
+    # The observation witness must survive graph construction as an actual goal.
+    from lunar_drl_exploration.decision import DecisionCore
+    observation,again=DecisionCore(task(29,7,32,10),sensor).observe(s)
+    assert again.available and len(observation.goals)>0
+    assert any(observation.features[:,3:11].max(axis=1)>0)
+
+
+def test_optical_movement_frontier_requires_entry_and_unblocked_sight():
+    for mode in ('no_entry','opaque'):
+        s=_outside_task_known_band(**{mode:True})
+        report=TaskAnalyzer(task(29,7,32,10),SensorSpec(range_m=5)).update(s)
+        assert report.available and report.exhausted,mode
+        assert len(report.frontier_cells)==0,mode
+    s=_outside_task_known_band()
+    report=TaskAnalyzer(task(2,6,5,10),SensorSpec(range_m=5)).update(s)
+    assert report.available and report.exhausted and not len(report.frontier_cells)
