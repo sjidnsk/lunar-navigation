@@ -9,7 +9,10 @@
 
 实现已接通实测地图→任务图→CPU Actor→原生导航→公共控制器→轻量运动学平台→
 沿程观测→经验回放→GPU SAC→保存/恢复。短程验证证明这条执行与学习链路能工作，
-不证明未训练策略能达到 80/99、耗尽、收敛或泛化。最终独立 Task9 和全分支复审另行记录。
+不证明未训练策略能达到 80/99、耗尽、收敛或泛化。Tasks1–9 各任务独立复审已完成，
+Task9 Spec/Quality 为 Approved。全分支 `5c23c13cd0605955412ba6f470ee051d4fe8a9a2`→
+`ff60e7c08760a3b85dec34d14d5dd98d302c4d9d` 首轮结论为 With fixes（无 Critical；
+I1 安装角历史、I2 评估绝对面积、M1 过期状态）。本轮修正待限定范围复审，见末节。
 
 ## 1. 已实现接口与不变约束
 
@@ -299,3 +302,42 @@ Task8及旧训练产物、共享venv/build均未清理，不递归删除目录�
 属于可复现失败输入，不是默认训练输出。正式默认输出根目录没有开始无界训练；以上全部为显式探针子目录。
 最终 `task9-source-provenance.json` 记录当前安装源码与扩展SHA256、
 模型以外证据路径和精确字节清单。Humble/Orin/field与策略质量边界仍如第6节。
+
+## 9. 全分支复审修正（2026-09-16，待限定范围复审）
+
+Task9 独立 Spec/Quality 已 Approved；全分支首轮检查范围和 With fixes 结论见本文开头。
+本轮源码提交 `bdd26730b0dc33155002a4c253635ee7ea588741` 修正两个 Important 项：
+
+- I1：记录的八位方向历史仍是实际光轴的世界朝向；构图时按“车辆动作朝向＋当前安装 yaw”
+  投影到相应列，记录与查询共用 `floor(angle/(π/4)+0.5)` 并环绕的最近扇区量化。
+  世界位置容差、实际非空观测更新、跨重采样保留及 epoch 清空不变；节点19维和动作6维不变。
+  实际 DecisionCore→Graph→pack 回归覆盖零安装角、π/2、π/3、负环绕、安装配置变化、
+  相邻实际位姿与远位姿、空观测；同物理视角动作标记已访问，其他方向不误标。
+- I2：冻结评估逐案例保存 `covered_area_m2` 和 `coverable_area_m2`，直接使用
+  `CoverageReference.covered_area(observed)` 与 `area_m2`，不以全部任务已知面积替代分子。
+  初始化失败两者为 null，执行失败保留最后确认值，空参考两面积及比例均为0；
+  JSON 保存全部有效 SensorSpec（量程、FOV、XY偏移和安装yaw）。真实 Actor 加载/推理、
+  参考相交及 JSON 测试仅替换外部执行传输，保留相同0.5比例下1/2与2/4m²的区别、
+  参考外观测排除、初始化后立即失败/成功一步后失败、初始化失败与空参考案例。
+- M1：设计§16、执行清单和历史复审当前状态已同步；没有将历史 NOT_RUN 或 With fixes 改写为部署批准。
+
+新验证日志位于 `/home/kai/.cache/lunar-drl-redesign/`：
+
+| 记录 | 结果 |
+| --- | --- |
+| `final-fix-i1-red.log` | 4个非零/变化安装角回归失败，零安装角1通过；预期行为 RED |
+| `final-fix-i1-green.log` | 模型与图相关26 PASS，5.87s |
+| `final-fix-i2-red.log` | 缺少 `covered_area_m2` 的实际 JSON 回归1 FAIL；预期行为 RED |
+| `final-fix-i2-green.log` | 评估及CLI相关31 PASS，21.82s |
+| `final-fix-build.log` | 仅受影响 `lunar_drl_exploration` 包构建通过，0.63s |
+| `final-fix-package.log` | 最后一次完整 venv DRL 包225 PASS、2显式原生opt-in SKIP，52.08s，无警告 |
+| `final-fix-source-provenance.json` | 三个变更模块源码SHA256与隔离安装路径逐字节一致 |
+
+构建仍使用本文§2的 Jazzy 独立 build/install/log；验证 Python 是
+`/home/kai/.cache/lunar-drl-training/venv/bin/python`。测试 conftest 使用当前源码包；
+独立导入使用 `/home/kai/.cache/lunar-drl-redesign/jazzy/install/lunar_drl_exploration/lib/python3.12/site-packages/lunar_drl_exploration/`。
+本轮只改 Python 特征映射和评估输出，未重复原生/控制器/750m CTest 或GPU训练探针。
+既有零安装角的 `a35c74e` 四种子与103条/8更新、较早230条/40更新及Actor16/32证据按原版本复用，
+不是本轮源码重新执行的运行证明。旧NO_PATH注入基线失败及§6未验证边界仍有效。
+本轮未生成训练模型、未删除既有模型；三个 Task8 冗余模型由根会话在复审后按精确清单处理，
+当前仍保留，唯一最终 Task9 可恢复检查点及所有小型失败/审计记录继续保留。

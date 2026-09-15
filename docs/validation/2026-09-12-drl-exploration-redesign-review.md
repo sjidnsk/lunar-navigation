@@ -262,6 +262,8 @@ SAC公式未发现符号错误，补齐 TD/Actor/温度梯度隔离及完整batc
 原生地图导出、统一观测/参考、任务图、全尺寸稀疏 SAC、有限回放/恢复、公共控制器闭环和
 8 环境异步训练现已实现；本机有界 GPU 保存/恢复、测试与性能限制见
 [实施验证](2026-09-15-drl-exploration-redesign-implementation.md)。
-前八项实现已经独立复审，Task9 和整个分支的最终独立复审仍待完成。
+Tasks1–9 已完成各任务独立复审，Task9 的 Spec/Quality 结论为 Approved。
+全分支 `5c23c13..ff60e7c` 首轮结论为 With fixes：I1 安装角方向历史错位、
+I2 冻结评估缺少绝对面积、M1 状态文档过期。三项已修正，待限定范围复审，尚未宣称全分支 Approved。
 未完成正式学习质量验收：80/99 达成率、策略耗尽、收敛、传感器/场景泛化、完整 1 km ROS
 探索、Humble/Orin、真实课题三、跨主机 DDS 与实车仍为 NOT_RUN。

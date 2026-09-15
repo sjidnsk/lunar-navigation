@@ -264,6 +264,10 @@ The stored direction is the actual optical world heading, rounded to the nearest
 of eight sectors. History matches executed world positions within the exported
 native position tolerance (GraphConfig's 0.1 m fallback when unavailable), survives
 node resampling and clears on an epoch change. Issuing a goal does not mark a visit.
+Graph history columns project those optical-world bits onto each vehicle action
+heading plus the current mounting yaw, using the same wrapped nearest-sector
+quantizer as recording. This also retains physical-view history when mounting
+configuration changes; utility/history columns and packed action features agree.
 
 `GraphBuilder.build_truth(terrain, reference)` is the explicit training-only entry
 point. It produces immutable `PrivilegedScene`: `scene_id`, static `positions`,
@@ -855,7 +859,11 @@ Frozen evaluation uses joint argmax, no replay or optimizer, and reports every
 case plus family/extent groups:80/99 attainment, exhaustion and final reference
 coverage, actual distances to thresholds,80-to99 tail distance, zero gain,
 truncation, navigation failures, collisions and explicit infrastructure failures.
-Reference coverage counts only reference-intersected observed cells. Sensor
+Each case saves `covered_area_m2` (reference-intersected observations) and
+`coverable_area_m2` (initialized reference area). A failed reset leaves both null;
+execution failure retains the last confirmed measurements. An empty reference
+has zero areas and zero fraction. The report includes the complete effective
+SensorSpec, including all mounting offsets. Sensor
 range/FOV overrides are Actor-only evaluation/deployment inputs; they are not a
 claim of learned generalization. `infer` only attaches the existing observed
 `InferenceRuntime`; it does not spawn navigation/control or import scenes,
