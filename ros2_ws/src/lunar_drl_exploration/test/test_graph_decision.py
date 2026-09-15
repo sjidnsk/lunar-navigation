@@ -340,3 +340,23 @@ def test_core_unavailable_input_still_freezes_actual_anchor_without_navigation_s
     assert not report.available and not report.exhausted
     assert len(obs.node_ids) == 1 and len(obs.goals) == 8
     assert np.all(obs.goals[:, :2] == [s.pose.x, s.pose.y])
+
+
+def test_adjacent_point_two_metre_stances_retain_unique_optical_opportunity():
+    m=np.zeros((9,9),np.uint8);m[3,3]=m[3,4]=1
+    b=np.ones((9,9),np.uint8);b[4,3]=2;b[5,4]=0
+    s=replace(snapshot(m,b,pose=Pose(.7,.7,0.),resolution=.2),goal_position_tolerance_m=.05)
+    o,report=DecisionCore(task(.8,1.,1.,1.2),SensorSpec()).observe(s)
+    assert not report.exhausted
+    assert any(np.allclose(g[:2],[.9,.7]) for g in o.goals)
+    witness=np.flatnonzero(np.linalg.norm(o.positions-[.9,.7],axis=1)<1e-6)
+    assert o.features[witness,3:11].max()>0
+    assert len(np.unique(np.round(o.goals,12),axis=0))==len(o.goals)
+
+
+def test_isolated_current_cell_has_exactly_eight_anchor_actions():
+    m=np.zeros((9,9),np.uint8);m[3,3]=1
+    s=replace(snapshot(m,pose=Pose(.7,.7,0.),resolution=.2),goal_position_tolerance_m=.05)
+    o,_=DecisionCore(task(0,0,1.8,1.8),SensorSpec()).observe(s)
+    assert len(o.goals)==8
+    assert np.all(o.goals[:,:2]==[.7,.7])

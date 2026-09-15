@@ -618,3 +618,124 @@ current CPU affinity/count, GPU total/free when nvidia-smi is available, RAM/dis
 code revision and chosen config. Missing GPU introspection is recorded, not an
 admission prerequisite. Task8 supplies bounded throughput, credit, batch, Actor lag,
 coverage/decision progress, RTF and execution-reason metrics and terminal display.
+
+## Native execution and observed-only deployment (Task 7)
+
+`RosExplorationEnv(config, env_id, domain_base=210, wall_timeout_s=120)` is a
+synchronous worker-side environment. `reset(seed, family, extent,
+episode_budget=None)` returns `(DecisionObservation, PrivilegedState)`;
+`step(action_index, actor_version=None)` returns the existing immutable
+`Transition` exactly. Keyword arguments above are keyword-only. `actor_version`
+falls back to the environment property, initially zero. Set the curriculum budget
+explicitly when a stage's extent overlaps another stage. The worker never resets
+inside `step`; budget truncation retains the actual final observation and
+privileged state for bootstrapping. Native `NO_PATH` and `TIMEOUT` with a valid
+final map are ordinary transitions. Lost transport or an unconstructable final
+state raises `InfrastructureError`; initialization without usable native support
+raises `InputUnavailable`. `cancel()` requests cancellation from another thread;
+the active `step` performs cancel-and-stop and raises `TaskCanceled`. Join that
+call before `close()`; closing releases only owned ROS processes and scene state.
+
+The action goal is the exact frozen `(x, y, yaw)` row. One action's reward uses
+its initial and final cumulative area, planar XY arc length and absolute yaw arc:
+`delta_area/100 - .02*distance/10 - .005*turn/pi - .001`. Progress polling cannot
+move this baseline. Exhaustion alone terminates; a decision budget truncates
+unless exhaustion was actually proved. A plant geometry collision is explicitly
+reported as `COLLISION` with `geometry_failure=True`; it receives no fabricated
+exhaustion or terminal bonus and requires a new episode before another action.
+
+Task8 should capture these separate records alongside the Transition:
+
+- `last_execution`: frozen `ExecutionMetadata` with exact goal, native outcome,
+  reason, last segment revision, target/actual cells, actual pose, whole-action
+  distance/turn/simulation/wall time, final map revision/processed timestamp and
+  geometry-failure flag. It is execution diagnostics, not a replay input.
+- `episode_metadata`: episode UUID, optional seed/family/extent descriptor,
+  static scene ID, reference/initial known area, initialization turn and
+  simulation/wall time, decision budget, namespace and DDS domain.
+- `static_scenes`: `scene_id -> PrivilegedScene`; capture at reset and supply to
+  `ReplayBuffer.add(transition, scenes)`. Its immutable numeric records are the
+  existing Task6 transport format. Neither execution metadata nor ROS/native
+  map objects should be passed to `dumps_transport`; serialize diagnostics as
+  explicit primitive records. Closing clears the environment's registry.
+- `progress()`: cheap state, episode ID, completed decisions, cumulative known
+  area, measured distance/turn/simulation/wall time, sensor count, maximum
+  commanded speed and owned PIDs. It performs no graph or task analysis.
+
+Each environment owns a native navigator and the existing public wheel
+controller under `/lunar_training/env_N` in DDS domain `domain_base + N`. All
+absolute vehicle topic/action/service parameters are overridden; the public
+controller is the sole command publisher. Linux parent-death binding terminates
+owned children even after worker SIGKILL; normal close reaps exact process groups.
+External/rosout logging is disabled and stderr is a bounded RAM tail. Workers,
+Actor dispatch, retained completions, ACK/backpressure, recovery, checkpoints and
+training CLI belong to Task8; this class implements none of those protocols.
+
+The light plant integrates real forward/reverse SE2 curves and in-place turns at
+0.05 simulation-second steps, with canonical acceleration/yaw acceleration and a
+0.2 m/s speed cap. Collision/connectivity checks use the same native truth M as
+the reference. Length is planar XY arc, not 3D surface length. ROS clock, odometry,
+TF and public control run in simulation time; actual 10 m/90-degree sensors run at
+2 Hz along the executed path. Monotonic time controls pacing and watchdogs; slow
+processing never skips physics steps. Only actual hit centers and unacknowledged
+measurements enter a tight GridMap bounding box. `GetPolicyMap`/`PolicyMapStore`
+retain exact epoch/revision and minimum processed-map timestamp handshakes.
+
+Cold starts with no translational support use at most four measured quarter-turn
+`NavigateToPose` actions at the originally drawn XY, through the same public
+controller, plant and sensor. These initialization costs are reported separately
+from policy reward. Native wheel stationary certification uses a navigator-owned
+bounded plane/patch and the required local terrain stencil; it preserves known
+blockers, global UNKNOWN and ordinary translation endpoint proof. It does not
+apply the wheel shortcut to legged planning. Navigation exports and executes the
+same configured tolerance; DRL applies 0.05 m to both navigator and controller,
+while traditional defaults remain unchanged. Native parameters
+`goal_position_tolerance_m` and `goal_yaw_tolerance_rad` are startup-owned.
+
+`InferenceRuntime.attach(node, policy, ...)` subscribes to existing
+`PureExplorationTask` START/PAUSE/RESUME/CANCEL and uses existing
+`NavigateToPose`/`GetPolicyMap`. It does not start navigation or control. The caller
+owns and spins the node; cancel and continue spinning until `CANCELED` before
+teardown. Pause completes only after cancellation and the public controller's
+stopped linear/angular tolerances, then resume makes a fresh decision. Odometry
+history is transformed by measured map-to-odom TF before use. Diagnostics expose
+known area, exhaustion availability and unavailable reference area separately;
+there is no deployment `coverage_ratio`.
+
+`ActorPolicy.load(path)` accepts only `SACLearner.actor_state()`'s public CPU
+record: `{schema: 'task_graph_v1', model_config, version, state_dict}`. It loads
+Actor weights only; full learner/resume records are rejected. Runtime import does
+not load Torch, Scene, training environment, reference or SAC. Sensor range/FOV
+are runtime observation settings, not an extra artifact equality gate.
+
+`CoverageHistory`, owned by `DecisionCore`/`TaskAnalyzer`, is the single cumulative
+K meter shared by training reward, privileged observed-bit projection and
+inference known area. It consumes changed applied native tiles into sparse packed
+history; current B/M remain current geometry. Classification regression to UNKNOWN
+and recovery cannot repay a previously observed cell. A new task or native
+epoch/lattice resets the meter; pause/resume preserves it. Cheap consumption runs
+with incoming snapshots; full graph/task analysis runs at decision boundaries.
+
+Validation on local CPU/Jazzy used the actual navigator, public controller, plant
+and measured sensor: cold-start spin, adjacent 0.2 m arrivals, reverse translation,
+same-position yaw, exact frozen-action transition, sole command publisher and
+revision-consistent `PLAN_FOUND`/active `PathReference`/`GOAL_REACHED`. The detailed
+cache probe measured 84.15 simulation seconds in 12.54 wall seconds (RTF 6.71 with
+a requested 10), a 0.2 m/s maximum command and 169 actual sensor frames. It selected
+an action from a frozen observation; it did not run a Torch Actor to choose that
+action. These are isolated local DDS results. Eight asynchronous environments,
+GPU Actor/learner execution, 30x throughput, full 3D physics, Humble, Orin and
+vehicle deployment remain `NOT_RUN` for Task7.
+
+Reproduce the opt-in local ROS test after building the affected packages:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source /home/kai/.cache/lunar-drl-redesign/jazzy/install/local_setup.bash
+LUNAR_DRL_RUN_ROS=1 python3 -m pytest -q \
+  ros2_ws/src/lunar_drl_exploration/test/test_ros_native_execution.py
+```
+
+Use the new isolated overlay only. Torch tests additionally require the project
+training venv and `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`; ordinary package tests run
+from the repository root with `python3 -m pytest`.

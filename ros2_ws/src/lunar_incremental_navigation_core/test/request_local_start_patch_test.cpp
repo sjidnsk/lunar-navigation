@@ -15,6 +15,8 @@
 #include "lunar_incremental_navigation_core/elevation_map.hpp"
 #include "lunar_incremental_navigation_core/fine_traversability_builder.hpp"
 #include "lunar_incremental_navigation_core/request_local_start_patch.hpp"
+#include "lunar_incremental_navigation_core/wheel_local_planner.hpp"
+#include "lunar_incremental_navigation_core/local_target_selector.hpp"
 #include "lunar_incremental_navigation_core/types/platform_capability.hpp"
 
 namespace lunar::incremental_navigation {
@@ -515,6 +517,107 @@ TEST(RequestLocalStartPatch, ReportsNotNeededAndRejectsInvalidMargin) {
   EXPECT_THROW(builder.Build(fixture.fine, PoseAt(geometry, start),
                              WheelCapability(), profile),
                std::invalid_argument);
+}
+
+TEST(RequestLocalStartPatch, StationarySupportDoesNotRequireTranslationExit) {
+  const auto geometry = Geometry(25U, 25U, 0.2);
+  const GridIndex start{12, 12};
+  std::vector<float> heights(geometry.CellCount(), std::numeric_limits<float>::quiet_NaN());
+  for (const GridIndex cell : {start, GridIndex{13, 12}, GridIndex{13, 13}})
+    heights[Offset(geometry, cell)] = 0.0F;
+  const auto profile = Profile(0.4);
+  const auto fixture = MakeFixture(geometry, heights, WheelCapability(), profile);
+  const auto pose = PoseAt(geometry, start);
+  ASSERT_EQ(fixture.fine->State(start), FineCellState::kUnknown);
+  const auto ordinary = RequestLocalStartPatchBuilder{}.Build(fixture.fine, pose, WheelCapability(), profile);
+  EXPECT_EQ(ordinary.status, StartPatchResult::Status::kUnresolved);
+  const auto stationary = RequestLocalStartPatchBuilder{}.BuildStationary(fixture.fine, pose, WheelCapability(), profile);
+  ASSERT_EQ(stationary.status, StartPatchResult::Status::kReady);
+  ASSERT_TRUE(stationary.view);
+  EXPECT_TRUE(stationary.view->CanCertifyStationary(pose.position_m));
+  EXPECT_FALSE(stationary.view->CanCertifyStationary({pose.position_m.x + 0.01, pose.position_m.y}));
+  EXPECT_FALSE(stationary.view->CanBeEndpoint(start));
+  const FinalGoal goal{.target_x_m=pose.position_m.x, .target_y_m=pose.position_m.y,
+                       .has_target_yaw=true, .target_yaw_rad=1.57};
+  const auto selected=LocalTargetSelector{}.SelectRolling(*fixture.fine,
+      fixture.fine->geometry(), pose.position_m, goal, std::nullopt);
+  ASSERT_TRUE(selected);
+  const auto plan=WheelLocalPlanner(WheelCapability()).Plan(*stationary.view,pose,*selected,
+      SearchDeadline::max(),StopToken{});
+  ASSERT_EQ(plan.status,LocalPlanResult::Status::kPlanFound);
+  ASSERT_EQ(plan.path.size(),1U);
+  EXPECT_DOUBLE_EQ(plan.path[0].pose.position_m.x,pose.position_m.x);
+  EXPECT_TRUE(plan.reaches_final_goal);
+  auto translation=*selected;
+  translation.center.x+=0.01;
+  EXPECT_EQ(WheelLocalPlanner(WheelCapability()).Plan(*stationary.view,pose,translation,
+      SearchDeadline::max(),StopToken{}).status,LocalPlanResult::Status::kNoPath);
+
+  EXPECT_EQ(fixture.fine->State(start), FineCellState::kUnknown);
+  EXPECT_LT(stationary.view->geometry().min_inclusive().x, fixture.fine->geometry().min_inclusive().x);
+}
+
+TEST(RequestLocalStartPatch, StationaryPreservesKnownBlockersAndRequiresMeasuredPlane) {
+  const auto g=Geometry(25U,25U,0.2);
+  const GridIndex start{12,12};
+  auto h=FlatWithMissingSquare(g,start,1);
+  h[Offset(g,{13,12})]=1.0F;
+  const auto fixture=MakeFixture(g,h,WheelCapability(),Profile(.4));
+  EXPECT_EQ(RequestLocalStartPatchBuilder{}.BuildStationary(fixture.fine,PoseAt(g,start),
+      WheelCapability(),Profile(.4)).status,StartPatchResult::Status::kStartBlocked);
+  h.assign(g.CellCount(),std::numeric_limits<float>::quiet_NaN());
+  h[Offset(g,start)]=0.0F;
+  const auto unknown=MakeFixture(g,h,WheelCapability(),Profile(.4));
+  EXPECT_EQ(RequestLocalStartPatchBuilder{}.BuildStationary(unknown.fine,PoseAt(g,start),
+      WheelCapability(),Profile(.4)).status,StartPatchResult::Status::kUnresolved);
+  EXPECT_EQ(RequestLocalStartPatchBuilder{}.BuildStationary(fixture.fine,PoseAt(g,start),
+      LeggedCapabilityForTest(),Profile(.4)).status,StartPatchResult::Status::kUnresolved);
+}
+
+TEST(RequestLocalStartPatch, CanonicalWheelNearWallWedgeCertifiesStationarySupport) {
+  GridGeometry g; g.frame_id="map";g.width=60;g.height=60;g.resolution_m=.2;g.origin_m={-4.,-4.,0.};
+  std::vector<float> heights(g.width*g.height,0.f);
+  for(int y=0;y<60;++y)for(int x=26;x<60;++x)heights[y*60+x]=2.f;
+  RigidTransform identity;identity.parent_frame="map";identity.child_frame="map";
+  PersistentElevationMap truth_map;
+  const auto applied=truth_map.Apply({g,heights,identity});
+  auto truth=truth_map.Snapshot();
+  WheeledCapability wheel;
+  wheel.footprint_xy_m={{.591,.409},{.591,-.409},{-.591,-.409},{-.591,.409}};
+  wheel.body_extent_m={1.182,.818,1.29996};wheel.wheel_diameter_m=.319;wheel.wheel_width_m=.148;
+  wheel.wheelbase_m=.8175;wheel.track_width_m=.67;wheel.minimum_underbody_clearance_m=.21;
+  wheel.maximum_local_obstacle_relief_m=.2;wheel.maximum_forward_speed_mps=.2;
+  wheel.maximum_reverse_speed_mps=.2;wheel.maximum_spin_rate_radps=1.;
+  wheel.maximum_acceleration_mps2=.5;wheel.maximum_braking_deceleration_mps2=.5;
+  wheel.maximum_yaw_acceleration_radps2=.5;wheel.maximum_lateral_acceleration_mps2=.5;
+  wheel.maximum_curvature_per_m=1.;wheel.maximum_slope_rad=.3490658503988659;wheel.minimum_clearance_m=.2;
+  PlatformCapability capability=wheel;
+  TraversabilityProfile profile;profile.planar_envelope_xy_m=wheel.footprint_xy_m;
+  profile.preferred_clearance_m=.2;profile.slope_weight=1.;profile.relief_weight=1.;
+  profile.maximum_slope_rad=wheel.maximum_slope_rad;profile.start_blind_zone_margin_m=.2;
+  profile.goal_position_tolerance_m=.3;profile.goal_yaw_tolerance_rad=.2617993877991494;
+  auto true_fine=FineTraversabilityBuilder{}.Derive(truth,capability,profile);
+  std::vector<float> measured(3600,std::numeric_limits<float>::quiet_NaN());
+  std::vector<LocalTerrainMeasurements> stats(3600);
+  for(int x=20;x<=25;++x)for(int y=20-(x-20);y<=20+(x-20);++y){
+    const int i=y*60+x;measured[i]=heights[i];stats[i]=MeasureLocalTerrain(*truth,{x,y});
+    stats[i].slope_rad=static_cast<float>(stats[i].slope_rad);
+    stats[i].relief_m=static_cast<float>(stats[i].relief_m);
+    stats[i].positive_rise_m=static_cast<float>(stats[i].positive_rise_m);
+  }
+  PersistentElevationMap measured_map;
+  const auto measured_result=measured_map.Apply({g,measured,identity,stats});
+  auto raw=measured_map.Snapshot();
+  auto fine=FineTraversabilityBuilder{}.Derive(raw,capability,profile);
+  const Pose2 pose{.position_m={.1,.1},.yaw_rad=0.};
+  auto patch=RequestLocalStartPatchBuilder{}.BuildStationary(fine,pose,capability,profile);
+  auto connections=RequestLocalStartPatchBuilder{}.BuildStartConnections(fine,fine->geometry(),pose,capability,profile);
+  ASSERT_EQ(true_fine->State({20,20}),FineCellState::kFree);
+  ASSERT_EQ(fine->State({20,20}),FineCellState::kUnknown);
+  ASSERT_TRUE(connections.connections.empty());
+  ASSERT_EQ(patch.status,StartPatchResult::Status::kReady);
+  ASSERT_TRUE(patch.view->CanCertifyStationary(pose.position_m));
+  EXPECT_FALSE(patch.view->CanBeEndpoint({20,20}));
 }
 
 }  // namespace

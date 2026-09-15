@@ -223,6 +223,18 @@ LocalPlanResult WheelLocalPlanner::Plan(
     return result;
   }
 
+  if (target.is_final_goal && target.terminal_yaw_rad &&
+      target.center == start.position_m && view.CanCertifyStationary(start.position_m) &&
+      capability_.maximum_spin_rate_radps > 0.0) {
+    const PathPoint point{.pose = {.position_m = {start.position_m.x, start.position_m.y, 0.0},
+        .orientation = YawQuaternion(*target.terminal_yaw_rad)}, .phase = StartPhase::kStartPrefix};
+    result.raw_path = {point};
+    result.path = {point};
+    result.reaches_final_goal = true;
+    result.status = LocalPlanResult::Status::kPlanFound;
+    result.reason_code.clear();
+    return result;
+  }
   const SparseGridGeometry& geometry = view.geometry();
   const std::size_t width = geometry.width();
   const std::size_t height = geometry.height();

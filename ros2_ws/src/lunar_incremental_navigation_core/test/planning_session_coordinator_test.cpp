@@ -24,7 +24,8 @@ namespace {
 
 [[nodiscard]] std::shared_ptr<const FineTraversabilitySnapshot> MakeFine(
     const std::uint64_t revision = 1U,
-    const std::optional<GridIndex> blocked = std::nullopt) {
+    const std::optional<GridIndex> blocked = std::nullopt,
+    const FineCellState changed_state = FineCellState::kBlocked) {
   PersistentElevationMap map;
   const GridGeometry geometry{.frame_id = "map",
                               .width = 8U,
@@ -50,7 +51,7 @@ namespace {
     }
   }
   if (blocked) {
-    states[TileCellOffset(*blocked)] = FineCellState::kBlocked;
+    states[TileCellOffset(*blocked)] = changed_state;
   }
   auto tile = std::make_shared<const FineTraversabilityTile>(
       std::move(states), std::move(costs));
@@ -345,7 +346,7 @@ TEST(PlanningSessionCoordinator,
      AppliesOneInternalGoalToleranceToTheSelectedLocalTarget) {
   FakePorts fake;
   auto config = Config();
-  config.goal_position_tolerance_m = 0.8;
+  config.goal_position_tolerance_m = 0.05;
   PlanningSessionCoordinator coordinator(Wheel(), {}, config, fake.Bind());
   ASSERT_TRUE(coordinator.Start(SessionId{{1U}},
                                 FinalGoal{.target_x_m = 3.5,
@@ -358,7 +359,7 @@ TEST(PlanningSessionCoordinator,
 
   ASSERT_TRUE(output.path_reference);
   ASSERT_TRUE(fake.target_seen_by_local);
-  EXPECT_DOUBLE_EQ(fake.target_seen_by_local->position_tolerance_m, 0.8);
+  EXPECT_DOUBLE_EQ(fake.target_seen_by_local->position_tolerance_m, 0.05);
 }
 
 TEST(PlanningSessionCoordinator, EveryGuidanceStatusFallsBackToOneLocalPlan) {
@@ -1013,8 +1014,8 @@ TEST(PlanningSessionCoordinator, FinalArrivalUsesSameNumericalToleranceAsLocalSo
   ASSERT_TRUE(coordinator.Start(SessionId{{93U}},{.target_x_m=5.5,.target_y_m=1.5}).accepted);
   const auto fine=MakeFine();
   ASSERT_TRUE(coordinator.PlanCycle(At(1.5,1.5),{.fine=fine},CycleTrigger::kContinue,SearchDeadline::max()).path_reference);
-  // One-metre fixture resolution gives a 0.5 m arrival region.
-  const auto reached=coordinator.PlanCycle(At(std::nextafter(6.0,7.0),1.5),{.fine=fine},CycleTrigger::kContinue,SearchDeadline::max());
+  // The configured physical 0.2 m region applies even on this one-metre lattice.
+  const auto reached=coordinator.PlanCycle(At(std::nextafter(5.7,7.0),1.5),{.fine=fine},CycleTrigger::kContinue,SearchDeadline::max());
   ASSERT_TRUE(reached.terminal);
   EXPECT_EQ(reached.terminal->result.outcome,SessionOutcome::kGoalReached);
 }
@@ -1059,11 +1060,28 @@ TEST(PlanningSessionCoordinator, WaitingWakesOnMovementSmallerThanArrivalToleran
   fake.local_status = LocalPlanResult::Status::kPlanFound;
   fake.local_reason_code.clear();
   // A 0.1 m movement changes which routes can connect, even though it is
-  // smaller than the fixture's 0.5 m final-arrival region.
+  // smaller than the fixture's configured 0.2 m final-arrival region.
   const auto moved = coordinator.PlanCycle(At(1.6,1.5), {.fine=fine},
       CycleTrigger::kContinue, SearchDeadline::max());
   EXPECT_EQ(fake.wheel_calls, 2);
   ASSERT_TRUE(moved.path_reference);
+}
+
+TEST(PlanningSessionCoordinator, OnePoseReferenceKeepsUnknownButInvalidatesNewBlocker) {
+  FakePorts fake;
+  auto ports=fake.Bind();
+  ports.plan_wheel=[](const RequestLocalPlanningView&,const Pose2& start,const LocalTarget&,
+                       SearchDeadline,const StopToken&) {
+    const PathPoint point{.pose={.position_m={start.position_m.x,start.position_m.y,0.0},
+        .orientation=YawQuaternion(1.57)}};
+    return LocalPlanResult{.status=LocalPlanResult::Status::kPlanFound,.raw_path={point},.path={point}};
+  };
+  PlanningSessionCoordinator coordinator(Wheel(),{},Config(),std::move(ports));
+  ASSERT_TRUE(coordinator.Start(SessionId{{96U}},{.target_x_m=3.5,.target_y_m=.5}).accepted);
+  ASSERT_TRUE(coordinator.PlanCycle(At(.5,.5),{.fine=MakeFine()},CycleTrigger::kContinue,
+      SearchDeadline::max()).path_reference);
+  EXPECT_FALSE(coordinator.OnFineSnapshot(MakeFine(2U,GridIndex{0,0},FineCellState::kUnknown)));
+  EXPECT_TRUE(coordinator.OnFineSnapshot(MakeFine(3U,GridIndex{0,0},FineCellState::kBlocked)));
 }
 
 }  // namespace

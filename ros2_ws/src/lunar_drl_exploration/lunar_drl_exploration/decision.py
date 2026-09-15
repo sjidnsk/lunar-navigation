@@ -16,10 +16,18 @@ class DecisionCore:
         self.history = DirectionHistory(self.config.history_tolerance_m)
         self._epoch = None
 
-    def observe(self, snapshot, velocity=(0.0, 0.0)):
-        if self._epoch is not None and self._epoch != snapshot.epoch:
+    @property
+    def coverage(self):return self.analyzer.coverage
+
+    def consume(self,snapshot):
+        identity=(snapshot.epoch,snapshot.resolution_m,tuple(snapshot.origin))
+        if self._epoch is not None and self._epoch != identity:
             self.history.clear()
-        self._epoch = snapshot.epoch
+        self._epoch = identity
+        self.coverage.consume(snapshot)
+
+    def observe(self, snapshot, velocity=(0.0, 0.0)):
+        self.consume(snapshot)
         if (
             math.isfinite(snapshot.goal_position_tolerance_m)
             and snapshot.goal_position_tolerance_m > 0

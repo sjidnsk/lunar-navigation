@@ -12,6 +12,20 @@
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>lunar_incremental_navigation_ros</exec_depend>
+  <exec_depend>lunar_pure_wheeled_controller</exec_depend>
+  <exec_depend>lunar_planning_msgs</exec_depend>
+  <exec_depend>lunar_pure_exploration_msgs</exec_depend>
+  <exec_depend>grid_map_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>tf2_msgs</exec_depend>
+  <exec_depend>rosgraph_msgs</exec_depend>
+  <exec_depend>diagnostic_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>builtin_interfaces</exec_depend>
+
   <test_depend>python3-pytest</test_depend>
   <export><build_type>ament_python</build_type></export>
 </package>

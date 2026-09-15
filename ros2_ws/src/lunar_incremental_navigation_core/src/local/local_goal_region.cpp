@@ -102,6 +102,10 @@ std::optional<LocalTarget> LocalTargetSelector::SelectRolling(
       window.height() > kMaximumLocalPlanningWindowAxisCells) {
     return std::nullopt;
   }
+  if (goal.has_target_yaw && start == Point2{goal.target_x_m, goal.target_y_m}) {
+    return LocalTarget{.center = start, .is_final_goal = true,
+                       .terminal_yaw_rad = goal.target_yaw_rad};
+  }
   auto region = std::make_shared<LocalGoalRegion>();
   region->geometry = window;
   region->final_point = {goal.target_x_m, goal.target_y_m};

@@ -32,10 +32,9 @@ namespace {
 }
 
 [[nodiscard]] double GoalPositionTolerance(
-    const FineTraversabilitySnapshot& fine,
+    const FineTraversabilitySnapshot&,
     const double profile_tolerance_m) noexcept {
-  return std::max(0.5 * fine.geometry().resolution_m(),
-                  profile_tolerance_m);
+  return profile_tolerance_m;
 }
 
 [[nodiscard]] SessionState FeedbackState(
@@ -500,9 +499,14 @@ CycleOutput PlanningSessionCoordinator::PlanCycle(
 
   StartPatchResult patch;
   try {
-    patch = impl_->ports.build_start_patch(
-        snapshots.fine, *local_window.geometry, state.base_link_pose, impl_->capability,
-        impl_->profile);
+    const bool stationary = target->is_final_goal && target->terminal_yaw_rad &&
+        target->center == state.base_link_pose.position_m &&
+        std::holds_alternative<WheeledCapability>(impl_->capability);
+    patch = stationary
+        ? RequestLocalStartPatchBuilder{}.BuildStationary(snapshots.fine, state.base_link_pose,
+              impl_->capability, impl_->profile)
+        : impl_->ports.build_start_patch(snapshots.fine, *local_window.geometry,
+              state.base_link_pose, impl_->capability, impl_->profile);
   } catch (...) {
     output.terminal = impl_->Finish(SessionOutcome::kInternalError,
                                     "INTERNAL_ERROR",

@@ -10,6 +10,7 @@ import math
 import numpy as np
 from scipy.ndimage import binary_dilation, label, maximum_filter
 from .contracts import TaskReport
+from .coverage import CoverageHistory
 from .geometry import polygon_mask, world_to_cell
 from .maps import FREE, BLOCKED, UNKNOWN
 from .sensor import (
@@ -35,7 +36,7 @@ class MeasuredWorkspace:
     available: bool
 
 
-def measured_workspace(snapshot, task, sensor):
+def measured_workspace(snapshot, task, sensor, coverage=None):
     """Rasterize all measured evidence and task/range margin, never hidden truth."""
     resolution = snapshot.resolution_m
     if not math.isfinite(resolution) or resolution <= 0:
@@ -60,6 +61,8 @@ def measured_workspace(snapshot, task, sensor):
         if len(xs):
             low = np.minimum(low, [tx * 256 + xs[0], ty * 256 + ys[0]])
             high = np.maximum(high, [tx * 256 + xs[-1] + 1, ty * 256 + ys[-1] + 1])
+    if coverage is not None and coverage.bounds is not None:
+        low=np.minimum(low,coverage.bounds[:2]);high=np.maximum(high,coverage.bounds[2:])
     margin = math.ceil(sensor.range_m / resolution) + 1
     low -= margin
     high += margin
@@ -94,7 +97,7 @@ def measured_workspace(snapshot, task, sensor):
     return MeasuredWorkspace(
         bounds,
         origin,
-        raster.states != UNKNOWN,
+        raster.states != UNKNOWN if coverage is None else coverage.mask(bounds),
         raster.intrinsic_states,
         raster.navigation_states,
         reachable,
@@ -114,13 +117,15 @@ class TaskAnalyzer:
         self._epoch = None
         self._known_area = 0.0
         self.workspace = None
+        self.coverage = CoverageHistory(task)
 
     def update(self, snapshot):
-        w = measured_workspace(snapshot, self.task, self.sensor)
+        self.coverage.consume(snapshot)
+        w = measured_workspace(snapshot, self.task, self.sensor, self.coverage)
         self.workspace = w
-        area = float(np.count_nonzero(w.known & w.task_mask)) * snapshot.resolution_m**2
-        previous = self._known_area if self._epoch == snapshot.epoch else 0.0
-        self._epoch, self._known_area = snapshot.epoch, area
+        area = self.coverage.known_area_m2
+        previous = self._known_area if self._epoch == self.coverage.identity else 0.0
+        self._epoch, self._known_area = self.coverage.identity, area
         empty = np.empty((0, 2), np.int64)
         if not w.available:
             return TaskReport(

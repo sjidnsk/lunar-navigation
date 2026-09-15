@@ -377,7 +377,10 @@ class GraphBuilder:
                     math.radians(sensor.fov_deg),
                 )
                 feature[i, 3:11] = visible.sum(axis=0) / 100.0
-        action_positions = [current] + sorted(boundary)
+        # A fallback native cell at the actual XY is already represented by
+        # the exact floating-point anchor; roundoff must not duplicate 8 actions.
+        action_positions = [current] + sorted(n for n in boundary
+            if np.linalg.norm(points[n] - actual) > 1e-9)
         action_nodes = np.repeat(action_positions, 8)
         yaws = np.tile(HEADINGS, len(action_positions))
         goals = np.column_stack((points[action_nodes], yaws))

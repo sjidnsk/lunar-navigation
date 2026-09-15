@@ -246,14 +246,15 @@ class PatchedElevationView final : public ElevationRangeView {
  public:
   PatchedElevationView(std::shared_ptr<const ElevationSnapshot> base,
                        const std::set<GridIndex>& patch_cells,
-                       const Plane plane, const Point2 anchor) noexcept
+                       const Plane plane, const Point2 anchor,
+                       const SparseGridGeometry& geometry) noexcept
       : base_(std::move(base)),
         patch_cells_(patch_cells),
         plane_(plane),
-        anchor_(anchor) {}
+        anchor_(anchor), geometry_(geometry) {}
 
   [[nodiscard]] const SparseGridGeometry& geometry() const noexcept override {
-    return base_->geometry();
+    return geometry_;
   }
 
   [[nodiscard]] std::optional<ElevationRange> ElevationRangeAt(
@@ -289,6 +290,7 @@ class PatchedElevationView final : public ElevationRangeView {
   const std::set<GridIndex>& patch_cells_;
   Plane plane_;
   Point2 anchor_;
+  SparseGridGeometry geometry_;
 };
 
 [[nodiscard]] bool HasEvidenceExit(
@@ -389,7 +391,7 @@ StartPatchResult RequestLocalStartPatchBuilder::Build(
     return {.status = StartPatchResult::Status::kUnresolved};
   }
   const PatchedElevationView patched(fine->elevation(), patch_cells, *plane,
-                                     p0.position_m);
+                                     p0.position_m, local_window);
   FineCellEvaluator patched_evaluator(patched, capability, profile);
 
   std::vector<LocalCellOverride> overrides;
@@ -426,6 +428,50 @@ StartPatchResult RequestLocalStartPatchBuilder::Build(
   return {.status = StartPatchResult::Status::kReady,
           .view = std::move(view),
           .assumed_cells = assumed_cells};
+}
+
+StartPatchResult RequestLocalStartPatchBuilder::BuildStationary(
+    std::shared_ptr<const FineTraversabilitySnapshot> fine, const Pose2& p0,
+    const PlatformCapability& capability, const TraversabilityProfile& profile) const {
+  if (!fine || !std::isfinite(profile.start_blind_zone_margin_m) ||
+      profile.start_blind_zone_margin_m < 0.0 || !std::isfinite(p0.yaw_rad))
+    throw std::invalid_argument("invalid stationary support request");
+  const auto* wheel = std::get_if<WheeledCapability>(&capability);
+  if (!wheel || wheel->maximum_spin_rate_radps <= 0.0)
+    return {.status = StartPatchResult::Status::kUnresolved};
+  const auto& base = fine->geometry();
+  const auto start = WorldToCell(base, p0.position_m);
+  if (!start) return {.status = StartPatchResult::Status::kUnresolved};
+  if (fine->State(*start) == FineCellState::kBlocked)
+    return {.status = StartPatchResult::Status::kStartBlocked};
+  const double radius = fine->hard_inflation_radius_m() + profile.start_blind_zone_margin_m;
+  const double span = std::ceil(radius / base.resolution_m()) + 2.0;
+  if (!std::isfinite(span) || span > (kMaximumLocalPlanningWindowAxisCells - 1) / 2)
+    return {.status = StartPatchResult::Status::kUnresolved};
+  const auto n = static_cast<std::int64_t>(span);
+  const SparseGridGeometry geometry(base.frame_id(), base.resolution_m(), base.origin_m(),
+      {start->x - n, start->y - n}, {start->x + n + 1, start->y + n + 1});
+  // The native intrinsic classifier reads a 3x3 stencil. Its finite support
+  // halo is part of this request-local plane assumption, not navigable space.
+  // Measured ranges/stats remain authoritative throughout the halo.
+  const auto cells = WithOneCellRing(geometry, PatchCells(geometry, p0.position_m, radius));
+  const auto evaluator = MakePlatformElevationEvaluator(capability);
+  const auto plane = FitSupportPlane(*fine->elevation(), *evaluator,
+      WithOneCellRing(geometry, cells), p0.position_m);
+  if (!plane) return {.status = StartPatchResult::Status::kUnresolved};
+  const PatchedElevationView patched(fine->elevation(), cells, *plane, p0.position_m, geometry);
+  const auto evaluation = FineCellEvaluator(patched, capability, profile).Evaluate(*start);
+  if (evaluation.state == FineCellState::kBlocked)
+    return {.status = StartPatchResult::Status::kStartBlocked};
+  if (evaluation.state != FineCellState::kFree)
+    return {.status = StartPatchResult::Status::kUnresolved};
+  std::vector<LocalCellOverride> overrides;
+  if (fine->State(*start) == FineCellState::kUnknown)
+    overrides.push_back({*start, LocalCellSource::kStartAssumedFree, evaluation.traversal_cost});
+  const auto count = overrides.size();
+  return {.status = StartPatchResult::Status::kReady,
+          .view = std::make_shared<const RequestLocalPlanningView>(fine, geometry, p0, radius,
+              std::move(overrides), true), .assumed_cells = count};
 }
 
 StartConnectionsResult RequestLocalStartPatchBuilder::BuildStartConnections(

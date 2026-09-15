@@ -762,6 +762,17 @@ TEST(IncrementalNavigationNode, LocalMapQosCanBeOverriddenForVolatileReplay) {
   EXPECT_EQ(profile.durability, RMW_QOS_POLICY_DURABILITY_VOLATILE);
 }
 
+TEST(IncrementalNavigationNode, PhysicalGoalPrecisionIsConfigurableAndStartupOwned) {
+  auto options=ServerOptions("drl_precision");
+  options.append_parameter_override("goal_position_tolerance_m",0.05);
+  auto server=std::make_shared<IncrementalNavigationNode>(options,IncrementalNavigationNodeDependencies{});
+  EXPECT_DOUBLE_EQ(server->get_parameter("goal_position_tolerance_m").as_double(),0.05);
+  EXPECT_FALSE(server->set_parameters_atomically({rclcpp::Parameter("goal_position_tolerance_m",0.3)}).successful);
+  options=ServerOptions("invalid_precision");
+  options.append_parameter_override("goal_position_tolerance_m",0.0);
+  EXPECT_THROW(std::make_shared<IncrementalNavigationNode>(options,IncrementalNavigationNodeDependencies{}),std::invalid_argument);
+}
+
 TEST(IncrementalNavigationNode, StartupParametersRequireRestart) {
   auto server = std::make_shared<IncrementalNavigationNode>(
       ServerOptions("startup_parameters"), IncrementalNavigationNodeDependencies{});

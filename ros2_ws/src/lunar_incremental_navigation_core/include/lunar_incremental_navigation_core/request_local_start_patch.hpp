@@ -35,6 +35,11 @@ struct StartConnectionsResult final {
 
 class RequestLocalStartPatchBuilder final {
  public:
+  // Stationary wheel support is bounded at the actual anchor and does not
+  // certify any translation endpoint or mutate the persistent evidence.
+  [[nodiscard]] StartPatchResult BuildStationary(
+      std::shared_ptr<const FineTraversabilitySnapshot> fine, const Pose2& p0,
+      const PlatformCapability& capability, const TraversabilityProfile& profile) const;
   [[nodiscard]] StartPatchResult Build(
       std::shared_ptr<const FineTraversabilitySnapshot> fine,
       const SparseGridGeometry& local_window, const Pose2& p0,
