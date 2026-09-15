@@ -300,3 +300,99 @@ navigation, Humble, Orin, DDS or vehicle readiness. Those runtime layers remain
 large arrival-region fixture after off-center actual arrivals and revision rebuilds;
 all graph degrees remain <=19. The separate normal 0.30 m arrival test proves
 that unchanged actual poses do not repeatedly expose already-satisfied portals.
+
+## Sparse Actor and asymmetric discrete SAC
+
+The training-only `model`, `batch` and `sac` modules require PyTorch. `config`
+remains Torch-free, including `ModelConfig` and `LearningConfig`; importing
+`DecisionCore` in an observed ROS worker does not load Torch or privileged code.
+The default model has 6 residual sparse attention layers, width 128 and 8 heads.
+Each measured graph is read once by its current-node query. Ordered polygon-edge
+features preserve boundary adjacency; platform context and the candidate position,
+world heading, directional utility and visit bit enter one shared action head.
+There is no recurrent state, dense node-square attention or graph truncation.
+
+```python
+import torch
+from lunar_drl_exploration.config import ModelConfig, LearningConfig
+from lunar_drl_exploration.model import Actor
+from lunar_drl_exploration.sac import SACLearner
+
+actor = Actor(ModelConfig()).eval()  # CPU collector, batch of 1..8 observations
+outputs = actor(observations)       # list[PolicyOutput], in input order
+# Each output has 1-D logits, probs, log_probs in frozen action order.
+# For deterministic inference, stack per-output argmax and transfer once.
+choices = torch.stack([out.probs.argmax() for out in outputs]).cpu().tolist()
+
+learner = SACLearner(ModelConfig(), LearningConfig(), device="cuda")
+metrics = learner.update(transitions, scenes)  # exactly 64 Transition records
+publication = learner.actor_state()
+actor.load_state_dict(publication["state_dict"])
+version = publication["version"]
+checkpoint = learner.state_dict()
+learner.load_state_dict(checkpoint)
+```
+
+`scenes` is a mapping `scene_id -> PrivilegedScene`. `PrivilegedState.observed`
+is a row-major **packed uint8, little-bit-order** effective observation mask with
+`ceil(prod(scene.reference_shape)/8)` bytes, aligned to `packed_reference`.
+It is not a byte-per-cell mask. Each Q call pools bits indexed by the scene's CSR
+`reference_indices` into current observed fractions; empty owner slices have
+fraction zero. Relative static node coordinates, log reference-owner counts and
+these fractions encode the privileged graph. Each Critic independently encodes
+both the measured observation and privileged graph and returns a tuple of 1-D Q
+vectors aligned with the Actor's exact valid action lists. Actor/Q1/Q2/target1/
+target2 own independent parameter storage. No scene-ID embedding or persistent
+GPU scene cache is used; ephemeral packing retains no scene beyond its call.
+
+`LearningConfig` defaults: effective batch 64, microbatch 16, learning rate 1e-5,
+gamma 1, Polyak 0.005, initial alpha 5e-5, maximum alpha 1e-4, target entropy
+`0.01 * log(number_of_valid_actions)`. Actual microbatch sample counts weight
+all means. Every complete update performs one step per Critic, one Actor step,
+one temperature step and one target soft update. Exact expectations enumerate
+all valid actions. Only `terminated` suppresses bootstrapping; truncated records
+must contain the real successor before reset. True terminal successors may have
+empty action lists and are skipped entirely. The trainable log-alpha is clamped
+after its step. Metrics cross to CPU once per complete update. Training uses deterministic
+per-layer activation recomputation; inference and detached Q/target passes skip
+it. Each Critic backpropagates and releases its activations before the other
+Critic runs; optimizer steps still occur once, after all microbatches.
+
+`actor_state()` returns owned CPU tensor copies with keys `schema` (task_graph_v1),
+`model_config` (primitive dict), `version` (completed update count), `state_dict`.
+Repeated publication without an update has the same version. The scheduler owns
+the 16-update publication cadence; publication itself does not advance it.
+`state_dict()` returns an owned Torch-serializable record with schema
+`sparse_graph_sac_v1`, primitive model/learning config dicts, `updates`, trainable
+`log_alpha`, all five model states and all four optimizer states. Load rejects old
+schemas and changed semantic hyperparameters; microbatch size may differ. Models
+and optimizer tensors restore onto the constructed learner's device through their
+standard load APIs. Scheduler/replay/scene ownership, collector versions, RNG,
+curriculum and update credits remain external Task 6 checkpoint responsibilities.
+No PlatformConfig mappingproxy is embedded in these records.
+
+Task 5 numerical benchmark, 2026-09-15: Torch 2.8.0+cu128, NVIDIA GeForce RTX
+5070 Ti Laptop GPU. Synthetic sparse chains match the listed node/edge sizes;
+these are numerical model benchmarks, not generated-terrain navigation results.
+Every observation has 20 positions x 8 headings = 160 valid joint actions.
+CPU inference uses 2 threads, CUDA learner 4 threads, sequential benchmarks after
+one warmup. Times include CPU packing/transfers; medians of 5 inference runs and
+3 complete updates, explicit CUDA synchronization only around benchmark timing.
+
+| Measured and truth graph (each) | CPU batch 1 | CPU batch 8 | CUDA batch 64 / micro 16 | CUDA peak allocated |
+| --- | --- | --- | --- | --- |
+| 128 nodes, 127 undirected edges | 3.085 ms | 16.696 ms | 0.2582 s | 0.150 GiB |
+| 1,999 nodes, 1,998 undirected edges | 23.424 ms | 312.383 ms | 3.3376 s | 0.773 GiB |
+| 5,999 nodes, 5,998 undirected edges | 91.386 ms | 1,213.055 ms | 10.6520 s | 2.097 GiB |
+
+The initial implementation retained all layer activations: 1,999-node updates
+peaked at 8.507 GiB, and 5,999 nodes failed inside the first Critic's truth encoder
+at 11.10 GiB allocated (48 MiB allocation failed). Deterministic per-layer
+recomputation and separate Critic backward passes resolved that measured OOM.
+The table reports the final implementation; numerical tests compare its outputs,
+gradients and complete updates against direct execution.
+
+Packing adds reverse directions and self loops. The larger benchmark retains all
+graph nodes and both dynamic Critic inputs; its memory/time does not establish
+30x collection throughput. Native closed-loop exploration, full 3D, Humble,
+Orin, DDS and vehicle model deployment remain `NOT_RUN` for this task.
