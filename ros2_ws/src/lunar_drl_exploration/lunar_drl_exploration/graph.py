@@ -436,8 +436,9 @@ class GraphBuilder:
                 "origin": tuple(terrain.origin),
                 "shape": tuple(terrain.shape),
             }
+        descriptor = dict(descriptor, terrain_id=terrain.terrain_id)
         return PrivilegedScene(
-            terrain.terrain_id,
+            reference.reference_id,
             points,
             edges,
             np.linalg.norm(points[edges[:, 0]] - points[edges[:, 1]], axis=1),

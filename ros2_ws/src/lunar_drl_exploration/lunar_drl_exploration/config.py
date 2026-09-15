@@ -8,7 +8,7 @@ import yaml
 from types import MappingProxyType
 from typing import Mapping
 
-from .contracts import Pose
+from .contracts import Pose, SensorSpec
 
 
 @dataclass(frozen=True)
@@ -126,3 +126,107 @@ class LearningConfig:
                 0 < self.polyak <= 1 and self.learning_rate > 0 and
                 self.target_entropy_factor >= 0):
             raise ValueError("invalid SAC optimization settings")
+
+
+@dataclass(frozen=True)
+class TrainingConfig:
+    """Operational defaults and explicit experience semantics; no Torch/native import."""
+    model: ModelConfig = field(default_factory=ModelConfig)
+    learning: LearningConfig = field(default_factory=LearningConfig)
+    sensor: 'SensorSpec' = field(default_factory=lambda: SensorSpec())
+    platform: PlatformConfig = field(default_factory=load_platform_config)
+    seed: int = 20260915
+    environments: int = 8
+    target_rtf: float = 30.0
+    integration_step_s: float = .05
+    observation_hz: float = 2.0
+    goal_position_tolerance_m: float = .05
+    warmup: int = 1024
+    update_ratio: float = .25
+    max_update_credit: int = 32
+    actor_publish_updates: int = 16
+    worker_threads: int = 1
+    collector_threads: int = 2
+    learner_threads: int = 4
+    dataloader_workers: int = 0
+    curriculum_budgets: tuple = (512, 2048, 8192)
+    curriculum_extents_m: tuple = ((40, 80), (80, 150), (100, 300))
+    replay_max_bytes: int = 8 * 1024**3
+    snapshot_max_bytes: int = 2 * 1024**3
+    total_output_max_bytes: int = 20 * 1024**3
+    metrics_max_bytes: int = 8 * 1024**2
+    save_interval_s: float = 1800.0
+    output_dir: str = 'training-output/drl-exploration-redesign'
+    system_reserve_bytes: int = 2 * 1024**3
+    owned_pss_limit_bytes: int | None = None
+
+    def __post_init__(self):
+        for name in ('environments', 'max_update_credit', 'actor_publish_updates',
+                     'worker_threads', 'collector_threads', 'learner_threads',
+                     'replay_max_bytes', 'snapshot_max_bytes', 'total_output_max_bytes',
+                     'metrics_max_bytes'):
+            value = getattr(self, name)
+            if not isinstance(value, int) or value <= 0:
+                raise ValueError(f'positive integer required: {name}')
+        for name in ('target_rtf', 'integration_step_s', 'observation_hz',
+                     'goal_position_tolerance_m', 'update_ratio', 'save_interval_s'):
+            value = getattr(self, name)
+            if not np.isfinite(value) or value <= 0:
+                raise ValueError(f'positive finite value required: {name}')
+        if self.warmup < 0 or self.dataloader_workers != 0 or self.system_reserve_bytes < 0:
+            raise ValueError('invalid warmup, DataLoader or reserve settings')
+        if self.owned_pss_limit_bytes is not None and self.owned_pss_limit_bytes <= 0:
+            raise ValueError('positive owned PSS limit required')
+
+
+def config_record(value):
+    """Explicit canonical JSON/spawn record; asdict cannot deepcopy mappingproxy."""
+    from dataclasses import fields, is_dataclass
+    if is_dataclass(value):
+        return {f.name: config_record(getattr(value, f.name)) for f in fields(value)}
+    if isinstance(value, Mapping):
+        return {str(key): config_record(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [config_record(item) for item in value]
+    if isinstance(value, Path):
+        return str(value)
+    if value is None or type(value) in (str, bool, int, float):
+        return value
+    raise TypeError(f'nonprimitive config value: {type(value).__name__}')
+
+
+def resume_semantics(config):
+    """Full replay continuation only. Actor-only loads use actor schema/model shape."""
+    record = config_record(config)
+    learning = {key: value for key, value in record['learning'].items()
+                if key not in ('microbatch_size','learning_rate','polyak','initial_alpha')}
+    platform = {key: value for key, value in record['platform'].items()
+                if key != 'capability_path'}
+    return dict(model=record['model'], learning=learning,
+        observation_schema='task_graph_v1', action_schema='joint_pose_20x8_v1',
+        observation_model='finite_center_tip_prefix_v1', generator_version=5,
+        observation_origin='actual_pose_optical_offset',
+        effective_measurement='classified_center_native_3x3_no_hidden_neighbors_v1',
+        reward='delta_area/100-.02*distance/10-.005*absolute_turn/pi-.001_v1',
+        termination='exhausted_terminal_budget_truncated_bootstrap_v1',
+        graph_normalization=dict(position_m=10., frontier_cells=100.),
+        sensor=record['sensor'], platform=platform,
+        integration_step_s=config.integration_step_s, observation_hz=config.observation_hz,
+        goal_position_tolerance_m=config.goal_position_tolerance_m,
+        schedule=dict(warmup=config.warmup, ratio=config.update_ratio),
+        curriculum_budgets=record['curriculum_budgets'],
+        curriculum_extents_m=record['curriculum_extents_m'])
+
+
+def training_config_from_record(record):
+    """Reconstruct a JSON/spawn configuration without importing models or terrain."""
+    values = dict(record)
+    values['model'] = ModelConfig(**values['model'])
+    values['learning'] = LearningConfig(**values['learning'])
+    values['sensor'] = SensorSpec(**values['sensor'])
+    platform = dict(values['platform'])
+    platform['capability'] = MappingProxyType(dict(platform['capability']))
+    values['platform'] = PlatformConfig(**platform)
+    values['curriculum_budgets'] = tuple(values['curriculum_budgets'])
+    values['curriculum_extents_m'] = tuple(tuple(pair) for pair in values['curriculum_extents_m'])
+    return TrainingConfig(**values)

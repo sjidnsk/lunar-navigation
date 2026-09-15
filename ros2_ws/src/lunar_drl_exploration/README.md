@@ -403,3 +403,193 @@ Packing adds reverse directions and self loops. The larger benchmark retains all
 graph nodes and both dynamic Critic inputs; its memory/time does not establish
 30x collection throughput. Native closed-loop exploration, full 3D, Humble,
 Orin, DDS and vehicle model deployment remain `NOT_RUN` for this task.
+
+## Bounded replay, scheduling and continuation (Task 6)
+
+`TrainingConfig()` contains the operational defaults: 8 environments, target RTF
+30, integration 0.05 simulation seconds, observations 2 Hz, 0.05 m navigation
+arrival tolerance, batch64/micro16, warmup1024, update ratio0.25, maximum pending
+credit32, Actor publication every16 completed updates, and worker/collector/learner
+numeric threads1/2/4 with zero DataLoader subprocesses. Curriculum decision budgets
+are512/2048/8192 and extents40–80/80–150/100–300 m. Sensor starts at10 m/90°.
+The configuration itself does not start environments or change native parameters;
+Task7/8 must apply the shared arrival value to navigation and the public controller.
+`config_record(config)` and `training_config_from_record(record)` provide explicit
+JSON/spawn records, including the canonical platform capability. They support
+mappingproxy without `dataclasses.asdict`, Torch, Scene or native terrain imports.
+
+Default replay residency is8 GiB, saved replay payload at most2 GiB, total output
+at most20 GiB including the old checkpoint and atomic temporary, metrics8 MiB and
+save interval1800 monotonic seconds. Output is
+`training-output/drl-exploration-redesign/`, relative to the project root. These
+are selected operating budgets, not claims about currently available hardware.
+The default system available-memory reserve is2 GiB; an optional explicit
+`owned_pss_limit_bytes` may also be configured. No hardware or map admission gate
+is added. The runtime must measure actual RTF rather than skipping physical steps.
+
+`ReplayBuffer(max_bytes).add(transition, scenes)` accepts complete `Transition`
+records and a mapping of needed IDs to immutable `PrivilegedScene`. The registry
+retains only the static numeric graph, packed reference and frozen descriptor,
+never `TerrainGrid`, high-resolution terrain, ROS objects or worker maps. Its ID
+is `CoverageReference.reference_id`, binding terrain/task/start/sensor semantics;
+`generator_descriptor['terrain_id']` preserves original terrain identity. Different
+references over one terrain coexist and evict independently. Existing IDs reuse
+the registry's canonical scene without a whole-scene comparison on each admission.
+
+`bytes_used` charges unique reachable allocations (including shared array backing)
+plus conservative Python/ledger membership overhead; `buffer_bytes` reports unique
+numeric bytes-backed storage alone. It is a replay ownership estimate, distinct
+from live process PSS and allocator residency. `scene_refcounts` counts retained
+transitions referring to each scene, once per transition even if both states use
+it. Oldest entries evict until the byte budget fits; the last reference releases
+the scene. A single record and its scene larger than the budget fail *before*
+eviction, so the caller still owns the unacknowledged finished message.
+`sample(64, numpy_generator)` samples with replacement in O(batch) dictionary
+lookups, without copying the complete replay index. `scenes` is a read-only view
+for the synchronous learner call; do not mutate replay during that call.
+
+`dumps_transport(value)` / `loads_transport(bytes)` are the explicit trusted-local
+IPC boundary for observations, transitions, static scenes, primitive containers
+and NumPy RNG records. The wire contains tagged primitive records and immutable
+bytes, not native-object/NumPy/dataclass pickle reducers. Decoding runs contract
+validation and retains immutable array views, shared backing and repeated object
+references within the payload. Actual spawn/Pipe and checkpoint tests verify this;
+ordinary NumPy pickle flags alone are insufficient. Mappingproxy is supported.
+Worker `MapSnapshot`/tiles stay local and are deliberately unsupported transport
+payloads. Send `config_record` for configuration and send only numeric static
+scene records when a learner first needs them. Collector Torch RNG tensors can
+use Torch's normal process transport; they are a separate collector-state field.
+
+`replay.snapshot(max_bytes)` returns a bounded byte payload containing complete
+retained transitions and every referenced scene. A conservative residency subset
+is selected first, followed by an actual serialized-length check. It may retain
+less than the byte ceiling, and drops oversized-for-snapshot records rather than
+splitting them. `ReplayBuffer.from_snapshot(payload, max_bytes)` reconstructs
+immutable contracts and refcounts. It never recreates hidden terrain. Reducing the
+runtime replay budget still must fit each restored transition plus its scene;
+an individual oversized record gives an explicit error.
+
+The learner owns admission counters and update credit. The exact rational scheduler
+has no warmup debt and never clamps earned credit:
+
+```python
+schedule = UpdateSchedule(warmup=1024, ratio=.25, max_credit=32)
+if schedule.can_dispatch():       # includes the proposed action and all reservations
+    schedule.reserve_dispatch()  # BEFORE dispatch, one reservation per future result
+    # Task8 dispatches one action to an available worker slot.
+
+# Task8 keeps each complete result until learner acknowledgement.
+replay.add(finished_transition, received_scenes)
+schedule.collected(reserved=True) # AFTER successful admission, exactly once
+# Now acknowledge the result. A retry must not re-admit an acknowledged message.
+
+# Infrastructure failure with no constructable successor only:
+schedule.cancel_dispatch()       # releases the reservation, creates no experience
+
+if schedule.can_update:
+    with boundary.update():      # boundary = UpdateBoundary()
+        metrics = learner.update(replay.sample(64, replay_rng), replay.scenes)
+        schedule.updated()       # AFTER the whole successful optimizer/target update
+```
+
+`can_dispatch(inflight_count=None, count=1)` also accepts an external count including
+all outstanding reservations; it rejects counts smaller than its own reservations.
+`reserve_dispatch(count)` supports batches, and `cancel_dispatch(count)` is only for
+unconstructable work. `collected()` without `reserved=True` is available for direct
+synchronous admission tests and applies the same backpressure. Credit is a Fraction;
+convert to float when writing metrics. Already reserved completions always fit the
+credit cap, including while new dispatch is paused. Save/restore preserves collected
+and update counters and fractional credit; unfinished reservations reset to zero
+because restored environments start new episodes. Publication at completed update
+multiples of16 is Task8's responsibility, using the existing `actor_state()` API.
+
+`TrainingState.capture` requires keyword arguments `learner`, `config`, `replay`,
+`schedule`, `boundary`, `replay_rng`, `curriculum_rng`, `curriculum`,
+`collector_state` and `counters`. Learner and scheduler completed-update counts
+must agree and replay admission cannot be ahead of that learner-owned collection
+counter. `curriculum` is a primitive mapping: Task8 must include its stage, episode
+progress and scene-seed counter. `collector_state` must include its CPU Actor
+sampling `policy_rng` Torch tensor and `actor_version`, plus next-episode/scene-seed
+counters owned by the collector. `counters` carries episode totals, accumulated
+simulation/wall time and other runtime totals. All supplied state is copied or
+serialized at capture; no in-progress environment state is included.
+
+The snapshot includes all five networks, four optimizers, actual log-alpha, update
+count, schedule, limited replay/scenes, Python/global NumPy/CPU Torch/CUDA RNG,
+independent replay/curriculum generator states, collector RNG/version, curriculum,
+counters and explicit config/schema semantics. CUDA RNG is restored for continuation
+on CUDA with matching device count; GPU-to-CPU restore retains CPU state and does
+not claim the same cross-device random stream. Exact portable model/Adam restoration
+is supported by the learner. Collector RNG is returned for the collector to install.
+
+```python
+manager = CheckpointManager(config.output_dir, config.save_interval_s,
+    total_max_bytes=config.total_output_max_bytes,
+    snapshot_max_bytes=config.snapshot_max_bytes)
+manager.write_run(config, owned_pids=owned_pids, code_revision=current_sha,
+                  extra={"seed": config.seed, "completed_updates": learner.updates})
+# Main thread only: signal.signal(signal.SIGINT, manager.request_sigint)
+# Resource stop: manager.request_save(str(resource_error), stop=True)
+# At the completed-update / collector-acknowledgement barrier:
+if manager.save_requested:
+    manager.save(TrainingState.capture(...))  # explicit keyword arguments above
+
+state = manager.load(config)                  # trusted local resume.pt only
+restored = state.restore(learner, config)       # learner constructed with requested config
+replay, schedule = restored.replay, restored.schedule
+replay_rng, curriculum_rng = restored.replay_rng, restored.curriculum_rng
+# Install restored.collector_state RNG/version and restored.curriculum/counters.
+# Start NEW environment episodes; never join unfinished motion to new observations.
+```
+
+Task8's barrier pauses dispatch and synchronizes collector policy RNG, versions,
+scene-seed/curriculum counters and the acknowledgement watermark with learner
+admission. Finished messages stay queued until admission and ACK; capture need not
+wait for episode completion. The runtime serializes replay mutation, updates and
+output writes under this single owner. A signal handler only sets save/stop flags;
+normal SIGINT or observed resource shutdown waits for the full update boundary.
+If *any exception interrupts a partial optimizer step*, `UpdateBoundary` is poisoned
+and capture is forbidden. Preserve the previous good resume and report failure;
+do not save changed weights alongside an old update count or silently reset the
+guard. Restart from the prior complete checkpoint unless an actual full rollback
+is implemented. Task6 does not implement the asynchronous collector or runtime loop.
+
+`CheckpointManager.save` writes, fsyncs, atomically replaces one `resume.pt`, then
+fsyncs its directory. Every physical temporary write checks simultaneous old+temp
+output bytes and observed initial disk free space. A failed write/rename removes
+only that attempt's temporary and preserves the old checkpoint. A hard process
+kill can leave an orphan temporary; it remains counted on the next attempt and
+is not silently deleted. The manager uses monotonic interval time, and failed
+saves do not advance it. `stop_requested` remains set after a successful save so
+Task8 can exit. No historical checkpoints or unevaluated `best.pt` are written.
+An optional externally evaluated best Actor, if later added, counts in the same
+output budget. There is no default video, bag or map image output.
+
+Full-training `load(config)` compares model, effective batch, discount, entropy
+objective/cap, reward, observation model/origin/effective-center visibility,
+sensor, platform, physical integration/observation/arrival settings, schedule and
+curriculum semantics. It rejects old schemas and names incompatible fields.
+Microbatch size, learning rate, Polyak, initial-alpha initialization, operational
+paths/save interval/RTF/threads/output budgets can change; saved Adam history and
+actual temperature remain authoritative. A changed credit cap must still fit saved
+pending credit. Actor-only loading uses the existing Actor shape/schema contract;
+it does **not** call the full-replay semantic gate, so frozen evaluations may change
+range/FOV and recompute real graph utility/context. Forward tests at5/15 m and
+60/120/180° prove interface acceptance, not policy generalization.
+
+`MetricsWriter(path, max_bytes, total_max_bytes=...)` maintains one bounded JSONL
+file containing complete recent finite JSON records. It rejects oversized/NaN
+records before changing the file and repairs incomplete trailing writes on open.
+It compacts in place, so metrics are recoverable best-effort telemetry rather than
+a crash-atomic checkpoint. Writes account for the shared output budget.
+`ResourceMonitor(owned_pids, system_reserve_bytes=...,
+owned_pss_limit_bytes=...).observe(output_dir)` reads **current**
+`/proc/<pid>/smaps_rollup` PSS once per explicit owned PID and `/proc/meminfo`
+MemAvailable, plus current disk/output bytes. `check(snapshot)` raises
+`ResourceLimitError` with `reason`, actual `observed` and `limit`; it never sums RSS
+or substitutes a lifetime peak. Update the explicit PID set when workers restart;
+unreadable/missing PID observations are errors, not zero memory. `write_run` records
+current CPU affinity/count, GPU total/free when nvidia-smi is available, RAM/disk,
+code revision and chosen config. Missing GPU introspection is recorded, not an
+admission prerequisite. Task8 supplies bounded throughput, credit, batch, Actor lag,
+coverage/decision progress, RTF and execution-reason metrics and terminal display.
