@@ -188,6 +188,11 @@ class RosNavigationAdapter:
         if not service_ready:
             self.require_fresh_snapshot()
             self.map_reason="SERVICE_UNAVAILABLE"
+            if self._map_future is not None:
+                # Only this adapter's request is retired; a dead server need
+                # never resolve it, and its eventual reply must be ignored.
+                self.client.remove_pending_request(self._map_future)
+                self._map_future=None
         if self._map_future is not None and self._map_future.done():
             future=self._map_future;self._map_future=None
             self._current_input=False

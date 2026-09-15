@@ -31,6 +31,8 @@ class Future:
 class Client:
     def __init__(self):self.ready=True;self.future=None;self.requests=[]
     def service_is_ready(self):return self.ready
+    def remove_pending_request(self,future):
+        if self.future is future:self.future=None
     def call_async(self,request):
         self.requests.append(request);self.future=Future();return self.future
 
@@ -59,7 +61,7 @@ def test_unavailable_or_invalid_response_retains_cache_without_authorizing_it(ad
     assert a.snapshot is saved
     c.ready=False
     assert a.poll_snapshot() is None
-    c.ready=True;c.future.response=reply(s)
+    c.ready=True
     assert a.poll_snapshot() is None
     c.future.response=reply(s)
     assert a.poll_snapshot() is not None
@@ -95,7 +97,6 @@ def test_decision_boundary_waits_for_response_requested_after_boundary(adapter,b
     c.future.response=reply(s,ready=False);runtime.tick();assert not state.inflight
     c.ready=False;runtime.tick();assert not state.inflight
     c.ready=True;runtime.tick();assert not state.inflight
-    c.future.response=reply(s);runtime.tick();assert not state.inflight
     from lunar_drl_exploration.contracts import Pose
     current=replace(s,pose=Pose(3.5,2.5,0.))
     c.future.response=reply(current);runtime.tick()
@@ -135,3 +136,45 @@ def test_best_effort_state_is_received_and_allows_measured_stop(adapter):
     runtime=InferenceRuntime(a,lambda obs:0);runtime.start(task(0,0,9,9));runtime.pause();runtime.tick()
     assert runtime.state=='PAUSED'
     runtime.cancel();runtime.tick();assert runtime.state=='CANCELED'
+
+
+@pytest.mark.parametrize('late_reply',[False,True])
+def test_service_loss_retires_owned_real_pending_request_and_recovers(adapter,monkeypatch,late_reply):
+    from lunar_drl_exploration.runtime import InferenceRuntime
+    from lunar_drl_exploration.contracts import Pose,SensorSpec
+    a=adapter;s=Adapter().snapshot
+    a.snapshot=a.store.apply(reply(s));saved=a.snapshot
+    a.processed_stamp_ns=1_000_000_000
+    ready=SimpleNamespace(value=True)
+    monkeypatch.setattr(a.client,'service_is_ready',lambda:ready.value)
+    # Actual rclpy Client/Future bookkeeping, with no service response at all.
+    unrelated=a.client.call_async(a._service_type.Request())
+    state=Adapter();a.velocity=(0.,0.)
+    monkeypatch.setattr(a,'begin_goal',state.begin_goal)
+    monkeypatch.setattr(a,'cancel_goal',state.cancel_goal)
+    monkeypatch.setattr(a,'poll_goal',state.poll_goal)
+    monkeypatch.setattr(type(a),'inflight',property(lambda self:state.inflight))
+    runtime=InferenceRuntime(a,lambda obs:0,SensorSpec(range_m=3))
+    runtime.start(task(0,0,9,9));runtime.core.consume(saved)
+    runtime.core.record_observation(s.pose,(1,))
+    runtime.tick();lost=a._map_future
+    assert not lost.done() and not state.inflight
+    ready.value=False;runtime.tick()
+    assert lost not in a.client._pending_requests.values()
+    assert unrelated in a.client._pending_requests.values()
+    assert a._map_future is None and a.snapshot is saved
+    assert runtime.core.coverage.known_area_m2>0
+    assert runtime.core.history.bits([[s.pose.x,s.pose.y]])[0,0]==1
+    ready.value=True;runtime.tick();current=a._map_future
+    assert current is not lost and current is not None and not state.inflight
+    assert not lost.done()  # Recovery never depended on completing the lost reply.
+    if late_reply:
+        lost.set_result(reply(replace(s,pose=Pose(8.5,8.5,0.))))
+        runtime.tick()
+        assert not state.inflight and a.snapshot is saved
+    current.set_result(reply(replace(s,pose=Pose(3.5,2.5,0.))))
+    runtime.tick()
+    assert state.inflight and runtime.state=='RUNNING'
+    assert a.snapshot.revision==s.revision and a.snapshot.pose.x==3.5
+    assert set(a.client._pending_requests.values())=={unrelated,a._map_future}
+    a.client.remove_pending_request(unrelated)
