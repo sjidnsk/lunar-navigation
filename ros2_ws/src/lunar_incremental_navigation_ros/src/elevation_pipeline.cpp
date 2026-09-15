@@ -31,15 +31,21 @@ lunar::incremental_navigation::ElevationUpdateResult ElevationPipeline::ApplyLoc
     latest_accepted_raw_revision_ = result.raw_elevation_revision;
     latest_accepted_map_stamp_ns = map_stamp_ns;
   } else if (result.status == lunar::incremental_navigation::ElevationUpdateResult::Status::kDuplicate) {
-    const auto published = std::atomic_load_explicit(&bundle_, std::memory_order_acquire);
-    if (published->bundle.fine &&
-        published->bundle.fine->raw_elevation_revision() == result.raw_elevation_revision) {
+    if (latest_accepted_raw_revision_ == result.raw_elevation_revision) {
+      latest_accepted_map_stamp_ns = map_stamp_ns;
+    }
+    auto published = std::atomic_load_explicit(&bundle_, std::memory_order_acquire);
+    while (published->bundle.fine &&
+           published->bundle.fine->raw_elevation_revision() == result.raw_elevation_revision) {
       auto replacement = std::make_shared<PipelineSnapshot>(*published);
       replacement->processed_map_stamp_ns = map_stamp_ns;
       std::shared_ptr<const PipelineSnapshot> immutable = std::move(replacement);
-      std::atomic_store_explicit(&bundle_, std::move(immutable), std::memory_order_release);
-    } else if (latest_accepted_raw_revision_ == result.raw_elevation_revision) {
-      latest_accepted_map_stamp_ns = map_stamp_ns;
+      // Guidance can publish concurrently; preserve its latest immutable bundle.
+      if (std::atomic_compare_exchange_weak_explicit(
+              &bundle_, &published, std::move(immutable),
+              std::memory_order_acq_rel, std::memory_order_acquire)) {
+        break;
+      }
     }
   }
   return result;
@@ -114,12 +120,16 @@ bool ElevationPipeline::RunFineDerivation() {
   std::sort(export_dirty.begin(), export_dirty.end());
   export_dirty.erase(std::unique(export_dirty.begin(), export_dirty.end()),
                      export_dirty.end());
-  {
-    std::scoped_lock lock{work_mutex_};
-    export_journal_.push_back({.revision = next->fine_traversability_revision(),
-                               .dirty_tiles = export_dirty});
-    if (export_journal_.size() > kExportJournalCapacity) export_journal_.pop_front();
+  // Pair the journal and fine publication under the same short source lock.
+  // A duplicate received while deriving this raw revision advances its stamp;
+  // newer raw input belongs to the pending batch and must not leak into it.
+  std::scoped_lock lock{work_mutex_};
+  if (latest_accepted_raw_revision_ == raw->raw_elevation_revision()) {
+    captured_map_stamp_ns = latest_accepted_map_stamp_ns;
   }
+  export_journal_.push_back({.revision = next->fine_traversability_revision(),
+                             .dirty_tiles = std::move(export_dirty)});
+  if (export_journal_.size() > kExportJournalCapacity) export_journal_.pop_front();
   auto current = std::atomic_load_explicit(&bundle_, std::memory_order_acquire);
   while (true) {
     auto replacement =
@@ -183,6 +193,7 @@ lunar::incremental_navigation::SnapshotBundle ElevationPipeline::CaptureBundle()
 
 PolicyMapSnapshotCapture ElevationPipeline::CapturePolicyMapSnapshot(
     const std::uint64_t since_revision) const {
+  std::scoped_lock lock{work_mutex_};
   const auto snapshot = std::atomic_load_explicit(&bundle_, std::memory_order_acquire);
   PolicyMapSnapshotCapture result{.bundle = snapshot->bundle,
                                   .processed_map_stamp_ns = snapshot->processed_map_stamp_ns};
@@ -193,7 +204,6 @@ PolicyMapSnapshotCapture ElevationPipeline::CapturePolicyMapSnapshot(
     result.base_revision = since_revision;
     return result;
   }
-  std::scoped_lock lock{work_mutex_};
   if (export_journal_.empty() || since_revision + 1U < export_journal_.front().revision ||
       since_revision >= revision) return result;
   result.full_snapshot = false;

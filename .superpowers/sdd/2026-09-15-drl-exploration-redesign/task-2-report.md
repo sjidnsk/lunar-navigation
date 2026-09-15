@@ -98,3 +98,119 @@ Round 2 GREEN：Jazzy messages+ROS affected build 成功；`ctest -R
 补充回归：`test_real_wire_accepts_same_revision_refresh_and_journal_based_delta`、
 `test_raster_handles_negative_partial_tiles_and_keeps_prior_snapshot_immutable` 已随 source overlay
 运行；`JournalDeltaCoversCoalescedAcceptedRawTiles` 已在 `elevation_pipeline_test` 运行。
+
+## Round 2 最终补齐（2026-09-15，起点 e82329b）
+
+状态：DONE。最终修复范围在 `beffd51`、`65daa42`、`e82329b` 之上继续完成本节；
+上文 Round 1 的“revision change 一律 full”是历史阶段行为，已由 Round 2 的 128 条
+metadata journal、`base_revision` 连续区间和缺失历史 full fallback 取代。
+
+### 本轮发现及修复
+
+1. 受控阻塞 fine deriver 后，同 raw revision 的 duplicate 到达，旧实现仍发布启动派生时的
+   stamp。现在在与 raw 输入共用的短锁内确认最新 accepted raw revision，只有它仍匹配
+   待发布 raw 时才更新该 stamp；已收到更新 raw 时保持原捕获 stamp。journal 与 fine/stamp
+   一起发布，capture 在同一锁下取得对应历史。duplicate 更新 immutable wrapper 使用 CAS，
+   保留并发 guidance 发布。没有新增 raw revision→stamp 历史或完整地图副本。
+2. 原生 fine 目录有意省略 M 全 UNKNOWN 的 tile，旧 Export 因只遍历 fine 目录漏掉其中
+   已测中心高程。full 现在遍历 fine/raw tile 并集；delta 仍只读取 journal 指定 tile。
+   没有 fine tile 时 M 为 UNKNOWN、cost 为 0，B/observed/height 仍取同一个 native raw。
+   保守 halo 中既无 fine tile 也无有限测量的存储空隙不序列化，确保 delta/full tile 集合一致。
+3. 修正旧 action 身份断言：action row 0 对应 graph index 1、node id 9，而 world goal
+   从 goals row 0 读取。继续保留 200 个 graph node / 唯一 action 指向 node 199 的回归。
+4. 将 Python same-revision / skipped-revision 测试全部改为实际生成的 ROS response，验证
+   新 pose、stamp 输入的接受、tile 共享、旧 snapshot 不变、epoch delta 拒绝；新增四种 native
+   start status 的语义转换、零 quaternion 拒绝后 cache 保持、raster 五字段及不可写 buffer 回归。
+
+### 本轮 RED 证据
+
+在修改生产源码前，扩展 `elevation_pipeline_test` 后运行：
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source /home/kai/.cache/lunar-drl-redesign/jazzy/install/setup.bash
+cmake --build /home/kai/.cache/lunar-drl-redesign/jazzy/build/lunar_incremental_navigation_ros \
+  --target elevation_pipeline_test -j 2
+/home/kai/.cache/lunar-drl-redesign/jazzy/build/lunar_incremental_navigation_ros/elevation_pipeline_test \
+  --gtest_filter='PolicyMapPipelineExport.*:PendingDuplicate/*:ElevationPipelineTest.DuplicatePendingBeforeDerivationAdvancesOnlyMatchingFine'
+```
+
+8 个用例中 6 passed、2 failed：
+
+- `PolicyMapPipelineExport.MeasuredUnknownTileIsExportedWithoutAllocatedNavigationTile`：
+  bootstrap 实际 `tiles.size() == 0`，预期 1。
+- `PendingDuplicate/DuplicateDuringDerivation.PublishesExactRawStampPairWithoutNewerRawLeak/0`：
+  实际 stamp 202，预期同 raw duplicate 的 303。
+
+其余 journal/export 回归直接验证既有 Round 2 修复，未声称它们在 e82329b 上失败。
+补充将 coalesced fixture 改为三个间隔 tile（0、2、4）后，发现首次 raw-only 修复将 halo
+空隙也输出为 tile，delta 重建 5 个 tile 而 full 为 3；最终只保留 fine 或有实测中心的 tile。
+
+注意：直接运行 build tree binary 时若已 source 旧 install overlay，`LD_LIBRARY_PATH` 可优先
+加载旧 installed `.so`。中间验证曾明确把 build library 路径放在其前确认新库；下列最终证据
+全部在 colcon 完整安装当前源码后运行，不以旧 overlay 结果代替当前源码验证。
+
+### 回归名称与实际覆盖
+
+新增 C++ 用例位于 `ros2_ws/src/lunar_incremental_navigation_ros/test/elevation_pipeline_test.cpp`，
+其中 `PolicyMapPipelineExport` 直接执行真实 `CapturePolicyMapSnapshot` → `Export`，将 wire delta
+逐 tile 应用于先前 full，然后逐一比较 `states`、`intrinsic_states`、`observed`、`costs`、
+`elevation_m`（NaN-aware）与当前独立 full 导出：
+
+- `HeightOnlyDeltaMatchesFullWithUnchangedNavigationFields`：height 改变，M/cost 数组和 native
+  changed_tiles 均不变，delta 仍包含新 height。
+- `ObservedOnlyDeltaMatchesFullWithUnchangedNavigationFields`：固有 BLOCKED→FREE、observed
+  同步变化，邻近障碍保持 M BLOCKED/cost 不变，delta 与 full 完全一致。
+- `MeasuredUnknownTileIsExportedWithoutAllocatedNavigationTile`：fine 目录为空时 bootstrap
+  仍有实测 height；后续同 tile height 变化及远端新增 raw-only tile 的 delta/full 一致。
+- `CoalescedRawUpdatesAndSkippedFineRevisionsMatchFull`：不同 sparse tile 的两次 raw 更新合并
+  派生，再跳过一个 fine revision 取历史并集；比较全字段，并确认其他客户端请求不会消耗历史。
+- `JournalRetains128TransitionsThenFallsBackToFull`：revision 1→129 的 128 条转换仍可 delta；
+  revision 130 时同一 base 必须 full；近期 base 仍可 delta。两种响应均与 full 比较。
+- `ElevationPipelineTest.DuplicatePendingBeforeDerivationAdvancesOnlyMatchingFine`：派生前
+  pending duplicate 不刷新旧 fine，随后发布匹配 raw 的最新 stamp。
+- `PendingDuplicate/DuplicateDuringDerivation.PublishesExactRawStampPairWithoutNewerRawLeak/0`
+  和 `/1`：使用既有 deriver 依赖注入及 promise gate；覆盖派生中 duplicate、并发新 raw 与它的
+  duplicate、rejected adapter / raw 输入不改 stamp、旧 capture 不变。没有依赖时间 sleep 猜测交错。
+
+已有并重跑：`DuplicateRefreshesPublishedFineStampWithoutChangingMap`（发布后 duplicate）、
+`FineSnapshotRetainsItsExactAcceptedMapStamp`、`JournalDeltaCoversCoalescedAcceptedRawTiles`、
+并发 guidance/fine capture、失败批次恢复及 snapshot immutability 等 pipeline 用例；
+`policy_map_exporter_test` 的 effective observed 与 direct bootstrap/same-revision refresh 用例。
+
+Python 新增 / 强化名称：
+
+- `test_real_wire_accepts_same_revision_refresh_and_journal_based_delta`
+- `test_real_wire_native_start_status_is_semantic`（0/1→READY，2→START_BLOCKED，3→INPUT_UNAVAILABLE，4 cases）
+- `test_real_wire_missing_anchor_rejected_without_replacing_cached_snapshot`
+- `test_raster_handles_negative_partial_tiles_and_keeps_prior_snapshot_immutable`
+- `test_decision_observation_freezes_action_indices_and_world_goals_at_construction`
+
+### 最终验证命令及计数
+
+从 worktree 根执行（先 source ROS，再 source 已安装 overlay）：
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source /home/kai/.cache/lunar-drl-redesign/jazzy/install/setup.bash
+test "$ROS_DISTRO" = jazzy
+colcon --log-base /home/kai/.cache/lunar-drl-redesign/jazzy/log build \
+  --base-paths ros2_ws/src \
+  --build-base /home/kai/.cache/lunar-drl-redesign/jazzy/build \
+  --install-base /home/kai/.cache/lunar-drl-redesign/jazzy/install \
+  --packages-select lunar_planning_msgs lunar_incremental_navigation_ros \
+  --executor sequential --cmake-args -DBUILD_TESTING=ON
+source /home/kai/.cache/lunar-drl-redesign/jazzy/install/setup.bash
+ctest --test-dir /home/kai/.cache/lunar-drl-redesign/jazzy/build/lunar_incremental_navigation_ros \
+  -R '^(policy_map_exporter_test|elevation_pipeline_test)$' --output-on-failure -j 1
+python3 -m pytest ros2_ws/src/lunar_drl_exploration/test/test_contracts_maps.py -q
+git diff --check
+```
+
+实际结果：affected build **2 packages finished**；CTest **2/2 targets passed**，XML 明细
+`elevation_pipeline_test` **21 tests, 0 failures, 0 errors**，`policy_map_exporter_test`
+**2 tests, 0 failures, 0 errors**；Python **14 passed**；UTF-8 显式读取与 `git diff --check` 通过。
+
+构建、安装、日志与测试 XML 均在仓库外 `/home/kai/.cache/lunar-drl-redesign/jazzy/`；
+本轮提交仅源码、回归测试及本报告。未修改 native controller，也未 merge/push/创建 PR。
+本轮属于源码和本机 Jazzy evidence；Humble、Orin、DDS、rosbag、控制器闭环和实车 **NOT_RUN**。

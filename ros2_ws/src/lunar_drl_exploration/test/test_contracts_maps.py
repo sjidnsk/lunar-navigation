@@ -110,7 +110,12 @@ def test_decision_observation_freezes_action_indices_and_world_goals_at_construc
 
     assert observation.node_ids.tolist() == [7, 9]
     assert observation.goals[1].tolist() == pytest.approx([5.0, 6.0, 1.57])
-    assert observation.goals[observation.action_nodes[0]].tolist() == pytest.approx([5.0, 6.0, 1.57])
+    action_row = 0
+    graph_node = observation.action_nodes[action_row]
+    assert graph_node == 1
+    assert observation.node_ids[graph_node] == 9
+    assert observation.goals[action_row].tolist() == pytest.approx([3.0, 4.0, 0.0])
+    assert observation.action_yaws[action_row] == pytest.approx(0.0)
     with pytest.raises(ValueError):
         observation.action_nodes[0] = 0
     with pytest.raises(ValueError):
@@ -171,25 +176,82 @@ def test_store_consumes_generated_get_policy_map_wire_geometry_and_anchor():
     assert snapshot.start_connection_status == "READY"
 
 
-def test_real_wire_accepts_same_revision_refresh_and_journal_based_delta():
+def _generated_response(**kwargs):
+    from lunar_planning_msgs.msg import PolicyMapTile
     from lunar_planning_msgs.srv import GetPolicyMap
+
+    source = _response(**kwargs)
+    wire = GetPolicyMap.Response()
+    for name in ("ready", "reason_code", "epoch", "fine_revision", "base_revision",
+                 "raw_elevation_revision", "full_snapshot", "frame_id",
+                 "resolution_m", "profile_hash", "local_bounds"):
+        setattr(wire, name, getattr(source, name))
+    wire.anchor_pose.orientation.w = 1.
+    wire.start_connection_status = 1
+    for source_tile in source.tiles:
+        tile = PolicyMapTile()
+        tile.tile_x, tile.tile_y = source_tile.tile_x, source_tile.tile_y
+        for name in ("states", "intrinsic_states", "observed", "costs", "elevation_m"):
+            setattr(tile, name, getattr(source_tile, name).tolist())
+        wire.tiles.append(tile)
+    return wire
+
+
+def test_real_wire_accepts_same_revision_refresh_and_journal_based_delta():
     store = PolicyMapStore()
-    first = _response(revision=4, state=FREE, intrinsic=FREE, observed=FREE)
-    store.apply(first)
-    refresh = GetPolicyMap.Response()
-    refresh.ready, refresh.epoch, refresh.fine_revision = True, "epoch-a", 4
-    refresh.full_snapshot, refresh.base_revision = False, 4
-    refresh.frame_id, refresh.resolution_m = "map", .1
-    refresh.origin.x = refresh.origin.y = refresh.origin.z = 0.
-    refresh.anchor_pose.orientation.w = 1.
+    first = _generated_response(revision=4, state=FREE, intrinsic=FREE, observed=FREE)
+    first.processed_stamp.sec = 10
+    before = store.apply(first)
+    refresh = _generated_response(revision=4, full_snapshot=False)
+    refresh.base_revision = 4
+    refresh.tiles = []
+    refresh.processed_stamp.sec = 11
+    refresh.anchor_pose.position.x = 2.
+    refresh.anchor_pose.orientation.w = np.cos(.25)
+    refresh.anchor_pose.orientation.z = np.sin(.25)
     refreshed = store.apply(refresh)
     assert refreshed.revision == 4
-    delta = _response(revision=6, full_snapshot=False, state=BLOCKED,
-                      intrinsic=FREE, observed=FREE)
+    assert refreshed.pose == Pose(2., 0., pytest.approx(.5))
+    assert refreshed.tiles[(0, 0)] is before.tiles[(0, 0)]
+    assert before.pose == Pose(0., 0., 0.)
+    delta = _generated_response(revision=6, full_snapshot=False, state=BLOCKED,
+                                intrinsic=FREE, observed=FREE)
     delta.base_revision = 4
     advanced = store.apply(delta)
     assert advanced.revision == 6
     assert advanced.cell_at(0, 0).state == FREE
+    assert advanced.cell_at(0, 0).navigation_state == BLOCKED
+    assert before.cell_at(0, 0).navigation_state == FREE
+    delta.epoch = "restarted"
+    with pytest.raises(ValueError, match="epoch replacement requires a full snapshot"):
+        store.apply(delta)
+
+
+@pytest.mark.parametrize(("status", "expected"), [
+    (0, "READY"), (1, "READY"), (2, "START_BLOCKED"), (3, "INPUT_UNAVAILABLE"),
+])
+def test_real_wire_native_start_status_is_semantic(status, expected):
+    response = _generated_response()
+    response.start_connection_status = status
+    snapshot = PolicyMapStore().apply(response)
+    assert snapshot.start_connection_status == expected
+    assert snapshot.start_connections.shape == (0, 2)
+
+
+def test_real_wire_missing_anchor_rejected_without_replacing_cached_snapshot():
+    store = PolicyMapStore()
+    before = store.apply(_generated_response())
+    missing = _generated_response(revision=2, full_snapshot=False)
+    missing.anchor_pose.orientation.w = 0.
+    missing.start_connection_status = 3
+    with pytest.raises(ValueError, match="anchor is unavailable"):
+        store.apply(missing)
+    # A same-revision refresh must still apply to the retained revision 1.
+    refresh = _generated_response(revision=1, full_snapshot=False)
+    refresh.base_revision, refresh.tiles = 1, []
+    after = store.apply(refresh)
+    assert after.revision == 1
+    assert after.tiles[(0, 0)] is before.tiles[(0, 0)]
 
 
 def test_raster_handles_negative_partial_tiles_and_keeps_prior_snapshot_immutable():
@@ -207,7 +269,23 @@ def test_raster_handles_negative_partial_tiles_and_keeps_prior_snapshot_immutabl
     assert raster.states[0, 0] == FREE
     assert raster.states[-1, -1] == UNKNOWN
     assert before.cell_at(-1, -1).state == FREE
-    assert not before.tiles[(-1, -1)].observed.flags.writeable
+    assert before.cell_at(-1, -1).navigation_state == FREE
+    assert after.cell_at(-1, -1).navigation_state == BLOCKED
+    np.testing.assert_array_equal(raster.states[:2, :2], np.full((2, 2), FREE))
+    np.testing.assert_array_equal(raster.intrinsic_states[:2, :2], np.full((2, 2), FREE))
+    np.testing.assert_array_equal(raster.navigation_states[:2, :2], np.full((2, 2), BLOCKED))
+    assert np.all(raster.costs[:2, :2] == .5)
+    assert np.all(raster.elevation_m[:2, :2] == 1.25)
+    assert np.all(raster.states[2:, :] == UNKNOWN)
+    assert np.all(raster.intrinsic_states[:, 2:] == UNKNOWN)
+    assert np.all(raster.navigation_states[2:, :] == UNKNOWN)
+    assert np.all(raster.costs[:, 2:] == 0.)
+    assert np.all(np.isnan(raster.elevation_m[2:, :]))
+    for array in (raster.states, raster.intrinsic_states, raster.navigation_states,
+                  raster.costs, raster.elevation_m, before.tiles[(-1, -1)].observed):
+        assert not array.flags.writeable
+        with pytest.raises(ValueError):
+            array.flags.writeable = True
 
 
 def test_platform_config_reads_canonical_wheel_limits_and_actor_context_scaling():

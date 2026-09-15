@@ -1,5 +1,6 @@
 #include "lunar_incremental_navigation_ros/policy_map_exporter.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <utility>
@@ -67,8 +68,8 @@ lunar_planning_msgs::srv::GetPolicyMap::Response PolicyMapExporter::Export(
   FillTime(input.processed_stamp_ns, response.processed_stamp);
   response.raw_elevation_revision = fine.raw_elevation_revision();
   response.fine_revision = fine.fine_traversability_revision();
-  // No retained complete export history exists.  A revision change therefore
-  // must be a true full snapshot; only an equal revision is a pose refresh.
+  // The captured pipeline journal owns delta continuity; serialization uses
+  // only this immutable fine/raw pair and its selected tile ids.
   response.full_snapshot = input.full_snapshot;
   response.base_revision = input.base_revision;
   const auto& geometry = fine.geometry();
@@ -107,12 +108,20 @@ lunar_planning_msgs::srv::GetPolicyMap::Response PolicyMapExporter::Export(
     response.start_connection_status = static_cast<std::uint8_t>(core::StartPatchResult::Status::kUnresolved);
   }
 
-  const std::vector<core::TileIndex> indices = response.full_snapshot
-      ? fine.tile_indices() : input.dirty_tiles;
+  std::vector<core::TileIndex> indices = input.dirty_tiles;
+  if (response.full_snapshot) {
+    indices = fine.tile_indices();
+    const auto measured_tiles = fine.elevation()->tile_indices();
+    indices.insert(indices.end(), measured_tiles.begin(), measured_tiles.end());
+    std::sort(indices.begin(), indices.end());
+    indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+  }
   const auto intrinsic_evaluator = core::MakePlatformElevationEvaluator(capability_);
   for (const core::TileIndex index : indices) {
     const auto tile = fine.FindTile(index);
-    if (!tile) continue;
+    // Native M elides tiles whose navigation states are all UNKNOWN. Their
+    // measured heights/intrinsic evidence still belong to the policy snapshot.
+    bool has_measured_center = false;
     lunar_planning_msgs::msg::PolicyMapTile output;
     output.tile_x = index.x;
     output.tile_y = index.y;
@@ -127,15 +136,18 @@ lunar_planning_msgs::srv::GetPolicyMap::Response PolicyMapExporter::Export(
                                  .y = index.y * core::kGridTileWidthCells +
                                        static_cast<std::int64_t>(offset / core::kGridTileWidthCells)};
       const auto center = fine.elevation()->ElevationAt(cell);
+      has_measured_center = has_measured_center || (center && std::isfinite(*center));
       const auto classification = intrinsic_evaluator->Evaluate(*fine.elevation(), cell);
-      output.states.push_back(WireState(tile->State(offset)));
+      output.states.push_back(tile ? WireState(tile->State(offset)) : kPolicyMapUnknown);
       output.intrinsic_states.push_back(static_cast<std::uint8_t>(classification.state));
       output.observed.push_back(EffectiveObservedState(classification.state,
           center.value_or(std::numeric_limits<float>::quiet_NaN())));
-      output.costs.push_back(static_cast<float>(tile->TraversalCost(offset)));
+      output.costs.push_back(tile ? static_cast<float>(tile->TraversalCost(offset)) : 0.0F);
       output.elevation_m.push_back(center.value_or(std::numeric_limits<float>::quiet_NaN()));
     }
-    response.tiles.push_back(std::move(output));
+    // Conservative dirty halos may contain storage gaps. Do not create extra
+    // all-unknown tiles in a delta that a full snapshot would not contain.
+    if (tile || has_measured_center) response.tiles.push_back(std::move(output));
   }
   return response;
 }
