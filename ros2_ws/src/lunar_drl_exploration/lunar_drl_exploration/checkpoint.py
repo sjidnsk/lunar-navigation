@@ -14,7 +14,7 @@ import numpy as np
 import torch
 from .config import config_record, resume_semantics
 from .metrics import ResourceLimitError, artifact_bytes, live_hardware
-from .replay import ReplayBuffer, dumps_transport, loads_transport
+from .replay import ReplayBuffer, dumps_transport, loads_transport, snapshot_sample_count
 from .schedule import UpdateSchedule
 
 SCHEMA='bounded_training_v1'
@@ -86,6 +86,7 @@ class TrainingState:
         # counters. Environment-local unfinished motion is intentionally absent.
         if not isinstance(collector_state.get('policy_rng'),torch.Tensor):
             raise ValueError('collector policy_rng tensor is required')
+        saved_replay=replay.snapshot(config.snapshot_max_bytes, require_sample=schedule.can_update)
         rng=dict(python=random.getstate(),numpy=dumps_transport(np.random.get_state()),
             torch_cpu=torch.get_rng_state().clone(),
             torch_cuda=[state.clone() for state in torch.cuda.get_rng_state_all()]
@@ -94,7 +95,7 @@ class TrainingState:
             curriculum=dumps_transport(curriculum_rng.bit_generator.state))
         return cls(dict(schema=SCHEMA,semantics=resume_semantics(config),config=config_record(config),
             learner=learner.state_dict(),schedule=schedule.state_dict(),rng=rng,
-            replay=replay.snapshot(config.snapshot_max_bytes),
+            replay=saved_replay,
             curriculum=dumps_transport(curriculum),collector_state=copy.deepcopy(collector_state),
             counters=dumps_transport(counters)))
 
@@ -123,6 +124,11 @@ class TrainingState:
             raise ValueError('checkpoint learner/schedule counters disagree')
         if record['collector_state']['actor_version']>schedule.updates:
             raise ValueError('checkpoint collector version exceeds learner')
+        count=snapshot_sample_count(record['replay'])
+        if count>schedule.transitions:
+            raise ValueError('checkpoint replay admission count is inconsistent')
+        if schedule.can_update and count == 0:
+            raise ValueError('checkpoint earned update credit requires a replay sample')
 
     def restore(self, learner, config):
         self.validate(config)
@@ -140,14 +146,16 @@ class TrainingState:
         curriculum_rng=_generator(loads_transport(rng['curriculum']))
         if rng['torch_cuda'] and learner.device.type=='cuda' and len(rng['torch_cuda'])!=torch.cuda.device_count():
             raise ValueError('CUDA RNG device count mismatch')
+        curriculum=loads_transport(record['curriculum'])
+        counters=loads_transport(record['counters'])
+        collector_state=copy.deepcopy(record['collector_state'])
         learner.load_state_dict(record['learner'])
         random.setstate(rng['python']); np.random.set_state(loads_transport(rng['numpy']))
         torch.set_rng_state(rng['torch_cpu'])
         if rng['torch_cuda'] and learner.device.type=='cuda':
             torch.cuda.set_rng_state_all(rng['torch_cuda'])
         return RestoredTraining(replay,schedule,replay_rng,curriculum_rng,
-            loads_transport(record['curriculum']),copy.deepcopy(record['collector_state']),
-            loads_transport(record['counters']))
+            curriculum,collector_state,counters)
 
 
 class _BudgetWriter:

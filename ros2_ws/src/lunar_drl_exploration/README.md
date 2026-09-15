@@ -437,7 +437,14 @@ references over one terrain coexist and evict independently. Existing IDs reuse
 the registry's canonical scene without a whole-scene comparison on each admission.
 
 `bytes_used` charges unique reachable allocations (including shared array backing)
-plus conservative Python/ledger membership overhead; `buffer_bytes` reports unique
+plus conservative unique ledger-row overhead. Every retained transition and static
+scene separately charges its ownership-key tuple and newly allocated ID integers;
+entry tuples, scene-ID sets, index/refcount integers and actual retained dictionary
+tables are charged independently of shared payloads. `bytes_used` stays O(1), and
+admission/release walks only the affected roots; no whole-replay scan is added.
+When only one new entry remains, an already checked fresh ownership table can
+replace oversized retained table capacity. Empty baseline containers are excluded.
+`buffer_bytes` reports unique
 numeric bytes-backed storage alone. It is a replay ownership estimate, distinct
 from live process PSS and allocator residency. `scene_refcounts` counts retained
 transitions referring to each scene, once per transition even if both states use
@@ -464,7 +471,16 @@ use Torch's normal process transport; they are a separate collector-state field.
 retained transitions and every referenced scene. A conservative residency subset
 is selected first, followed by an actual serialized-length check. It may retain
 less than the byte ceiling, and drops oversized-for-snapshot records rather than
-splitting them. `ReplayBuffer.from_snapshot(payload, max_bytes)` reconstructs
+splitting them. `snapshot(max_bytes, require_sample=True)` instead raises
+`ResourceLimitError` if bounded selection cannot retain one complete record. The
+error reports the configured byte budget in its reason and observed sample count0
+versus required minimum1. `TrainingState.capture` automatically requires a sample
+whenever `schedule.can_update` is true. It fails before publishing a checkpoint;
+Task8 must report the snapshot budget failure and preserve the previous good
+resume, without clearing credits or bypassing backpressure. A complete sample
+suffices for64 draws with replacement;64 distinct saved records are not required.
+Fresh or pre-update empty states that have no whole earned update remain allowed.
+`ReplayBuffer.from_snapshot(payload, max_bytes)` reconstructs
 immutable contracts and refcounts. It never recreates hidden terrain. Reducing the
 runtime replay budget still must fit each restored transition plus its scene;
 an individual oversized record gives an explicit error.
@@ -507,7 +523,16 @@ multiples of16 is Task8's responsibility, using the existing `actor_state()` API
 `schedule`, `boundary`, `replay_rng`, `curriculum_rng`, `curriculum`,
 `collector_state` and `counters`. Learner and scheduler completed-update counts
 must agree and replay admission cannot be ahead of that learner-owned collection
-counter. `curriculum` is a primitive mapping: Task8 must include its stage, episode
+counter. Capture/save/load also reject earned-update credit paired with an empty
+saved replay. Restore validates that combination and reconstructs replay/scenes
+before changing learner weights, optimizers or RNG. A16-byte `LDRLRP2` envelope stores the sample count; save/load inspect only
+that fixed header. Restore decodes the payload once and checks actual count,
+contracts and scene references before learner mutation. The header is written into
+the same serialization stream, and restore uses a memoryview to skip it: neither
+step concatenates/slices a second full replay byte copy. No decoded-replay cache is
+retained. The earlier, unreleased headerless Task6 snapshot format is rejected with
+an explicit replay-envelope schema error. Curriculum/counter
+payloads are decoded before learner mutation as well. `curriculum` is a primitive mapping: Task8 must include its stage, episode
 progress and scene-seed counter. `collector_state` must include its CPU Actor
 sampling `policy_rng` Torch tensor and `actor_version`, plus next-episode/scene-seed
 counters owned by the collector. `counters` carries episode totals, accumulated

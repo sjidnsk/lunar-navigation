@@ -2,16 +2,30 @@
 from collections.abc import Mapping
 from dataclasses import fields, is_dataclass
 import math
+import io
 import pickle
 import sys
 from types import MappingProxyType
 
 import numpy as np
+from .metrics import ResourceLimitError
 from .contracts import (DecisionObservation, PrivilegedScene, PrivilegedState,
                         Transition, RewardParts, Pose, TaskSpec, SensorSpec)
 
 _TYPES = {cls.__name__: cls for cls in (DecisionObservation, PrivilegedScene,
           PrivilegedState, Transition, RewardParts, Pose, TaskSpec, SensorSpec)}
+
+
+_SNAPSHOT_MAGIC = b'LDRLRP2\0'
+_SNAPSHOT_HEADER_BYTES = len(_SNAPSHOT_MAGIC) + 8
+
+
+def snapshot_sample_count(payload):
+    """O(1) envelope check only; actual payload/count/reference validation is on restore."""
+    if (not isinstance(payload, bytes) or len(payload) <= _SNAPSHOT_HEADER_BYTES or
+            not payload.startswith(_SNAPSHOT_MAGIC)):
+        raise ValueError('replay snapshot envelope schema mismatch')
+    return int.from_bytes(payload[len(_SNAPSHOT_MAGIC):_SNAPSHOT_HEADER_BYTES], 'little')
 
 
 def _backing(array):
@@ -23,7 +37,7 @@ def _backing(array):
     return base
 
 
-def dumps_transport(value):
+def dumps_transport(value, *, _prefix=b''):
     """Encode whitelisted contracts/containers as primitives, preserving aliases.
 
     Maps/native terrain are intentionally unsupported. Workers keep maps locally.
@@ -71,7 +85,15 @@ def dumps_transport(value):
         return ('ref', index)
 
     root = encode(value)
-    return pickle.dumps(dict(schema='immutable_transport_v1', root=root, nodes=nodes), protocol=5)
+    record = dict(schema='immutable_transport_v1', root=root, nodes=nodes)
+    if not _prefix:
+        return pickle.dumps(record, protocol=5)
+    # One output stream: adding the fixed replay envelope never concatenates a
+    # second multi-GiB payload. BytesIO.getvalue owns its immutable result.
+    with io.BytesIO() as stream:
+        stream.write(_prefix)
+        pickle.dump(record, stream, protocol=5)
+        return stream.getvalue()
 
 
 def loads_transport(payload):
@@ -145,7 +167,8 @@ def _objects(root):
             pending.extend(value)
         elif isinstance(value, memoryview):
             pending.append(value.obj)
-        # Conservatively cover ledger keys/refcounts and per-root membership.
+        # Conservative unique ledger-row/key/refcount overhead. Per-root
+        # membership tuples and their fresh ID integers are charged separately.
         found[key] = (value, size + 192)
     return found
 
@@ -153,6 +176,7 @@ def _objects(root):
 class _Ledger:
     def __init__(self):
         self.items = {}; self.bytes = 0; self.buffer_bytes = 0
+        self.membership_bytes = 0
 
     def acquire(self, root):
         objects = _objects(root)
@@ -162,9 +186,17 @@ class _Ledger:
             else:
                 self.items[key] = [value, size, 1]; self.bytes += size
                 if isinstance(value, bytes): self.buffer_bytes += len(value)
-        return tuple(objects)
+        keys = tuple(objects)
+        self.membership_bytes += self._membership_size(keys)
+        return keys
+
+    @staticmethod
+    def _membership_size(keys):
+        # id() makes fresh Python integers even when their payload object is shared.
+        return sys.getsizeof(keys) + sum(sys.getsizeof(key) for key in keys)
 
     def release(self, keys):
+        self.membership_bytes -= self._membership_size(keys)
         for key in keys:
             entry = self.items[key]; entry[2] -= 1
             if entry[2] == 0:
@@ -181,10 +213,17 @@ class ReplayBuffer:
         self.max_bytes = int(max_bytes)
         self._entries = {}; self._first = self._next = 0; self._scenes = {}; self._refs = {}; self._scene_keys = {}
         self._ledger = _Ledger()
+        self._entry_bytes = self._refcount_bytes = 0
 
     @property
     def bytes_used(self):
-        return self._ledger.bytes + len(self._entries)*256 + len(self._scenes)*256
+        if not self._entries:
+            return 0  # Empty baseline dictionaries retain no entry capacity.
+        tables = sum(sys.getsizeof(table) for table in
+                     (self._entries, self._scenes, self._refs,
+                      self._scene_keys, self._ledger.items))
+        return (self._ledger.bytes + self._ledger.membership_bytes + tables +
+                self._entry_bytes + self._refcount_bytes)
 
     @property
     def buffer_bytes(self):
@@ -222,30 +261,54 @@ class ReplayBuffer:
                 raise ValueError('observed bits do not match scene reference')
         # Validate one whole admission before evicting anything. Oversized complete
         # messages stay with the collector until the caller handles this failure.
-        single = _Ledger(); single.acquire(transition)
-        for truth in selected.values(): single.acquire(truth)
-        if single.bytes + (1+len(ids))*256 > self.max_bytes:
+        single = ReplayBuffer(self.max_bytes)
+        single._first = single._next = self._next
+        single._append(transition, selected, ids)
+        if single.bytes_used > self.max_bytes:
             raise ValueError('complete transition and scenes exceed replay budget')
+        self._append(transition, selected, ids)
+        while self.bytes_used > self.max_bytes:
+            if len(self._entries) == 1:
+                # Eviction can leave a large table allocation behind. The exact
+                # single-entry preflight already proved the fresh ownership fits.
+                self.__dict__.update(single.__dict__)
+                break
+            self.evict_oldest()
+
+    def _append(self, transition, selected, ids):
         for key, truth in selected.items():
             if key not in self._scenes:
                 self._scenes[key] = truth; self._refs[key] = 0
                 self._scene_keys[key] = self._ledger.acquire(truth)
+                self._refcount_bytes += sys.getsizeof(0)
+            self._refcount_bytes -= sys.getsizeof(self._refs[key])
             self._refs[key] += 1
+            self._refcount_bytes += sys.getsizeof(self._refs[key])
         keys = self._ledger.acquire(transition)
-        self._entries[self._next] = (transition, ids, keys)
+        entry = (transition, ids, keys)
+        self._entries[self._next] = entry
+        self._entry_bytes += self._entry_size(self._next, entry)
         self._next += 1
-        while self.bytes_used > self.max_bytes:
-            self.evict_oldest()
+
+    @staticmethod
+    def _entry_size(key, entry):
+        # Membership tuple/ID integers live in the ledger's per-root charge.
+        return sys.getsizeof(key) + sys.getsizeof(entry) + sys.getsizeof(entry[1])
 
     def evict_oldest(self):
-        transition, ids, keys = self._entries.pop(self._first)
+        entry = self._entries.pop(self._first)
+        self._entry_bytes -= self._entry_size(self._first, entry)
+        transition, ids, keys = entry
         self._first += 1
         self._ledger.release(keys)
         for key in ids:
+            self._refcount_bytes -= sys.getsizeof(self._refs[key])
             self._refs[key] -= 1
             if self._refs[key] == 0:
                 self._ledger.release(self._scene_keys.pop(key))
                 del self._refs[key]; del self._scenes[key]
+            else:
+                self._refcount_bytes += sys.getsizeof(self._refs[key])
         if not self._entries:
             self._entries = {}; self._scenes = {}; self._refs = {}; self._scene_keys = {}
 
@@ -257,7 +320,7 @@ class ReplayBuffer:
         indices = rng.integers(0, len(self._entries), size=batch_size)
         return [self._entries[self._first + int(index)][0] for index in indices]
 
-    def snapshot(self, max_bytes=2 * 1024**3):
+    def snapshot(self, max_bytes=2 * 1024**3, *, require_sample=False):
         selected = ReplayBuffer(max(1, max_bytes))
         for transition, _, _ in self._entries.values():
             try:
@@ -265,17 +328,26 @@ class ReplayBuffer:
             except ValueError as error:
                 if 'exceed replay budget' not in str(error): raise
         while True:
+            if require_sample and not len(selected):
+                raise ResourceLimitError(
+                    f'replay snapshot requires a complete sample within {max_bytes} bytes', 0, 1)
+            prefix = _SNAPSHOT_MAGIC + len(selected).to_bytes(8, 'little')
             payload = dumps_transport(dict(schema='bounded_replay_v1',
-                transitions=[entry[0] for entry in selected._entries.values()], scenes=dict(selected._scenes)))
+                transitions=[entry[0] for entry in selected._entries.values()],
+                scenes=dict(selected._scenes)), _prefix=prefix)
             if len(payload) <= max_bytes: return payload
             if not len(selected): raise ValueError('snapshot budget smaller than empty schema')
             selected.evict_oldest()
 
     @classmethod
     def from_snapshot(cls, payload, max_bytes=8 * 1024**3):
-        record = loads_transport(payload)
-        if record.get('schema') != 'bounded_replay_v1':
+        count = snapshot_sample_count(payload)
+        # memoryview removes the envelope without copying the complete bytes.
+        record = loads_transport(memoryview(payload)[_SNAPSHOT_HEADER_BYTES:])
+        if not isinstance(record, dict) or record.get('schema') != 'bounded_replay_v1':
             raise ValueError('replay schema mismatch')
+        if not isinstance(record.get('transitions'), list) or len(record['transitions']) != count:
+            raise ValueError('replay sample count disagrees with envelope')
         result = cls(max_bytes)
         for transition in record['transitions']:
             result.add(transition, record['scenes'])

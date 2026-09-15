@@ -66,7 +66,7 @@ def test_replay_accounts_shared_roots_and_releases_last_scene_reference():
     first, second = transition(a,b), transition(b,c)
     truth = scene(); watched = weakref.ref(truth)
     replay = ReplayBuffer(1000000)
-    replay.add(first, {'s':truth}); first_bytes = replay.bytes_used
+    replay.add(first, {'s':truth})
     replay.add(second, {'s':truth}); shared_bytes = replay.bytes_used
     independent = ReplayBuffer(1000000)
     independent.add(transition(), {'s':scene()}); independent.add(transition(), {'s':scene()})
@@ -75,7 +75,7 @@ def test_replay_accounts_shared_roots_and_releases_last_scene_reference():
     del truth
     replay.evict_oldest()
     assert replay.scene_refcounts == {'s':1} and watched() is not None
-    assert replay.bytes_used <= first_bytes
+    assert replay.bytes_used < shared_bytes  # Retained table capacity remains charged.
     replay.evict_oldest(); gc.collect()
     assert not replay.scenes and replay.bytes_used == 0 and watched() is None
 
@@ -362,3 +362,121 @@ def test_shared_array_backing_bytes_are_charged_once_even_for_distinct_views():
     assert independent.buffer_bytes-shared.buffer_bytes==152  # 2 nodes * 19 floats * 4 bytes
     restored=ReplayBuffer.from_snapshot(shared.snapshot(1000000),1000000)
     assert restored.buffer_bytes==shared.buffer_bytes
+
+
+def test_heavily_aliased_distinct_transitions_charge_all_entry_metadata_and_evict():
+    import sys
+    # Independent lower bound: retained dict tables, entry containers and every
+    # newly allocated membership-ID integer, excluding all payloads/ledger rows.
+    def owned_metadata(replay):
+        seen=set()
+        def charge(value):
+            if id(value) in seen: return 0
+            seen.add(id(value)); return sys.getsizeof(value)
+        result=sum(charge(value) for value in (replay._entries,replay._scenes,
+                    replay._refs,replay._scene_keys,replay._ledger.items))
+        for key,entry in replay._entries.items():
+            result+=sum(charge(value) for value in (key,entry,entry[1],entry[2]))
+            result+=sum(charge(value) for value in entry[2])
+        for keys in replay._scene_keys.values():
+            result+=charge(keys)+sum(charge(value) for value in keys)
+        return result
+
+    replay=ReplayBuffer(800000)
+    original,truth=transition(),scene()
+    for _ in range(1000): replay.add(replace(original),{'s':truth})
+    assert replay.bytes_used >= owned_metadata(replay)
+    assert replay.bytes_used <= replay.max_bytes and len(replay)<1000
+    # Capacity left after partial deletion is still charged, not just len(dict).
+    while len(replay)>2: replay.evict_oldest()
+    assert replay.bytes_used >= owned_metadata(replay)
+    assert replay.scene_refcounts == {'s':2}
+    shared_bytes=replay.buffer_bytes
+    replay.evict_oldest()
+    assert replay.buffer_bytes==shared_bytes and replay.scene_refcounts=={'s':1}
+    replay.evict_oldest()
+    assert replay.bytes_used==0 and replay.buffer_bytes==0 and not replay.scenes
+
+
+def test_saturated_credit_requires_saved_sample_and_failure_keeps_last_checkpoint(tmp_path):
+    torch=pytest.importorskip('torch')
+    from lunar_drl_exploration.config import TrainingConfig,ModelConfig
+    from lunar_drl_exploration.sac import SACLearner
+    from lunar_drl_exploration.schedule import UpdateSchedule
+    from lunar_drl_exploration.checkpoint import CheckpointManager,TrainingState,UpdateBoundary
+    from lunar_drl_exploration.metrics import ResourceLimitError
+    config=replace(TrainingConfig(),model=ModelConfig(width=16,heads=2,layers=1),warmup=0)
+    learner=SACLearner(config.model,config.learning)
+    replay=ReplayBuffer(1000000); replay.add(transition(),{'s':scene()})
+    schedule=UpdateSchedule(warmup=0)
+    for _ in range(128): schedule.collected()
+    boundary=UpdateBoundary(); manager=CheckpointManager(tmp_path)
+    valid=capture_state(learner,config,replay,schedule,boundary)
+    manager.save(valid); original=(tmp_path/'resume.pt').read_bytes()
+    tiny=replace(config,snapshot_max_bytes=512)
+    with pytest.raises(ResourceLimitError,match='sample'):
+        manager.save(capture_state(learner,tiny,replay,schedule,boundary))
+    assert schedule.credit==32 and not schedule.can_dispatch()
+    assert (tmp_path/'resume.pt').read_bytes()==original
+    # A published or manually corrupted payload must not bypass the capture guard.
+    bad=TrainingState(dict(valid.record,replay=ReplayBuffer(1000000).snapshot(512)))
+    with pytest.raises(ValueError,match='sample'): manager.save(bad)
+    assert (tmp_path/'resume.pt').read_bytes()==original
+    target=SACLearner(config.model,config.learning)
+    before=target.actor_state()
+    with pytest.raises(ValueError,match='sample'): bad.restore(target,config)
+    for key,value in before['state_dict'].items():
+        torch.testing.assert_close(value,target.actor_state()['state_dict'][key],rtol=0,atol=0)
+    assert target.updates==0 and not target.actor_optimizer.state
+    # A forged nonzero cheap envelope still cannot conceal an actually empty
+    # decoded payload during restore. Validation precedes every learner mutation.
+    forged=bytearray(bad.record['replay'])
+    forged[8:16]=(1).to_bytes(8,'little')
+    inconsistent=TrainingState(dict(valid.record,replay=bytes(forged)))
+    with pytest.raises(ValueError,match='count'): inconsistent.restore(target,config)
+    for key,value in before['state_dict'].items():
+        torch.testing.assert_close(value,target.actor_state()['state_dict'][key],rtol=0,atol=0)
+    # One complete sample suffices: preserve every credit and draw effective64.
+    restored=manager.load(config).restore(target,config)
+    assert len(restored.replay)==1 and restored.schedule.credit==32
+    batch=restored.replay.sample(64,restored.replay_rng)
+    assert len(batch)==64 and all(item is batch[0] for item in batch)
+    with UpdateBoundary().update():
+        target.update(batch,restored.replay.scenes); restored.schedule.updated()
+    assert restored.schedule.credit==31 and restored.schedule.can_dispatch()
+
+
+def test_one_entry_budget_releases_old_table_capacity_and_preserves_newest():
+    original,truth=transition(),scene()
+    probe=ReplayBuffer(1000000); probe.add(original,{'s':truth})
+    replay=ReplayBuffer(probe.bytes_used+1000)
+    for index in range(1000):
+        replay.add(replace(original,episode_id=str(index)),{'s':truth})
+        assert replay.bytes_used<=replay.max_bytes and len(replay)==1
+    assert replay.sample(1,np.random.default_rng(5))[0].episode_id=='999'
+    replay.evict_oldest()
+    assert replay.bytes_used==0 and replay.scene_refcounts=={}
+
+
+def test_save_load_inspect_only_envelope_restore_materializes_contracts_once(tmp_path,monkeypatch):
+    pytest.importorskip('torch')
+    from lunar_drl_exploration.config import TrainingConfig,ModelConfig
+    from lunar_drl_exploration.sac import SACLearner
+    from lunar_drl_exploration.schedule import UpdateSchedule
+    from lunar_drl_exploration.checkpoint import CheckpointManager,UpdateBoundary
+    config=replace(TrainingConfig(),model=ModelConfig(width=16,heads=2,layers=1))
+    learner=SACLearner(config.model,config.learning)
+    replay=ReplayBuffer(1000000); replay.add(transition(),{'s':scene()})
+    schedule=UpdateSchedule(); schedule.collected()
+    state=capture_state(learner,config,replay,schedule,UpdateBoundary())
+    manager=CheckpointManager(tmp_path)
+    # Trace real constructor allocations rather than substituting decoded output.
+    constructed=[]; original=DecisionObservation.__post_init__
+    def observe_materialization(self):
+        constructed.append(self.revision)
+        original(self)
+    monkeypatch.setattr(DecisionObservation,'__post_init__',observe_materialization)
+    manager.save(state); loaded=manager.load(config)
+    assert constructed==[], 'save/load must not reconstruct the full replay just to count samples'
+    restored=loaded.restore(SACLearner(config.model,config.learning),config)
+    assert sorted(constructed)==[0,1] and len(restored.replay)==1
