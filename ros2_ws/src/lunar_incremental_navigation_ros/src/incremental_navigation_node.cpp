@@ -558,7 +558,7 @@ struct IncrementalNavigationNode::Impl final {
             std::scoped_lock lock{event_mutex};
             state = latest_state;
           }
-          const auto policy_snapshot = pipeline.CapturePolicyMapSnapshot();
+          const auto policy_snapshot = pipeline.CapturePolicyMapSnapshot(request->since_revision);
           const auto& bundle = policy_snapshot.bundle;
           std::optional<core::Pose2> anchor;
           if (state && std::isfinite(state->base_link_pose.position_m.x) &&
@@ -570,7 +570,10 @@ struct IncrementalNavigationNode::Impl final {
               {.fine = bundle.fine, .anchor = anchor,
                .local_window_size_m = parameters.local_window_size_m,
                .epoch = policy_map_epoch,
-               .processed_stamp_ns = policy_snapshot.processed_map_stamp_ns},
+               .processed_stamp_ns = policy_snapshot.processed_map_stamp_ns,
+               .base_revision = policy_snapshot.base_revision,
+               .full_snapshot = policy_snapshot.full_snapshot,
+               .dirty_tiles = policy_snapshot.dirty_tiles},
               request->since_revision, request->minimum_map_stamp_ns);
         });
 

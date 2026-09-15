@@ -53,7 +53,10 @@ TEST(PolicyMapExporter, UsesFullSnapshotForBootstrapAndMapRevisionChanges) {
   const auto bootstrap = exporter.Export(input, 0);
   EXPECT_TRUE(bootstrap.full_snapshot);
   EXPECT_FALSE(bootstrap.tiles.empty());
-  const auto refresh = exporter.Export(input, fine->fine_traversability_revision());
+  const PolicyMapExportInput refresh_input{.fine=fine, .epoch="e", .processed_stamp_ns=11,
+                                            .base_revision=fine->fine_traversability_revision(),
+                                            .full_snapshot=false};
+  const auto refresh = exporter.Export(refresh_input, fine->fine_traversability_revision());
   EXPECT_FALSE(refresh.full_snapshot);
   EXPECT_TRUE(refresh.tiles.empty());
 }

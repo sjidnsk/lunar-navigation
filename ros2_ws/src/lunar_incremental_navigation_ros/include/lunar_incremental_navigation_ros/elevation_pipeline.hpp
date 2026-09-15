@@ -4,8 +4,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <deque>
 #include <memory>
-#include <map>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -42,6 +42,9 @@ struct ElevationPipelineDerivers final {
 struct PolicyMapSnapshotCapture final {
   lunar::incremental_navigation::SnapshotBundle bundle;
   std::int64_t processed_map_stamp_ns{};
+  std::uint64_t base_revision{};
+  bool full_snapshot{true};
+  std::vector<lunar::incremental_navigation::TileIndex> dirty_tiles;
 };
 
 class ElevationPipeline final {
@@ -60,7 +63,8 @@ class ElevationPipeline final {
   [[nodiscard]] bool RunGuidanceDerivation();
 
   [[nodiscard]] lunar::incremental_navigation::SnapshotBundle CaptureBundle() const;
-  [[nodiscard]] PolicyMapSnapshotCapture CapturePolicyMapSnapshot() const;
+  [[nodiscard]] PolicyMapSnapshotCapture CapturePolicyMapSnapshot(
+      std::uint64_t since_revision = 0) const;
   [[nodiscard]] std::size_t PendingFineDirtyTileCount() const;
   [[nodiscard]] std::uint64_t GuidanceDerivationCount() const;
   [[nodiscard]] lunar::incremental_navigation::ElevationMapCounters LocalCounters()
@@ -85,7 +89,14 @@ class ElevationPipeline final {
     lunar::incremental_navigation::SnapshotBundle bundle;
     std::int64_t processed_map_stamp_ns{};
   };
-  std::map<std::uint64_t, std::int64_t> raw_map_stamps_;
+  struct ExportJournalEntry final {
+    std::uint64_t revision{};
+    std::vector<lunar::incremental_navigation::TileIndex> dirty_tiles;
+  };
+  static constexpr std::size_t kExportJournalCapacity{128U};
+  std::deque<ExportJournalEntry> export_journal_;
+  std::uint64_t latest_accepted_raw_revision_{};
+  std::int64_t latest_accepted_map_stamp_ns{};
   std::shared_ptr<const PipelineSnapshot> bundle_;
 };
 

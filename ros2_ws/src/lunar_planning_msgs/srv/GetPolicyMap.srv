@@ -8,6 +8,7 @@ builtin_interfaces/Time processed_stamp
 uint64 raw_elevation_revision
 uint64 fine_revision
 bool full_snapshot
+uint64 base_revision
 string frame_id
 float64 resolution_m
 geometry_msgs/Point origin

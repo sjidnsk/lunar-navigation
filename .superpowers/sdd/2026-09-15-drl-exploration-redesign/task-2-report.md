@@ -81,3 +81,16 @@ regression 失败（`full_snapshot=false`）。
 
 Round 1 GREEN：source Jazzy overlay 下 `python3 -m pytest ...test_contracts_maps.py -q` 为 `7 passed`；
 `ctest -R 'policy_map_exporter_test|elevation_pipeline_test'` 为 `2/2 passed`。
+
+## Round 2 修正
+
+- processed stamp 改为 bounded latest-accepted revision/stamp 生命周期；duplicate 在已发布 fine
+  上原子刷新 stamp，pending/interleaved raw 不会泄漏给旧 fine。
+- pipeline 保留 128 条 tile metadata journal；capture 从请求 base revision 聚合 tile union，
+  bootstrap/history gap 保持 full，same revision 返回空 tile pose refresh。服务增加 `base_revision`。
+- Python cache 使用 base revision 接受 journal 覆盖的连续 delta，保留 same revision refresh；wire
+  start status 转换为 READY/START_BLOCKED/INPUT_UNAVAILABLE，零 quaternion anchor 明确拒绝。
+
+Round 2 GREEN：Jazzy messages+ROS affected build 成功；`ctest -R
+'policy_map_exporter_test|elevation_pipeline_test'` 2/2 通过；source overlay Python contracts 7/7；
+`git diff --check` 通过。

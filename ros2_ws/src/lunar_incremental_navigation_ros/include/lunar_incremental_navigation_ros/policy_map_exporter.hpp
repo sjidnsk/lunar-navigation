@@ -4,6 +4,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <lunar_planning_msgs/srv/get_policy_map.hpp>
 
@@ -26,6 +27,9 @@ struct PolicyMapExportInput final {
   double local_window_size_m{};
   std::string epoch;
   std::int64_t processed_stamp_ns{};
+  std::uint64_t base_revision{};
+  bool full_snapshot{true};
+  std::vector<lunar::incremental_navigation::TileIndex> dirty_tiles;
 };
 
 class PolicyMapExporter final {

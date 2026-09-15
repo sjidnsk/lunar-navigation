@@ -36,6 +36,8 @@ def _wire_pose(response: Any) -> Pose:
     if anchor is None:
         raise ValueError("policy map response is missing anchor pose")
     orientation = anchor.orientation
+    if orientation.w == 0.0 and orientation.x == 0.0 and orientation.y == 0.0 and orientation.z == 0.0:
+        raise ValueError("policy map anchor is unavailable")
     return Pose(float(anchor.position.x), float(anchor.position.y),
                 float(atan2(2.0 * (orientation.w * orientation.z + orientation.x * orientation.y),
                             1.0 - 2.0 * (orientation.y ** 2 + orientation.z ** 2))))
@@ -99,8 +101,11 @@ class PolicyMapStore:
         if self._snapshot is not None:
             if epoch != self._snapshot.epoch and not full_snapshot:
                 raise ValueError("epoch replacement requires a full snapshot")
-            if epoch == self._snapshot.epoch and not full_snapshot and revision != self._snapshot.revision + 1:
-                raise ValueError("missed policy-map revision requires a full snapshot")
+            if epoch == self._snapshot.epoch and not full_snapshot:
+                wire_base = _field(response, "base_revision")
+                base_revision = self._snapshot.revision if revision == self._snapshot.revision else wire_base
+                if revision < self._snapshot.revision or base_revision != self._snapshot.revision:
+                    raise ValueError("missed policy-map revision requires a full snapshot")
             tiles = {} if full_snapshot else dict(self._snapshot.tiles)
         else:
             tiles = {}
@@ -127,7 +132,10 @@ class PolicyMapStore:
             start_connections=connections,
             local_bounds=tuple(_field(response, "local_bounds", (0, 0, 0, 0))),
             profile_hash=str(_field(response, "profile_hash", "")),
-            start_connection_status=str(_field(response, "start_connection_status", "READY")),
+            start_connection_status={0: "READY", 1: "READY", 2: "START_BLOCKED",
+                                     3: "INPUT_UNAVAILABLE"}.get(
+                _field(response, "start_connection_status", "READY"),
+                str(_field(response, "start_connection_status", "INPUT_UNAVAILABLE"))),
             goal_position_tolerance_m=float(_field(response, "goal_position_tolerance_m", np.nan)),
             goal_yaw_tolerance_rad=float(_field(response, "goal_yaw_tolerance_rad", np.nan)),
         )
