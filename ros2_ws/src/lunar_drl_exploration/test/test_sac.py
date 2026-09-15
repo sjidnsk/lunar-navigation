@@ -149,3 +149,71 @@ def test_cuda_complete_update_avoids_scalar_device_synchronization():
     for optimizer in (restored.actor_optimizer,restored.q1_optimizer,
                       restored.q2_optimizer,restored.alpha_optimizer):
         assert all(state['exp_avg'].device.type=='cpu' for state in optimizer.state.values())
+
+
+def test_restore_keeps_adam_history_and_uses_requested_learning_rate_and_polyak():
+    torch.manual_seed(45)
+    original = SACLearner(ModelConfig(), LearningConfig(), device='cpu')
+    samples, scenes = transitions(), {'s': scene()}
+    original.update(samples, scenes)
+    saved = original.state_dict()
+    requested = LearningConfig(microbatch_size=32, learning_rate=3e-5,
+                               polyak=0.1, initial_alpha=2e-5)
+    restored = SACLearner(ModelConfig(), requested, device='cpu')
+    restored.load_state_dict(saved)
+    assert restored.updates == 1
+    torch.testing.assert_close(restored.log_alpha, saved['log_alpha'], atol=0, rtol=0)
+    assert restored.alpha != requested.initial_alpha
+    for name in ('actor', 'q1', 'q2', 'target1', 'target2'):
+        for key, value in getattr(restored, name).state_dict().items():
+            torch.testing.assert_close(value, saved[name][key], atol=0, rtol=0)
+    optimizer_names = ('actor_optimizer', 'q1_optimizer', 'q2_optimizer', 'alpha_optimizer')
+    parameters_before = {}
+    for name in optimizer_names:
+        optimizer = getattr(restored, name)
+        state = optimizer.state_dict()
+        assert all(group['lr'] == requested.learning_rate for group in state['param_groups'])
+        for index, values in saved[name]['state'].items():
+            for key, value in values.items():
+                torch.testing.assert_close(state['state'][index][key], value, atol=0, rtol=0)
+        parameters_before[name] = optimizer.param_groups[0]['params'][0].detach().clone()
+    targets_before = {name: copy.deepcopy(getattr(restored, name).state_dict())
+                      for name in ('target1', 'target2')}
+    restored.update(samples, scenes)
+    assert restored.updates == 2
+    for name in optimizer_names:
+        optimizer = getattr(restored, name)
+        assert all(value['step'] == 2 for value in optimizer.state.values())
+        group = optimizer.param_groups[0]
+        parameter = group['params'][0]
+        state = optimizer.state[parameter]
+        # Independent Adam equation verifies the requested lr actually controls
+        # the next update, with the continued (not reset) second-step moments.
+        beta1, beta2 = group['betas']
+        mean = state['exp_avg'] / (1 - beta1 ** 2)
+        variance = state['exp_avg_sq'] / (1 - beta2 ** 2)
+        expected = parameters_before[name] - requested.learning_rate * mean / (
+            variance.sqrt() + group['eps'])
+        torch.testing.assert_close(parameter, expected, atol=1e-7, rtol=1e-6)
+    for target, source in (('target1', 'q1'), ('target2', 'q2')):
+        for key, value in getattr(restored, target).state_dict().items():
+            expected = targets_before[target][key] * 0.9 + getattr(restored, source).state_dict()[key] * 0.1
+            torch.testing.assert_close(value, expected, atol=1e-7, rtol=1e-6)
+
+
+@pytest.mark.parametrize('field,value', [('batch_size', 32), ('gamma', 0.99),
+    ('target_entropy_factor', 0.02), ('maximum_alpha', 2e-4)])
+def test_restore_still_rejects_changed_experience_objective(field, value):
+    learner = SACLearner(ModelConfig(), LearningConfig(), device='cpu')
+    saved = learner.state_dict()
+    saved['learning_config'][field] = value
+    with pytest.raises(ValueError, match='incompatible SAC semantics'):
+        learner.load_state_dict(saved)
+
+
+def test_restore_still_rejects_changed_model_shape():
+    learner = SACLearner(ModelConfig(), LearningConfig(), device='cpu')
+    saved = learner.state_dict()
+    saved['model_config']['width'] = 64
+    with pytest.raises(ValueError, match='incompatible learner model schema'):
+        learner.load_state_dict(saved)

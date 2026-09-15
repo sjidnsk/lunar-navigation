@@ -28,8 +28,9 @@ class SACLearner:
 
     ``actor_state()`` returns an owned CPU snapshot and completed-update version.
     The scheduler chooses the 16-update publication interval. ``state_dict()``
-    returns an owned, Torch-serializable full learner snapshot. Restore permits a
-    different microbatch size, but requires identical semantic hyperparameters.
+    returns an owned, Torch-serializable full learner snapshot. Restore uses the
+    current microbatch/rate/Polyak controls; initial alpha is new-training-only.
+    Model and experience-objective settings must remain compatible.
     """
     def __init__(self, model_config=ModelConfig(), learning_config=LearningConfig(), *, device='cpu'):
         self.model_config, self.learning_config = model_config, learning_config
@@ -154,7 +155,9 @@ class SACLearner:
         if state['schema'] != 'sparse_graph_sac_v1' or state['model_config'] != asdict(self.model_config):
             raise ValueError("incompatible learner model schema")
         saved, current = dict(state['learning_config']), asdict(self.learning_config)
-        saved.pop('microbatch_size'); current.pop('microbatch_size')
+        for name in ('microbatch_size', 'learning_rate', 'polyak', 'initial_alpha'):
+            saved.pop(name)
+            current.pop(name)
         if saved != current:
             raise ValueError("incompatible SAC semantics")
         # Optimizer load can retain references to input tensors; own the checkpoint.
@@ -162,5 +165,11 @@ class SACLearner:
         for name in ('actor','q1','q2','target1','target2','actor_optimizer',
                      'q1_optimizer','q2_optimizer','alpha_optimizer'):
             getattr(self,name).load_state_dict(state[name])
+        # Loading Adam restores parameter-group metadata as well as history.
+        # Preserve saved moments/steps, but apply the caller's continuation rate.
+        for optimizer in (self.actor_optimizer, self.q1_optimizer,
+                          self.q2_optimizer, self.alpha_optimizer):
+            for group in optimizer.param_groups:
+                group['lr'] = self.learning_config.learning_rate
         with torch.no_grad(): self.log_alpha.copy_(state['log_alpha'])
         self.updates = int(state['updates'])

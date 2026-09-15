@@ -365,9 +365,16 @@ the 16-update publication cadence; publication itself does not advance it.
 `state_dict()` returns an owned Torch-serializable record with schema
 `sparse_graph_sac_v1`, primitive model/learning config dicts, `updates`, trainable
 `log_alpha`, all five model states and all four optimizer states. Load rejects old
-schemas and changed semantic hyperparameters; microbatch size may differ. Models
-and optimizer tensors restore onto the constructed learner's device through their
-standard load APIs. Scheduler/replay/scene ownership, collector versions, RNG,
+schemas and changed model or experience-objective settings: effective batch 64,
+gamma, target entropy factor and maximum alpha remain checked. Continuation may
+change microbatch size, learning rate and Polyak coefficient. Loading preserves
+all saved Adam moments and step counters, then applies the currently configured
+learning rate to all four optimizers; subsequent target updates use the current
+Polyak value. `initial_alpha` only initializes fresh training: restore always
+loads the saved actual log-alpha and temperature optimizer history, even if the
+constructor's initial alpha differs. Models and optimizer tensors restore onto
+the constructed learner's device through their standard load APIs. Scheduler/replay/
+scene ownership, collector versions, RNG,
 curriculum and update credits remain external Task 6 checkpoint responsibilities.
 No PlatformConfig mappingproxy is embedded in these records.
 
