@@ -532,5 +532,35 @@ TEST(PersistentElevationMap, ScalarMeasurementsRejectUnsupportedGeometryAtomical
   EXPECT_EQ(map.Snapshot()->TerrainMeasurementsAt({0, 0}), std::nullopt);
 }
 
+
+TEST(PersistentElevationMap, PartialMeasurementsFuseEachScalarLowerBound) {
+  PersistentElevationMap map;
+  const auto geometry = Geometry(1, 1, 1.0);
+  const std::vector<float> heights{0};
+  std::vector<LocalTerrainMeasurements> stats{{true, false, 0.2, 0.5, 0.1}};
+  const auto apply = [&] {
+    return map.Apply({.geometry = geometry, .elevation_m = heights,
+        .map_from_source = MapFromSource(), .terrain_measurements = stats});
+  };
+  ASSERT_EQ(apply().status, ElevationUpdateResult::Status::kApplied);
+  stats[0] = {true, false, 0.4, 0.3, 0.3};
+  EXPECT_EQ(apply().status, ElevationUpdateResult::Status::kApplied);
+  const auto fused = map.Snapshot()->TerrainMeasurementsAt({0, 0});
+  ASSERT_TRUE(fused);
+  EXPECT_FALSE(fused->neighborhood_complete);
+  EXPECT_DOUBLE_EQ(fused->slope_rad, 0.4);
+  EXPECT_DOUBLE_EQ(fused->relief_m, 0.5);
+  EXPECT_DOUBLE_EQ(fused->positive_rise_m, 0.3);
+  EXPECT_EQ(apply().status, ElevationUpdateResult::Status::kDuplicate);
+  stats[0] = {true, true, 0.1, 0.1, 0.1};
+  EXPECT_EQ(apply().status, ElevationUpdateResult::Status::kApplied);
+  const auto replaced = map.Snapshot()->TerrainMeasurementsAt({0, 0});
+  ASSERT_TRUE(replaced);
+  EXPECT_TRUE(replaced->neighborhood_complete);
+  EXPECT_DOUBLE_EQ(replaced->slope_rad, 0.1);
+  EXPECT_DOUBLE_EQ(replaced->relief_m, 0.1);
+  EXPECT_DOUBLE_EQ(replaced->positive_rise_m, 0.1);
+}
+
 }  // namespace
 }  // namespace lunar::incremental_navigation

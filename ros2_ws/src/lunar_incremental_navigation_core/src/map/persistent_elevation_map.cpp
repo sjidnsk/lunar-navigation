@@ -515,11 +515,22 @@ ElevationUpdateResult PersistentElevationMap::Apply(
     const auto old_measurements = impl_->snapshot
         ? impl_->snapshot->TerrainMeasurementsAt(index) : std::nullopt;
     const bool height_changed = !old_value || *old_value != cell.elevation;
-    // Identical heights or an incomplete recomputation do not erase prior
-    // center evidence. A genuinely changed height invalidates its old stats.
-    if (!height_changed && old_measurements &&
-        (!cell.measurements || !cell.measurements->neighborhood_complete)) {
-      cell.measurements = old_measurements;
+    // Partial statistics are lower bounds: retain each stronger observation
+    // without forgetting prior neighborhood support. A new complete measurement
+    // replaces the tuple; a changed center height invalidates its old evidence.
+    if (!height_changed && old_measurements) {
+      if (!cell.measurements) {
+        cell.measurements = old_measurements;
+      } else if (!cell.measurements->neighborhood_complete) {
+        auto& incoming = *cell.measurements;
+        incoming.neighborhood_complete = old_measurements->neighborhood_complete;
+        incoming.slope_rad =
+            std::max(incoming.slope_rad, old_measurements->slope_rad);
+        incoming.relief_m =
+            std::max(incoming.relief_m, old_measurements->relief_m);
+        incoming.positive_rise_m =
+            std::max(incoming.positive_rise_m, old_measurements->positive_rise_m);
+      }
     }
     if (height_changed || old_measurements != cell.measurements) {
       changed[TileForCell(index)].emplace_back(index, cell);

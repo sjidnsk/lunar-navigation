@@ -825,5 +825,56 @@ TEST(TerrainMeasurements, IncompleteMeasurementsCanBlockButCannotCertifyFree) {
       IntrinsicCellState::kUnknown);
 }
 
+
+class StrengthenedPartialTerrain : public testing::TestWithParam<bool> {};
+
+TEST_P(StrengthenedPartialTerrain, NewBlockingEvidenceAdvancesRevision) {
+  PersistentElevationMap map;
+  const auto geometry = Geometry(1, 1, 1.0);
+  const GridIndex center{0, 0};
+  const std::vector<float> heights{0};
+  std::vector<LocalTerrainMeasurements> stats{{true, GetParam(), 0, 0, 0}};
+  const auto apply = [&] {
+    return map.Apply({.geometry = geometry, .elevation_m = heights,
+        .map_from_source = IdentityMapTransform(), .terrain_measurements = stats});
+  };
+  ASSERT_EQ(apply().status, ElevationUpdateResult::Status::kApplied);
+  const auto before = map.Snapshot();
+  auto evaluator = MakePlatformElevationEvaluator(WheelCapability());
+  auto fine_before = FineTraversabilityBuilder().Derive(before, WheelCapability(), Profile());
+  EXPECT_EQ(evaluator->Evaluate(*before, center).state,
+      GetParam() ? IntrinsicCellState::kFree : IntrinsicCellState::kUnknown);
+
+  stats[0] = {true, false, 0, 2, 2};
+  const auto update = apply();
+  EXPECT_EQ(update.status, ElevationUpdateResult::Status::kApplied);
+  EXPECT_EQ(update.raw_elevation_revision, 2U);
+  EXPECT_EQ(update.updated_cells, 1U);
+  EXPECT_EQ(update.dirty_tiles, (std::vector<TileIndex>{{0, 0}}));
+  const auto blocked = map.Snapshot();
+  ASSERT_EQ(blocked->changed_cells().size(), 1U);
+  EXPECT_EQ(blocked->changed_cells()[0], center);
+  EXPECT_EQ(evaluator->Evaluate(*blocked, center).state, IntrinsicCellState::kBlocked);
+  auto fine_blocked = FineTraversabilityBuilder().Derive(
+      blocked, WheelCapability(), Profile(), fine_before);
+  EXPECT_EQ(fine_blocked->State(center), FineCellState::kBlocked);
+  EXPECT_DOUBLE_EQ(before->TerrainMeasurementsAt(center)->relief_m, 0);
+
+  // A weaker partial view cannot forget the supported obstruction.
+  stats[0] = {true, false, 0, 0, 0};
+  EXPECT_EQ(apply().status, ElevationUpdateResult::Status::kDuplicate);
+  EXPECT_EQ(evaluator->Evaluate(*map.Snapshot(), center).state,
+      IntrinsicCellState::kBlocked);
+  // A new full measurement can replace and reduce all old statistics.
+  stats[0] = {true, true, 0, 0, 0};
+  EXPECT_EQ(apply().status, ElevationUpdateResult::Status::kApplied);
+  EXPECT_EQ(map.Snapshot()->raw_elevation_revision(), 3U);
+  EXPECT_EQ(evaluator->Evaluate(*map.Snapshot(), center).state, IntrinsicCellState::kFree);
+  EXPECT_EQ(evaluator->Evaluate(*blocked, center).state, IntrinsicCellState::kBlocked);
+}
+
+INSTANTIATE_TEST_SUITE_P(OldCompleteness, StrengthenedPartialTerrain,
+                        testing::Values(false, true));
+
 }  // namespace
 }  // namespace lunar::incremental_navigation
