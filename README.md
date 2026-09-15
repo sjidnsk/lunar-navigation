@@ -4,6 +4,12 @@
 
 新增独立 Jazzy [复杂地形完整探索 demo](docs/复杂地形完整探索demo.md)：300 m 复杂地形、全局 1 m / 局部 0.2 m、正式探索规划控制、默认 30 倍可调仿真时钟。[简单控制闭环 demo](docs/增量规划控制闭环demo.md)及旧演示保留。
 
+新增独立 [DRL 稀疏图探索实现与验证](docs/validation/2026-09-15-drl-exploration-redesign-implementation.md)：
+8 个原生导航/公共控制器/轻量运动学环境、CPU 图 Actor、单 GPU SAC、有限回放与断点恢复。
+在 `feat/drl-exploration-redesign` 工作树使用 `scripts/drl/build.sh`，再按
+[操作指令的 DRL 章节](docs/操作指令.md#drl-稀疏图探索独立-redesign-分支)开训、恢复、评估、导出和挂接推理。
+默认预热 1024、有效 batch 64、30 倍目标、0.2 m/s；已测短程 GPU 闭环不代表训练收敛或 Orin/实车就绪。
+
 `lunar_pure_planner_ros` 是独立的普通 ROS 2 节点，不使用 Lifecycle manager，也不启动旧规划器。
 
 ## 纯前沿探索整合（legacy）
