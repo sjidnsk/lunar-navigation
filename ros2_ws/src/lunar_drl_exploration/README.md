@@ -13,10 +13,11 @@ or runtime integration is implemented by this package's terrain layer.
   works without ROS. `capability` exposes that file's full mapping;
   `actor_context` retains the existing eight-scalar API.
 - `Scene(seed, family, extent_m, resolution_m, platform)` supports `moon` and
-  `cave`, 20–1000 m. `scene_id` hashes generator version, seed, geometry settings
-  and capability. `task` is canonical `TaskSpec`; `task_polygon` is its float32
+  `cave`, 20–1000 m nominal extent. Generator version 4 draws a seeded convex
+  task quadrilateral inside that extent. `scene_id` hashes generator version, seed,
+  geometry settings and capability. `task` is canonical `TaskSpec`; `task_polygon` is its float32
   polygon. `height_tile(x0, y0, width, height)` evaluates bounded analytic geometry.
-  Raster extent adds 12 m context on each side of the task, rounded up to cells;
+  Raster extent adds 12 m context around the nominal extent, rounded up to cells;
   this finite provided context is not a physical wall or an infinite-world claim.
 - `TerrainGrid.from_scene(scene)` produces compact `heights[H,W]` float32,
   `stats[H,W,4]` float32, `intrinsic[H,W]` uint8 B and `navigation[H,W]` uint8 M.
@@ -29,15 +30,24 @@ or runtime integration is implemented by this package's terrain layer.
   Fine caches are discarded per native 256-cell tile, with its native halo.
   The hard footprint is the circumscribed radius of the canonical wheel polygon;
   minimum_clearance_m is a soft preference, not an extra hard inflation radius.
-- `scene.initial_pose(terrain)` chooses native M FREE support near the generated
-  main terrain. It neither alters elevations nor resamples yaw. Cave starts are
-  on the main floor, not elevated wall plateaus. Generated cave loops include an
-  external route, narrow spurs and a disconnected chamber. Free islands remain
+- `scene.initial_pose(terrain)` samples uniformly from the main native M FREE
+  component using a deterministic start RNG stream. Moon uses the largest native
+  FREE component; cave uses the component anchored to its structural main room.
+  Four-connected labels exactly partition native no-corner-cut components: every
+  allowed diagonal has a FREE cardinal intermediate. Uniform selection uses row
+  counts and one selected row, avoiding a full array of every stance coordinate.
+  Polygon and start RNG streams do not consume the original terrain/yaw stream.
+  No view/FOV/known-map support filter is used; original random yaw is unchanged.
+  Cave starts are on the main floor, not elevated wall plateaus. Generated cave
+  loops include an external route, narrow spurs and a disconnected chamber. Free islands remain
   intrinsically free even when not reachable from the chosen start.
 - `SensorModel.observe(terrain, pose, sensor)` returns immutable sparse
   `VisibleMeasurements`: row/column indices, row-major linear indices, center
   heights and the four stats. `.mask` materializes a boolean grid only on request.
   Hidden neighbors are never emitted. Native scratch buffers are range bounded.
+  The raw hit `.mask` may include finite centers with native B UNKNOWN (partial
+  support); these remain publishable raw measurements but do not count as
+  classified effective coverage.
 - Deployment-safe `sensor.visible_cells(intrinsic, origin, resolution_m, pose,
   sensor)` returns row/column indices using measured B only. `geometry` supplies
   `world_to_cell`, `cell_center` and concave, boundary-inclusive `polygon_mask`.
@@ -49,7 +59,9 @@ or runtime integration is implemented by this package's terrain layer.
   cuts, then the exact union of center-ray visibility from every legal stance
   over all attainable headings. Full-angle union is a fixed denominator, not a
   360° instantaneous episode observation. Supercover rays include both corner
-  cells; the first-hit obstacle is visible, cells behind it are not.
+  cells; the first-hit obstacle is visible, cells behind it are not. The effective
+  coverage set contains only finite native-classified centers (B FREE or BLOCKED);
+  B UNKNOWN never enters its mask, area denominator or packed intersection.
 - The reference uses a square-dilation candidate superset, exact native range
   checks, first-visible-source early exit and interior-blocker rejection. It does
   not use a ring-only approximation. `packed_mask` and `reachable_bits` use
@@ -83,8 +95,10 @@ roundtrip comparing B, M and observed separately. That roundtrip first applies a
 translated bootstrap patch, so it compares world centers rather than assuming
 that the producer and scene integer indices have the same origin.
 
-Measured local x86_64 Jazzy-core initialization at 0.2 m, seed 20260915, 10 m
-sensor range, separate sequential processes (2026-09-15):
+Historical **generator version 3** local x86_64 Jazzy-core initialization at
+0.2 m, seed 20260915, 10 m sensor range, separate sequential processes (2026-09-15).
+This table predates version 4 polygon/start randomization and the classified-center
+coverage correction; it is not a version 4 performance claim:
 
 | Task extent | Moon total / peak RSS | Cave total / peak RSS |
 | --- | --- | --- |
@@ -98,6 +112,10 @@ The 1 km raster is 5120×5120 including context. Its retained terrain arrays occ
 550 MiB and the two packed reference masks 6.25 MiB. Heights used to assemble tiles
 are not retained by the reference. These timings are initialization evidence for
 one seed per family, not training throughput or an admission gate. They precede
-the final NaN-padding bounds correction, which leaves these fully finite scene
-classifications unchanged. Cave occlusion search remains the scaling bottleneck.
+the NaN-padding bounds correction and version 4 review fixes. Version 4 main-region
+selection additionally uses temporary compact component labels; its 1 km peak and
+timing have not been remeasured. Cave occlusion search was the scaling bottleneck
+in version 3. Version 4 passed the package's 52 behavioral tests, including repeated
+seeded main-region starts, independent native connectivity checks, and exclusion of
+boundary/interior-insufficient-support B UNKNOWN from coverage.
 Humble, Orin, DDS, rosbag, closed-loop controller and vehicle evidence: `NOT_RUN`.

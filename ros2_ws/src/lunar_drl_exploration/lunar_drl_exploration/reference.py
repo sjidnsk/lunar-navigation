@@ -43,6 +43,9 @@ class CoverageReference:
         candidate = maximum_filter(reachable, size=2 * d + 1, mode="constant", cval=0)
         candidate &= task_mask
         candidate &= np.isfinite(terrain.heights)
+        # Raw finite hits with incomplete support remain publishable measurements,
+        # but only native-classified centers belong to effective coverage E.
+        candidate &= terrain.intrinsic != 0
         visible = np.empty(terrain.shape, np.uint8)
         native.visible_union(
             terrain.intrinsic,

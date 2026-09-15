@@ -22,7 +22,7 @@ def _segment_distance(x, y, ax, ay, bx, by):
 
 
 class Scene:
-    GENERATOR_VERSION = 3
+    GENERATOR_VERSION = 4
 
     def __init__(self, seed, family, extent_m, resolution_m=0.2, platform=None):
         if family not in ("moon", "cave"):
@@ -61,11 +61,13 @@ class Scene:
         self.scene_id = hashlib.sha256(
             json.dumps(identity, sort_keys=True).encode()
         ).hexdigest()
-        self.task = TaskSpec(
-            self.scene_id,
-            "map",
-            [[-e / 2, -e / 2], [e / 2, -e / 2], [e / 2, e / 2], [-e / 2, e / 2]],
-        )
+        # Independent streams leave terrain generation and its original yaw draw
+        # unchanged. One corner per quadrant gives a convex seeded quadrilateral
+        # inside the nominal extent, with all finite scene context still available.
+        task_rng = np.random.default_rng(np.random.SeedSequence([self.seed, 301]))
+        signs = np.asarray([[-1, -1], [1, -1], [1, 1], [-1, 1]])
+        polygon = signs * task_rng.uniform(0.38, 0.5, size=(4, 2)) * e
+        self.task = TaskSpec(self.scene_id, "map", polygon)
         self.task_polygon = self.task.polygon
         rng = np.random.default_rng(self.seed)
         self._phase = float(rng.uniform(-math.pi, math.pi))
@@ -188,23 +190,62 @@ class Scene:
         return np.asarray(z, np.float32)
 
     def initial_pose(self, terrain):
-        """Select native M FREE support near the generated main floor, no override."""
+        """Uniform seeded native stance in the main component; yaw is unchanged."""
         if terrain.terrain_id != self.scene_id:
             raise ValueError("terrain belongs to different scene")
-        x, y = terrain.world_to_cell(*self._nominal_start)
-        radius = math.ceil(max(3.0, 0.04 * self.extent_m) / self.resolution_m)
-        y0, y1 = max(0, y - radius), min(self.shape[0], y + radius + 1)
-        x0, x1 = max(0, x - radius), min(self.shape[1], x + radius + 1)
-        valid = terrain.navigation[y0:y1, x0:x1] == 1
-        if self.family == "cave":
-            valid &= terrain.heights[y0:y1, x0:x1] == 0
-        rows, cols = np.nonzero(valid)
-        if not len(rows):
-            raise ValueError("generated main terrain has no legal native start")
-        i = np.argmin((rows + y0 - y) ** 2 + (cols + x0 - x) ** 2)
-        return Pose(
-            *terrain.cell_center(int(cols[i] + x0), int(rows[i] + y0)), self._yaw
-        )
+        if self.family == "moon":
+            component = _largest_native_free_component(terrain.navigation)
+        else:
+            # The structural main room defines cave ownership; never choose a
+            # nearby detached pocket or the large elevated wall plateau instead.
+            cx, cy, room_radius = self._rooms[0]
+            x, y = terrain.world_to_cell(cx, cy)
+            radius = math.ceil(room_radius / self.resolution_m)
+            y0, y1 = max(0, y - radius), min(self.shape[0], y + radius + 1)
+            x0, x1 = max(0, x - radius), min(self.shape[1], x + radius + 1)
+            wx = self.origin[0] + (np.arange(x0, x1) + 0.5) * self.resolution_m
+            wy = self.origin[1] + (np.arange(y0, y1) + 0.5) * self.resolution_m
+            valid = (
+                (terrain.navigation[y0:y1, x0:x1] == 1)
+                & (terrain.heights[y0:y1, x0:x1] == 0)
+                & ((wx[None, :] - cx) ** 2 + (wy[:, None] - cy) ** 2 < room_radius**2)
+            )
+            rows, cols = np.nonzero(valid)
+            if not len(rows):
+                raise ValueError("generated main room has no legal native stance")
+            nearest = np.argmin((rows + y0 - y) ** 2 + (cols + x0 - x) ** 2)
+            anchor = Pose(
+                *terrain.cell_center(int(cols[nearest] + x0), int(rows[nearest] + y0)),
+                self._yaw
+            )
+            component = terrain.reachable(anchor)
+        row_counts = np.count_nonzero(component, axis=1)
+        cumulative = np.cumsum(row_counts, dtype=np.int64)
+        if not cumulative[-1]:
+            raise ValueError("generated main terrain has no legal native stance")
+        rng = np.random.default_rng(np.random.SeedSequence([self.seed, 302]))
+        rank = int(rng.integers(int(cumulative[-1])))
+        y = int(np.searchsorted(cumulative, rank, side="right"))
+        within_row = rank - (int(cumulative[y - 1]) if y else 0)
+        x = int(np.flatnonzero(component[y])[within_row])
+        return Pose(*terrain.cell_center(x, y), self._yaw)
+
+
+def _largest_native_free_component(navigation):
+    """Exact native component partition using compact SciPy four-neighbor labels.
+
+    Native no-corner-cut diagonals always have a FREE cardinal intermediate, so
+    adding those diagonals cannot join distinct four-connected components. This
+    labels native M only; it never classifies terrain or changes FREE islands.
+    """
+    from scipy.ndimage import label
+
+    labels, _ = label(navigation == 1)  # SciPy default is cardinal connectivity.
+    sizes = np.bincount(labels.ravel())
+    sizes[0] = 0
+    if not np.any(sizes):
+        return np.zeros(navigation.shape, bool)
+    return labels == int(np.argmax(sizes))
 
 
 class TerrainGrid:

@@ -63,6 +63,7 @@ def oracle_union(terrain, start, sensor):
                 math.dist(source, target) * terrain.resolution_m
                 <= sensor.range_m + 1e-10
                 and np.isfinite(terrain.heights[target])
+                and terrain.intrinsic[target] != 0
                 and oracle_line(terrain.intrinsic, source, target)
             ):
                 result[target] = True
@@ -101,8 +102,13 @@ def test_native_union_matches_independent_exhaustive_and_each_heading():
             0.173 + 3 * math.pi / 2,
         ):
             measurement = SensorModel.observe(t, Pose(*t.cell_center(x, y), yaw), s)
-            assert np.all(reference.mask()[measurement.rows, measurement.cols])
-            union |= measurement.mask
+            classified = t.intrinsic[measurement.rows, measurement.cols] != 0
+            assert np.all(
+                reference.mask()[
+                    measurement.rows[classified], measurement.cols[classified]
+                ]
+            )
+            union |= measurement.mask & (t.intrinsic != 0)
     assert np.array_equal(union, expected)
     assert np.any(expected & (t.navigation != 1) & (t.intrinsic == 1))
     assert np.any(expected & (t.intrinsic == 2))
@@ -432,3 +438,32 @@ def test_fractional_lattice_exact_corners_and_neighboring_cells():
             wx, wy = origin[0] + x * r, origin[1] + y * r
             assert world_to_cell(wx, wy, origin, r) == (x, y)
             assert world_to_cell(wx - 0.001, wy - 0.001, origin, r) == (x - 1, y - 1)
+
+
+@pytest.mark.parametrize("interior_hole", [False, True])
+def test_reference_counts_classified_centers_not_finite_partial_measurements(
+    interior_hole,
+):
+    heights = np.zeros((13, 13) if interior_hole else (9, 9), np.float32)
+    if interior_hole:
+        heights[8, 8] = np.nan
+    terrain = TerrainGrid.from_heights(
+        heights, 0.5, (-0.375, -0.125), load_platform_config()
+    )
+    pose = Pose(*terrain.cell_center(3, 3), 0)
+    sensor = SensorSpec(range_m=100, fov_deg=360)
+    reference = CoverageReference.build(terrain, pose, task_all(terrain), sensor)
+    measurements = SensorModel.observe(terrain, pose, sensor)
+    classified = terrain.intrinsic != 0
+    assert np.any(measurements.mask & ~classified)  # retain real partial raw centers
+    assert np.array_equal(reference.mask(), classified)
+    assert reference.covered_area(reference.pack(measurements.mask & ~classified)) == 0
+    assert (
+        reference.covered_area(reference.pack(measurements.mask)) == reference.area_m2
+    )
+    if interior_hole:
+        assert terrain.intrinsic[8, 7] == 0 and np.isfinite(terrain.heights[8, 7])
+        assert not reference.mask()[8, 7] and not measurements.mask[8, 8]
+    else:
+        assert np.count_nonzero(reference.mask()) == 49
+        assert reference.area_m2 == 49 * 0.25
