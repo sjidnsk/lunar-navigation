@@ -135,6 +135,7 @@ def run_training(config, *, resume=False, device='cuda', max_transitions=None,
     barrier_pending = False
     stopping = False
     stopped = False
+    exit_drain_deadline = None
     failure = None
     stop_reason = None
     last_metrics = started
@@ -196,7 +197,10 @@ def run_training(config, *, resume=False, device='cuda', max_transitions=None,
         record_run()
         while not stopped:
             if connection.poll(.01):
-                message = connection.recv(); kind = message['kind']; env_id = message.get('env')
+                try: message = connection.recv()
+                except EOFError as exc:
+                    raise RuntimeError('collector transport ended before acknowledged stop') from exc
+                kind = message['kind']; env_id = message.get('env')
                 if kind == 'NEED_RESET':
                     if not stopping:
                         spec = curriculum.next(env_id, schedule.transitions)
@@ -282,8 +286,15 @@ def run_training(config, *, resume=False, device='cuda', max_transitions=None,
                     env_owners[env_id] = ([worker_pid] if worker_pid else []) + list(progress.get('owned_pids', []))
                 elif kind == 'EPISODE_END': metrics.append(dict(message, event='episode_end'))
                 else: raise RuntimeError('unexpected learner message ' + kind)
-            if not process.is_alive() and not stopped and not connection.poll():
-                raise RuntimeError(f'collector exited before acknowledged stop: {process.exitcode}')
+            if not process.is_alive() and not stopped:
+                # Process exit can precede the reader's final large-frame
+                # handoff. Keep consuming ordered inbox/EOF, without dispatch
+                # or updates. The deadline bounds broken transport, not normal
+                # delivery latency; there is no sleep-based completion guess.
+                if exit_drain_deadline is None: exit_drain_deadline = time.monotonic() + 12
+                if time.monotonic() >= exit_drain_deadline:
+                    raise RuntimeError('collector transport drain timed out before acknowledged stop')
+                continue
             if not stopping and not barrier_pending:
                 for env_id, token in list(pending_requests.items()):
                     if schedule.can_dispatch():
@@ -349,13 +360,12 @@ def run_training(config, *, resume=False, device='cuda', max_transitions=None,
         # A poisoned optimizer boundary forbids saving, but not receiving/ACKing
         # already finished valid work. Drain before joining the collector so it
         # can cancel active goals and close workers rather than wait on our ACK.
-        if process.pid is not None and process.is_alive():
+        if process.pid is not None:
             try:
-                connection.send(dict(kind='STOP'))
+                if process.is_alive(): connection.send(dict(kind='STOP'))
                 deadline = time.monotonic() + 12
                 while time.monotonic() < deadline:
                     if not connection.poll(.05):
-                        if not process.is_alive(): break
                         continue
                     message = connection.recv(); kind = message['kind']; env_id = message.get('env')
                     if kind == 'SCENE': ledger.scene(env_id, loads_transport(message['payload']))

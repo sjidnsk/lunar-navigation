@@ -260,3 +260,91 @@ def test_curriculum_configuration_rejects_invalid_scalar_or_probability_shapes(f
     from lunar_drl_exploration.config import TrainingConfig
     with pytest.raises(ValueError, match='curriculum'):
         replace(TrainingConfig(), **{field: value})
+
+
+@pytest.mark.parametrize('missing', [False, True])
+def test_training_final_transport_handoff_after_collector_exit_saves_or_reports_missing_stop(
+        tmp_path, monkeypatch, missing):
+    torch = pytest.importorskip('torch')
+    import multiprocessing as mp
+    import pickle
+    import threading
+    import time
+    from dataclasses import replace
+    from lunar_drl_exploration import ipc
+    from lunar_drl_exploration.config import TrainingConfig
+    from lunar_drl_exploration.training import run_training
+    from lunar_drl_exploration.checkpoint import CheckpointManager
+    from lunar_drl_exploration.replay import loads_transport
+    decoded, exited, second_empty_poll, release = [threading.Event() for _ in range(4)]
+    final = {}
+    real_duplex = ipc.Duplex
+    class DelayedFinal:
+        def __init__(self, raw): self.raw = raw
+        def recv(self):
+            message = self.raw.recv()
+            if message['kind'] == 'STOPPED':
+                final.update(pickle.loads(message['payload']))
+                decoded.set()
+                if missing: return self.raw.recv()  # actual ordered EOF, no STOPPED
+                assert release.wait(5), 'test failed to release final reader handoff'
+            return message
+        def __getattr__(self, name): return getattr(self.raw, name)
+    class DelayedDuplex(real_duplex):
+        empty_polls = 0
+        def __init__(self, raw, *args, **kwargs):
+            super().__init__(DelayedFinal(raw), *args, **kwargs)
+        def poll(self, timeout=0):
+            ready = super().poll(timeout)
+            if timeout and not ready and exited.is_set():
+                self.empty_polls += 1
+                if self.empty_polls >= 2: second_empty_poll.set()
+            return ready
+        def close(self, **kwargs):
+            release.set()  # failure-only cleanup also joins the blocked reader
+            return super().close(**kwargs)
+    monkeypatch.setattr(ipc, 'Duplex', DelayedDuplex)
+    def deliver_after_exit():
+        if not decoded.wait(8): return
+        if missing: return
+        collectors = [p for p in mp.active_children() if p.name == 'drl-cpu-collector']
+        assert len(collectors) == 1
+        collectors[0].join(3)
+        assert collectors[0].exitcode == 0
+        exited.set()
+        if not missing and second_empty_poll.wait(3): release.set()
+    coordinator = threading.Thread(target=deliver_after_exit)
+    coordinator.start()
+    config = replace(TrainingConfig(), environments=2, warmup=0, output_dir=str(tmp_path),
+        system_reserve_bytes=0, save_interval_s=1800)
+    started = time.monotonic()
+    try:
+        if missing:
+            with pytest.raises(RuntimeError, match='transport ended before acknowledged stop'):
+                run_training(config, device='cpu', max_transitions=8,
+                    env_factory='worker_fixtures:ControlledEnv', probe_extent=40, probe_budget=3)
+            saved = CheckpointManager(tmp_path).load(config).record
+            assert saved['schedule']['transitions'] == saved['schedule']['updates'] == 0
+        else:
+            result = run_training(config, device='cpu', max_transitions=8,
+                env_factory='worker_fixtures:ControlledEnv', probe_extent=40, probe_budget=3)
+            saved = CheckpointManager(tmp_path).load(config).record
+            assert second_empty_poll.is_set() and exited.is_set()
+            assert result['transitions'] >= 8
+            assert loads_transport(saved['counters'])['transitions'] == saved['schedule']['transitions'] == result['transitions']
+            assert saved['schedule']['unfinished_reservations'] == 0
+            from fractions import Fraction
+            assert saved['schedule']['updates'] == saved['learner']['updates'] == result['updates']
+            assert Fraction(saved['schedule']['credit']) == Fraction(result['transitions'], 4) - result['updates']
+            published = saved['collector_state']
+            assert published['actor_version'] == final['actor_version'] == 0
+            assert published['sequences'] == final['sequences']
+            assert published['acknowledged'] == final['acknowledged']
+            torch.testing.assert_close(published['policy_rng'], final['policy_rng'], atol=0, rtol=0)
+            for key, value in final['actor_record']['state_dict'].items():
+                torch.testing.assert_close(published['actor_record']['state_dict'][key], value, atol=0, rtol=0)
+    finally:
+        release.set(); coordinator.join(8)
+    assert time.monotonic() - started < 12
+    assert not coordinator.is_alive() and not mp.active_children()
+    assert not [t for t in threading.enumerate() if t.name.startswith('drl-ipc-')]
