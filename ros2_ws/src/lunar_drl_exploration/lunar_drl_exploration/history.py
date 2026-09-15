@@ -8,6 +8,11 @@ from .sensor import validate_sensor
 HEADINGS = np.arange(8, dtype=np.float64) * (math.pi / 4)
 
 
+def heading_bins(angles):
+    """Nearest optical-world sector, with identical wrapping for record/lookup."""
+    return np.floor((np.asarray(angles) % (2 * math.pi)) / (math.pi / 4) + 0.5).astype(np.int64) % 8
+
+
 class DirectionHistory:
     def __init__(self, tolerance_m=0.1):
         if not math.isfinite(tolerance_m) or tolerance_m <= 0:
@@ -26,8 +31,7 @@ class DirectionHistory:
             raise ValueError("finite executed pose required")
         # Store actual optical direction, including mounting yaw. A visit bit
         # denotes the nearest world heading that was physically observed.
-        direction = (pose.yaw + sensor.offset_yaw_rad) % (2 * math.pi)
-        heading = int(math.floor(direction / (math.pi / 4) + 0.5)) % 8
+        heading = int(heading_bins(pose.yaw + sensor.offset_yaw_rad))
         self._records.append((float(pose.x), float(pose.y), heading))
 
     def bits(self, positions):
@@ -42,3 +46,8 @@ class DirectionHistory:
                 if indices:
                     result[i, records[indices, 2].astype(int)] = 1
         return result
+
+    def action_bits(self, positions, sensor):
+        """Project physical views into the current vehicle-action heading columns."""
+        validate_sensor(sensor)
+        return self.bits(positions)[:, heading_bins(HEADINGS + sensor.offset_yaw_rad)]

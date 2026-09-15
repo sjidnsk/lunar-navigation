@@ -145,3 +145,43 @@ def test_training_recompute_reduces_saved_activations_without_changing_gradients
     for p,q in zip(actor.parameters(),direct.parameters()):
         torch.testing.assert_close(p.grad,q.grad)
     assert recomputed_size < normal_size / 2
+
+
+@pytest.mark.parametrize('mount_yaw', [0., np.pi / 2, np.pi / 3, -2 * np.pi + np.pi / 3])
+def test_executed_optical_history_aligns_with_packed_vehicle_actions(mount_yaw):
+    from lunar_drl_exploration.batch import pack_observations
+    from lunar_drl_exploration.contracts import Pose, SensorSpec
+    from lunar_drl_exploration.decision import DecisionCore
+    from test_task_analysis import snapshot, task
+
+    pose = Pose(3.5, 3.5, 0.)
+    core = DecisionCore(task(0, 0, 8, 8), SensorSpec(range_m=3, offset_yaw_rad=mount_yaw))
+    # Only a real, nearby physical observation counts; a far pose and an empty
+    # sensor update cannot mark other action directions at the current anchor.
+    core.record_observation(Pose(3.51, 3.51, 2 * np.pi), [[1, 2]])
+    core.record_observation(Pose(4.5, 3.5, np.pi), [[1, 2]])
+    core.record_observation(Pose(3.5, 3.5, np.pi), [])
+    obs, _ = core.observe(snapshot(np.ones((8, 8), np.uint8), pose=pose))
+    current = obs.action_nodes == obs.current_index
+    packed = pack_observations([obs], 'cpu')
+    visited = packed.action_features[current, 5].numpy()
+    np.testing.assert_array_equal(visited, [1, 0, 0, 0, 0, 0, 0, 0])
+    np.testing.assert_array_equal(obs.features[obs.current_index, 11:], visited)
+    assert obs.features.shape[1] == 19 and packed.action_features.shape[1] == 6
+
+
+def test_optical_history_reprojects_when_mount_configuration_changes():
+    from lunar_drl_exploration.batch import pack_observations
+    from lunar_drl_exploration.contracts import Pose, SensorSpec
+    from lunar_drl_exploration.decision import DecisionCore
+    from test_task_analysis import snapshot, task
+
+    core = DecisionCore(task(0, 0, 8, 8), SensorSpec(range_m=3))
+    core.record_observation(Pose(3.5, 3.5, np.pi / 2), [[1, 2]])
+    # Optical-world pi/2 remains observed after the sensor mounting changes.
+    core.sensor = replace(core.sensor, offset_yaw_rad=np.pi / 2)
+    core.analyzer.sensor = core.sensor
+    obs, _ = core.observe(snapshot(np.ones((8, 8), np.uint8), pose=Pose(3.5, 3.5, 0)))
+    visited = pack_observations([obs], 'cpu').action_features[obs.action_nodes == obs.current_index, 5]
+    np.testing.assert_array_equal(visited.numpy(), [1, 0, 0, 0, 0, 0, 0, 0])
+    np.testing.assert_array_equal(core.history.bits([[3.5, 3.5]])[0], [0, 0, 1, 0, 0, 0, 0, 0])

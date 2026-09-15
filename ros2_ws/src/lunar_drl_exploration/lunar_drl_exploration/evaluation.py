@@ -1,4 +1,5 @@
 """Frozen evaluation/export and deployment entrypoints with lazy dependencies."""
+from dataclasses import asdict
 import json
 from pathlib import Path
 
@@ -7,14 +8,18 @@ class EpisodeMetrics:
     def __init__(self, family, extent, seed):
         self.family, self.extent, self.seed = family, extent, seed
         self.coverage = self.distance = 0.
+        self.covered_area_m2 = self.coverable_area_m2 = None
         self.path80 = self.path99 = None
         self.exhausted = self.truncated = False
         self.steps = self.zero_gain = self.failures = self.collisions = 0
         self.reasons = {}
         self.error = None
 
-    def observe(self, coverage, distance, new_area, reason, terminated, truncated):
+    def observe(self, coverage, distance, new_area, reason, terminated, truncated,
+                *, covered_area_m2=None, coverable_area_m2=None):
         self.coverage, self.distance = float(coverage), float(distance)
+        self.covered_area_m2 = None if covered_area_m2 is None else float(covered_area_m2)
+        self.coverable_area_m2 = None if coverable_area_m2 is None else float(coverable_area_m2)
         self.exhausted, self.truncated = bool(terminated), bool(truncated)
         if coverage >= .8 and self.path80 is None: self.path80 = float(distance)
         if coverage >= .99 and self.path99 is None: self.path99 = float(distance)
@@ -26,6 +31,7 @@ class EpisodeMetrics:
 
     def record(self):
         return dict(family=self.family, extent_m=self.extent, seed=self.seed,
+            covered_area_m2=self.covered_area_m2, coverable_area_m2=self.coverable_area_m2,
             final_coverage=self.coverage, reached_80=self.path80 is not None,
             reached_99=self.path99 is not None, exhausted=self.exhausted,
             exhaustion_coverage=self.coverage if self.exhausted else None,
@@ -71,13 +77,17 @@ def evaluate(config, actor_path, *, seeds, families, extents, budget, output=Non
                         obs, state = env.reset(seed, family, extent, episode_budget=budget)
                         progress = env.progress()
                         metric.observe(env.reference.coverage_ratio(state.observed),
-                            progress['distance_m'], 0., 'INITIAL', env.report.exhausted, False)
+                            progress['distance_m'], 0., 'INITIAL', env.report.exhausted, False,
+                            covered_area_m2=env.reference.covered_area(state.observed),
+                            coverable_area_m2=env.reference.area_m2)
                         while not metric.exhausted and not metric.truncated and not metric.collisions:
                             transition = env.step(policy(obs))
                             execution = env.last_execution
                             metric.observe(env.reference.coverage_ratio(transition.next_privileged.observed),
                                 env.progress()['distance_m'], transition.parts.new_area_m2,
-                                execution.reason_code, transition.terminated, transition.truncated)
+                                execution.reason_code, transition.terminated, transition.truncated,
+                                covered_area_m2=env.reference.covered_area(transition.next_privileged.observed),
+                                coverable_area_m2=env.reference.area_m2)
                             obs = transition.next_observation
                     except Exception as exc:
                         metric.error = f'{type(exc).__name__}: {exc}'
@@ -86,7 +96,7 @@ def evaluate(config, actor_path, *, seeds, families, extents, budget, output=Non
                     print(json.dumps(rows[-1], ensure_ascii=False, allow_nan=False), flush=True)
     finally: env.close()
     result = dict(actor=str(Path(actor_path).resolve()), policy='frozen_joint_argmax',
-        sensor=dict(range_m=config.sensor.range_m, fov_deg=config.sensor.fov_deg),
+        sensor=asdict(config.sensor),
         budget=budget, groups=summarize(rows), cases=rows)
     if output is not None:
         payload = (json.dumps(result, ensure_ascii=False, allow_nan=False, indent=2)+'\n').encode()

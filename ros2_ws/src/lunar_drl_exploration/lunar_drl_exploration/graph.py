@@ -355,7 +355,7 @@ class GraphBuilder:
         feature = np.zeros((len(points), 19), np.float32)
         feature[:, :2] = (points - actual) / 10.0
         feature[:, 2] = _inside(points, task.polygon)
-        feature[:, 11:] = history.bits(points)
+        feature[:, 11:] = history.action_bits(points, sensor)
         fronts = report.frontier_cells - shift
         if len(fronts):
             tree = cKDTree(fronts)
