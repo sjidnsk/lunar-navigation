@@ -149,6 +149,8 @@ class TrainingConfig:
     collector_threads: int = 2
     learner_threads: int = 4
     dataloader_workers: int = 0
+    curriculum_transition_boundaries: tuple = (20000, 60000)
+    curriculum_mixtures: tuple = ((1., 0., 0.), (.25, .75, 0.), (.15, .25, .60))
     curriculum_budgets: tuple = (512, 2048, 8192)
     curriculum_extents_m: tuple = ((40, 80), (80, 150), (100, 300))
     replay_max_bytes: int = 8 * 1024**3
@@ -161,6 +163,15 @@ class TrainingConfig:
     owned_pss_limit_bytes: int | None = None
 
     def __post_init__(self):
+        boundaries = self.curriculum_transition_boundaries
+        if (not isinstance(boundaries, (tuple, list)) or len(boundaries) != 2 or
+                any(type(value) is not int or value < 0 for value in boundaries) or
+                boundaries[0] >= boundaries[1]):
+            raise ValueError('curriculum boundaries require two increasing nonnegative integers')
+        mixtures = np.asarray(self.curriculum_mixtures, dtype=float)
+        if (mixtures.shape != (3, 3) or not np.all(np.isfinite(mixtures)) or
+                np.any(mixtures < 0) or not np.allclose(mixtures.sum(axis=1), 1., rtol=0., atol=1e-12)):
+            raise ValueError('curriculum mixtures require three normalized nonnegative probability triples')
         for name in ('environments', 'max_update_credit', 'actor_publish_updates',
                      'worker_threads', 'collector_threads', 'learner_threads',
                      'replay_max_bytes', 'snapshot_max_bytes', 'total_output_max_bytes',
@@ -227,6 +238,10 @@ def training_config_from_record(record):
     platform = dict(values['platform'])
     platform['capability'] = MappingProxyType(dict(platform['capability']))
     values['platform'] = PlatformConfig(**platform)
+    if 'curriculum_transition_boundaries' in values:
+        values['curriculum_transition_boundaries'] = tuple(values['curriculum_transition_boundaries'])
+    if 'curriculum_mixtures' in values:
+        values['curriculum_mixtures'] = tuple(tuple(row) for row in values['curriculum_mixtures'])
     values['curriculum_budgets'] = tuple(values['curriculum_budgets'])
     values['curriculum_extents_m'] = tuple(tuple(pair) for pair in values['curriculum_extents_m'])
     return TrainingConfig(**values)

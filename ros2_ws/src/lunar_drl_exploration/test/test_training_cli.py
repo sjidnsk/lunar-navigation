@@ -197,3 +197,62 @@ def test_default_sixteen_update_publication_captures_the_published_weights(tmp_p
     if result['updates'] > 16:
         assert any(not torch.equal(value, state['learner']['actor'][key])
             for key, value in state['collector_state']['actor_record']['state_dict'].items())
+
+
+@pytest.mark.parametrize('count,seed,budget', [
+    (19999, 0, 512), (20000, 0, 2048), (59999, 0, 2048),
+    (60000, 0, 8192), (20000, 25, 512), (60000, 25, 2048),
+    (60000, 19, 8192),
+])
+def test_curriculum_exact_admission_boundaries_and_accepted_mixtures(count, seed, budget):
+    import numpy as np
+    from lunar_drl_exploration.config import TrainingConfig
+    from lunar_drl_exploration.training import Curriculum
+    # Independent fixed RNG quantiles: seeds0/25/19 draw .63696/.16072/.42038.
+    # They distinguish both boundaries and both late-stage CDF cut points.
+    spec = Curriculum(TrainingConfig(), np.random.default_rng(seed)).next(0, count)
+    assert spec['episode_budget'] == budget
+
+
+def test_curriculum_yaml_override_roundtrip_and_restored_counter_apply_on_next_reset(tmp_path):
+    import numpy as np
+    import json
+    from lunar_drl_exploration.cli import load_config, parser
+    from lunar_drl_exploration.config import config_record, training_config_from_record
+    from lunar_drl_exploration.schedule import UpdateSchedule
+    from lunar_drl_exploration.training import Curriculum
+    path = tmp_path / 'curriculum.yaml'
+    path.write_text('curriculum_transition_boundaries: [1, 3]\n'
+        'curriculum_mixtures: [[0, 1, 0], [0, 0, 1], [1, 0, 0]]\n')
+    config = load_config(parser().parse_args(['train', '--config', str(path)]))
+    config = training_config_from_record(json.loads(json.dumps(config_record(config))))
+    c = Curriculum(config, np.random.default_rng(0), {'episodes_issued': 21})
+    current = c.next(1, 0)
+    retained = dict(current)
+    assert current['episode_budget'] == 2048
+    assert c.next(1, 1)['episode_budget'] == 8192
+    schedule = UpdateSchedule()
+    for _ in range(3): schedule.collected()
+    restored = UpdateSchedule.from_state_dict(schedule.state_dict())
+    next_spec = c.next(1, restored.transitions)
+    assert next_spec['episode_budget'] == 512
+    assert current == retained, 'advancing admissions must not mutate an active reset specification'
+    assert next_spec['seed'] == current['seed'] + 2
+    assert c.state['episodes_issued'] == 24 and restored.transitions == 3
+
+
+@pytest.mark.parametrize('field,value', [
+    ('curriculum_transition_boundaries', (3, 3)),
+    ('curriculum_transition_boundaries', (-1, 3)),
+    ('curriculum_transition_boundaries', (1.5, 3)),
+    ('curriculum_transition_boundaries', (1,)),
+    ('curriculum_mixtures', ((1., 0., 0.),)),
+    ('curriculum_mixtures', ((1., 0., 0.), (.5, .6, 0.), (.15, .25, .6))),
+    ('curriculum_mixtures', ((1., 0., 0.), (-.1, 1.1, 0.), (.15, .25, .6))),
+    ('curriculum_mixtures', ((1., 0., 0.), (float('nan'), 1., 0.), (.15, .25, .6))),
+])
+def test_curriculum_configuration_rejects_invalid_scalar_or_probability_shapes(field, value):
+    from dataclasses import replace
+    from lunar_drl_exploration.config import TrainingConfig
+    with pytest.raises(ValueError, match='curriculum'):
+        replace(TrainingConfig(), **{field: value})

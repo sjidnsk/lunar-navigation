@@ -24,6 +24,8 @@ worker_threads: 1
 collector_threads: 2
 learner_threads: 4
 dataloader_workers: 0
+curriculum_transition_boundaries: [20000, 60000]
+curriculum_mixtures: [[1.0, 0.0, 0.0], [0.25, 0.75, 0.0], [0.15, 0.25, 0.60]]
 curriculum_budgets: [512, 2048, 8192]
 curriculum_extents_m: [[40, 80], [80, 150], [100, 300]]
 replay_max_bytes: 8589934592

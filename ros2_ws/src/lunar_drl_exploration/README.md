@@ -811,8 +811,12 @@ Only unfinished/unconstructable actions cancel a reservation. Static scenes are
 sent once per episode; the learner keeps one active scene per slot and replay
 keeps independent reference-counted ownership. There is no scene archive.
 
-Curriculum engineering defaults use cumulative valid admissions: before50k all
-small; 50k–150k small/medium25/75%; thereafter small/medium/large20/30/50%.
+Curriculum engineering defaults use cumulative valid admissions: before20k all
+small; 20k–60k small/medium25/75%; thereafter small/medium/large15/25/60%.
+`curriculum_transition_boundaries` and `curriculum_mixtures` are configurable
+engineering settings in TrainingConfig/YAML. They control new reset sampling
+and may be adjusted on resume without clearing cumulative admissions or RNG;
+existing replay reward/observation semantics are unchanged.
 The size-specific budgets remain512/2048/8192. Each reset samples its own size;
 active episodes continue unchanged, with moon/cave slots evenly split. Training
 scene seeds occupy the namespace above2^32 using the saved issued-episode

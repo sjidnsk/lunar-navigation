@@ -23,9 +23,9 @@ class AdmissionLedger:
 
 
 class Curriculum:
-    """Admission-count schedule: early small; middle 25/75; late 20/30/50.
+    """Admission-count schedule: early small; middle 25/75; late 15/25/60.
 
-    Engineering initial stage boundaries are 50k and 150k valid transitions.
+    Configurable initial stage boundaries are 20k and 60k valid transitions.
     Distribution changes only when an environment requests a new episode.
     """
     def __init__(self, config, rng, state=None, *, probe_extent=None, probe_budget=None):
@@ -34,8 +34,8 @@ class Curriculum:
         self.probe_extent, self.probe_budget = probe_extent, probe_budget
 
     def next(self, env_id, transitions):
-        probabilities = (1., 0., 0.) if transitions < 50000 else (
-            (.25, .75, 0.) if transitions < 150000 else (.2, .3, .5))
+        stage = sum(transitions >= boundary for boundary in self.config.curriculum_transition_boundaries)
+        probabilities = self.config.curriculum_mixtures[stage]
         size = int(self.rng.choice(3, p=probabilities))
         low, high = self.config.curriculum_extents_m[size]
         extent = self.probe_extent if self.probe_extent is not None else float(self.rng.uniform(low, high))
