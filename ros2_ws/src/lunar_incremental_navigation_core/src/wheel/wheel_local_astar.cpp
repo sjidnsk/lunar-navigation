@@ -385,18 +385,9 @@ LocalPlanResult WheelLocalPlanner::Plan(
       if (!geometry.Contains(next)) {
         continue;
       }
-      const auto next_phase = view.AdvancePhase(phase_[current.offset], next);
-      if (!next_phase) {
-        continue;
-      }
-      if (dx != 0 && dy != 0) {
-        const GridIndex side_x{.x = *next_x, .y = current_index.y};
-        const GridIndex side_y{.x = current_index.x, .y = *next_y};
-        if (!view.AdvancePhase(phase_[current.offset], side_x) ||
-            !view.AdvancePhase(phase_[current.offset], side_y)) {
-          continue;
-        }
-      }
+      const auto next_phase = view.AdvanceGridStep(phase_[current.offset],
+                                                   current_index, next);
+      if (!next_phase) continue;
       // Invalid terminal edges are not inserted, so the search continues to
       // other legal entering edges instead of accepting a position-only goal.
       const auto* next_candidate = region ? region->At(next) : nullptr;

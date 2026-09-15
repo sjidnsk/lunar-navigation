@@ -279,6 +279,11 @@ class PatchedElevationView final : public ElevationRangeView {
     return ElevationRange{.min_m = elevation_m, .max_m = elevation_m};
   }
 
+  [[nodiscard]] std::optional<LocalTerrainMeasurements> TerrainMeasurementsAt(
+      const GridIndex index) const noexcept override {
+    return base_->TerrainMeasurementsAt(index);
+  }
+
  private:
   std::shared_ptr<const ElevationSnapshot> base_;
   const std::set<GridIndex>& patch_cells_;
@@ -421,6 +426,55 @@ StartPatchResult RequestLocalStartPatchBuilder::Build(
   return {.status = StartPatchResult::Status::kReady,
           .view = std::move(view),
           .assumed_cells = assumed_cells};
+}
+
+StartConnectionsResult RequestLocalStartPatchBuilder::BuildStartConnections(
+    std::shared_ptr<const FineTraversabilitySnapshot> fine,
+    const SparseGridGeometry& local_window, const Pose2& p0,
+    const PlatformCapability& capability,
+    const TraversabilityProfile& profile) const {
+  const StartPatchResult patch = Build(fine, local_window, p0, capability, profile);
+  StartConnectionsResult result{.status = patch.status};
+  if (!patch.view || (patch.status != StartPatchResult::Status::kReady &&
+                      patch.status != StartPatchResult::Status::kNotNeeded)) {
+    return result;
+  }
+  const std::optional<GridIndex> start = WorldToCell(local_window, p0.position_m);
+  if (!start) return result;
+  const StartPhase initial = patch.view->Source(*start) == LocalCellSource::kEvidenceFree
+                                 ? StartPhase::kNormal : StartPhase::kStartPrefix;
+  if (initial == StartPhase::kNormal) {
+    result.connections.push_back({.index = *start, .phase = initial});
+    return result;
+  }
+  constexpr std::array<GridIndex, 8> kNeighbors{{
+      {.x = -1, .y = -1}, {.x = 0, .y = -1}, {.x = 1, .y = -1},
+      {.x = -1, .y = 0},                         {.x = 1, .y = 0},
+      {.x = -1, .y = 1},  {.x = 0, .y = 1},  {.x = 1, .y = 1},
+  }};
+  std::queue<std::pair<GridIndex, StartPhase>> frontier;
+  std::set<GridIndex> visited;
+  frontier.push({*start, initial});
+  visited.insert(*start);
+  while (!frontier.empty()) {
+    const auto [current, phase] = frontier.front();
+    frontier.pop();
+    for (const GridIndex offset : kNeighbors) {
+      const auto next = detail::OffsetWithinGeometry(local_window, current,
+                                                     offset.x, offset.y);
+      if (!next || visited.contains(*next)) continue;
+      const auto next_phase = patch.view->AdvanceGridStep(phase, current, *next);
+      if (!next_phase) continue;
+      visited.insert(*next);
+      if (*next_phase == StartPhase::kNormal) {
+        result.connections.push_back({.index = *next, .phase = *next_phase});
+      } else {
+        frontier.push({*next, *next_phase});
+      }
+    }
+  }
+  if (result.connections.empty()) result.status = StartPatchResult::Status::kUnresolved;
+  return result;
 }
 
 }  // namespace lunar::incremental_navigation

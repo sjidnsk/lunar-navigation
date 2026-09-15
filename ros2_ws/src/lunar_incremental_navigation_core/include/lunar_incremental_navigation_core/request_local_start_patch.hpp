@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <vector>
 
 #include "lunar_incremental_navigation_core/fine_traversability_builder.hpp"
 #include "lunar_incremental_navigation_core/local_planning.hpp"
@@ -22,9 +23,25 @@ struct StartPatchResult final {
   std::size_t assumed_cells{};
 };
 
+struct StartConnection final {
+  GridIndex index;
+  StartPhase phase{StartPhase::kNormal};
+};
+
+struct StartConnectionsResult final {
+  StartPatchResult::Status status{StartPatchResult::Status::kUnresolved};
+  std::vector<StartConnection> connections;
+};
+
 class RequestLocalStartPatchBuilder final {
  public:
   [[nodiscard]] StartPatchResult Build(
+      std::shared_ptr<const FineTraversabilitySnapshot> fine,
+      const SparseGridGeometry& local_window, const Pose2& p0,
+      const PlatformCapability& capability,
+      const TraversabilityProfile& profile) const;
+
+  [[nodiscard]] StartConnectionsResult BuildStartConnections(
       std::shared_ptr<const FineTraversabilitySnapshot> fine,
       const SparseGridGeometry& local_window, const Pose2& p0,
       const PlatformCapability& capability,

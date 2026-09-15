@@ -1,0 +1,134 @@
+"""Behavioral contracts for the read-only native policy-map cache."""
+
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+
+from lunar_drl_exploration.config import load_platform_config
+from lunar_drl_exploration.contracts import DecisionObservation, Pose
+from lunar_drl_exploration.maps import BLOCKED, FREE, UNKNOWN, PolicyMapStore
+
+
+def _response(*, epoch="epoch-a", revision=1, full_snapshot=True,
+              state=UNKNOWN, intrinsic=UNKNOWN, observed=UNKNOWN):
+    """A hand-built wire-shaped policy-map response for one native tile."""
+    count = 256 * 256
+    states = np.full(count, state, dtype=np.uint8)
+    intrinsic_states = np.full(count, intrinsic, dtype=np.uint8)
+    effective = np.full(count, observed, dtype=np.uint8)
+    return SimpleNamespace(
+        ready=True,
+        reason_code="READY",
+        epoch=epoch,
+        fine_revision=revision,
+        raw_elevation_revision=revision,
+        full_snapshot=full_snapshot,
+        frame_id="map",
+        resolution_m=0.1,
+        origin=(0.0, 0.0, 0.0),
+        profile_hash="wheel-profile",
+        pose=Pose(0.0, 0.0, 0.0),
+        start_connections=np.empty((0, 2), dtype=np.int64),
+        local_bounds=(0, 0, 256, 256),
+        tiles=[SimpleNamespace(
+            tile_x=0, tile_y=0, states=states,
+            intrinsic_states=intrinsic_states, observed=effective,
+            costs=np.full(count, 0.5, dtype=np.float32),
+            elevation_m=np.full(count, 1.25, dtype=np.float32),
+        )],
+    )
+
+
+def test_delta_replaces_only_changed_tile_without_mutating_prior_snapshot():
+    # Removing structural sharing or returning writable tile buffers would
+    # silently corrupt replay observations from an earlier revision.
+    store = PolicyMapStore()
+    before = store.apply(_response())
+    delta = _response(revision=2, full_snapshot=False,
+                      state=BLOCKED, intrinsic=FREE, observed=FREE)
+    after = store.apply(delta)
+
+    assert before.cell_at(1, 1).state == UNKNOWN
+    assert after.cell_at(1, 1).state == FREE
+    assert after.cell_at(1, 1).navigation_state == BLOCKED
+    assert not before.tiles[(0, 0)].states.flags.writeable
+    with pytest.raises(ValueError):
+        before.tiles[(0, 0)].states[0] = FREE
+
+
+def test_epoch_replacement_discards_old_tiles_and_missed_delta_requires_full():
+    # Accepting an out-of-sequence delta would make action masks refer to a
+    # fabricated mixture of map revisions.
+    store = PolicyMapStore()
+    store.apply(_response(revision=4, state=FREE, intrinsic=FREE, observed=FREE))
+    with pytest.raises(ValueError, match="full snapshot"):
+        store.apply(_response(revision=6, full_snapshot=False,
+                              state=FREE, intrinsic=FREE, observed=FREE))
+
+    replaced = store.apply(_response(epoch="epoch-b", revision=1,
+                                     state=UNKNOWN, intrinsic=UNKNOWN,
+                                     observed=UNKNOWN))
+    assert replaced.epoch == "epoch-b"
+    assert replaced.revision == 1
+    assert replaced.cell_at(1, 1).state == UNKNOWN
+
+
+def test_effective_observed_classification_never_infers_measurement_from_navigation_state():
+    # Treating an inflated M-blocked cell as observed would inflate discovery
+    # reward and leak a footprint-derived label into actor input.
+    snapshot = PolicyMapStore().apply(
+        _response(state=BLOCKED, intrinsic=UNKNOWN, observed=UNKNOWN))
+    cell = snapshot.cell_at(0, 0)
+    assert cell.state == UNKNOWN
+    assert cell.intrinsic_state == UNKNOWN
+    assert cell.navigation_state == BLOCKED
+    assert not np.isnan(cell.elevation_m)
+
+
+def test_decision_observation_freezes_action_indices_and_world_goals_at_construction():
+    # A replay writer mutating its staging arrays must not change the action
+    # identity or world goal attached to an already queued observation.
+    node_ids = np.array([7, 9], dtype=np.int64)
+    goals = np.array([[3.0, 4.0, 0.0], [5.0, 6.0, 1.57]], dtype=np.float32)
+    observation = DecisionObservation(
+        node_ids=node_ids,
+        positions=np.zeros((2, 2), dtype=np.float32),
+        features=np.zeros((2, 19), dtype=np.float32),
+        edges=np.array([[0, 1]], dtype=np.int64),
+        edge_lengths=np.array([1.0], dtype=np.float32),
+        current_index=0,
+        polygon=np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=np.float32),
+        context=np.zeros(8, dtype=np.float32),
+        action_nodes=np.array([1, 0], dtype=np.int64),
+        action_yaws=np.array([0.0, 1.57], dtype=np.float32),
+        goals=goals,
+        epoch="epoch-a",
+        revision=2,
+    )
+    node_ids[1] = 99
+    goals[1, 0] = 99.0
+
+    assert observation.node_ids.tolist() == [7, 9]
+    assert observation.goals[1].tolist() == pytest.approx([5.0, 6.0, 1.57])
+    assert observation.goals[observation.action_nodes[0]].tolist() == pytest.approx([5.0, 6.0, 1.57])
+    with pytest.raises(ValueError):
+        observation.action_nodes[0] = 0
+    with pytest.raises(ValueError):
+        observation.goals[1, 0] = 0.0
+
+
+def test_platform_config_reads_canonical_wheel_limits_and_actor_context_scaling():
+    # Duplicating platform speed/spin limits in training config would drift
+    # action context away from the actual wheel navigation profile.
+    config = load_platform_config()
+    context = config.actor_context(Pose(0.0, 0.0, np.pi / 2),
+                                   linear_speed_mps=0.1,
+                                   angular_speed_radps=0.5,
+                                   sensor_range_m=10.0,
+                                   sensor_fov_rad=np.pi / 2)
+    assert config.maximum_forward_speed_mps == pytest.approx(0.2)
+    assert config.maximum_spin_rate_radps == pytest.approx(1.0)
+    assert context.tolist() == pytest.approx([0.0, 1.0, 0.5, 0.5,
+                                               1.0, 0.5, config.footprint_radius_m,
+                                               1.0])

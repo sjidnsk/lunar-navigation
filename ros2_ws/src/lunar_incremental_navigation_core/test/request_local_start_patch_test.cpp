@@ -188,6 +188,27 @@ TEST(RequestLocalStartPatch,
 }
 
 TEST(RequestLocalStartPatch,
+     ExportsOnlyNativeEvidenceAtTheEndOfTheAssumedStartPrefix) {
+  const GridGeometry geometry = Geometry();
+  const GridIndex start{.x = 12, .y = 12};
+  const auto fixture = MakeFixture(
+      geometry, FlatWithMissingSquare(geometry, start, 1), WheelCapability(),
+      Profile(2.0));
+
+  const StartConnectionsResult connections =
+      RequestLocalStartPatchBuilder().BuildStartConnections(
+          fixture.fine, fixture.fine->geometry(), PoseAt(geometry, start),
+          WheelCapability(), Profile(2.0));
+
+  ASSERT_EQ(connections.status, StartPatchResult::Status::kReady);
+  ASSERT_FALSE(connections.connections.empty());
+  for (const StartConnection connection : connections.connections) {
+    EXPECT_EQ(connection.phase, StartPhase::kNormal);
+    EXPECT_EQ(fixture.fine->State(connection.index), FineCellState::kFree);
+  }
+}
+
+TEST(RequestLocalStartPatch,
      FitsUniquePlaneFromThreeNonCollinearNonblockedSamples) {
   const GridGeometry geometry = Geometry();
   const GridIndex start{.x = 12, .y = 12};

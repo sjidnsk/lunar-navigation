@@ -1,0 +1,22 @@
+uint64 since_revision
+int64 minimum_map_stamp_ns
+---
+bool ready
+string reason_code
+string epoch
+builtin_interfaces/Time processed_stamp
+uint64 raw_elevation_revision
+uint64 fine_revision
+bool full_snapshot
+string frame_id
+float64 resolution_m
+geometry_msgs/Point origin
+string profile_hash
+geometry_msgs/Pose anchor_pose
+uint8 start_connection_status
+int64[] start_connection_x
+int64[] start_connection_y
+int64[4] local_bounds
+float64 goal_position_tolerance_m
+float64 goal_yaw_tolerance_rad
+lunar_planning_msgs/PolicyMapTile[] tiles

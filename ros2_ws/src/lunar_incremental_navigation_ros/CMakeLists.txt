@@ -35,6 +35,7 @@ set(LUNAR_INCREMENTAL_NAVIGATION_ROS_SOURCES
   src/state_adapter.cpp
   src/traversability_qos.cpp
   src/planning_debug_publisher.cpp
+  src/policy_map_exporter.cpp
   src/planning_snapshot_visualization.cpp)
 
 add_library(${PROJECT_NAME} SHARED
@@ -151,6 +152,8 @@ if(BUILD_TESTING)
 
   lunar_add_ros_gtest(elevation_pipeline_test
     test/elevation_pipeline_test.cpp)
+  lunar_add_ros_gtest(policy_map_exporter_test
+    test/policy_map_exporter_test.cpp)
   lunar_add_ros_gtest(exploration_map_projector_test
     test/exploration_map_projector_test.cpp)
   lunar_add_ros_gtest(incremental_map_publisher_test

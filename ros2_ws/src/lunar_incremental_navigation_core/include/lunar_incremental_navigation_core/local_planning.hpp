@@ -197,6 +197,24 @@ class RequestLocalPlanningView final {
     return std::nullopt;
   }
 
+  [[nodiscard]] std::optional<StartPhase> AdvanceGridStep(
+      const StartPhase phase, const GridIndex current,
+      const GridIndex next) const noexcept {
+    const double dx = static_cast<double>(next.x) - static_cast<double>(current.x);
+    const double dy = static_cast<double>(next.y) - static_cast<double>(current.y);
+    if ((dx == 0.0 && dy == 0.0) || std::abs(dx) > 1.0 || std::abs(dy) > 1.0) {
+      return std::nullopt;
+    }
+    const auto next_phase = AdvancePhase(phase, next);
+    if (!next_phase) return std::nullopt;
+    if (dx != 0.0 && dy != 0.0 &&
+        (!AdvancePhase(phase, {.x = next.x, .y = current.y}) ||
+         !AdvancePhase(phase, {.x = current.x, .y = next.y}))) {
+      return std::nullopt;
+    }
+    return next_phase;
+  }
+
   [[nodiscard]] bool CanBeEndpoint(const GridIndex index) const noexcept {
     return geometry_.Contains(index) &&
            base_->State(index) == FineCellState::kFree;

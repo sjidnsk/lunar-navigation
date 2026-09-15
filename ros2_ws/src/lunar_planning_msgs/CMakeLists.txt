@@ -18,11 +18,13 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/HopSegment.msg"
   "msg/MotionReference.msg"
   "msg/PathReference.msg"
+  "msg/PolicyMapTile.msg"
   "msg/PlannerDiagnostics.msg"
   "msg/TrackingStatus.msg"
   "msg/TimedPath.msg"
   "action/PlanMotion.action"
   "action/NavigateToPose.action"
+  "srv/GetPolicyMap.srv"
   DEPENDENCIES action_msgs builtin_interfaces geometry_msgs nav_msgs std_msgs trajectory_msgs unique_identifier_msgs
 )
 
