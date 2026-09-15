@@ -758,3 +758,93 @@ cell, with measured gains 1.04/0.52 m² and action RTF 18.31/16.56. All 951 phys
 steps remained 0.05 simulation seconds and sensor intervals remained 10 steps.
 This is actual single-environment CPU Actor selection evidence; it does not
 establish learning, GPU collection, eight-environment throughput or target30.
+
+## Async training and operator entrypoints
+
+`python -m lunar_drl_exploration.cli {train,evaluate,infer,export}` is a lazy
+stdlib bootstrap. `scripts/drl/build.sh` builds the affected dependency closure
+into `$HOME/.cache/lunar-drl-redesign/jazzy/{build,install,log}`. Launchers clear
+inherited ROS/Python/library overlay variables in a child shell, source Jazzy
+before strict unset checking, then source only the new `install/local_setup.bash`.
+`DRL_CACHE`, `DRL_ROS_SETUP`, and `DRL_PYTHON` explicitly override those paths;
+`CUDA_VISIBLE_DEVICES` remains a user setting. Default dependency Python is
+`$HOME/.cache/lunar-drl-training/venv/bin/python`.
+
+```bash
+scripts/drl/build.sh
+scripts/drl/train.sh --config config/drl_exploration.yaml
+scripts/drl/train.sh --config config/drl_exploration.yaml --resume
+scripts/drl/train.sh --probe --probe-warmup 4 --probe-extent 40 --probe-budget 2 \
+  --max-transitions 12 --output-dir training-output/drl-exploration-redesign/my-probe
+scripts/drl/_run.sh export --checkpoint training-output/drl-exploration-redesign/resume.pt \
+  --output training-output/drl-exploration-redesign/actor.pt
+scripts/drl/evaluate.sh --actor training-output/drl-exploration-redesign/actor.pt \
+  --seeds 2026091501 2026091502 --families moon cave --extents 40 100 --budget 512
+scripts/drl/infer.sh --actor training-output/drl-exploration-redesign/actor.pt
+```
+
+`--max-transitions` is the number of **new admissions in this invocation**;
+already finished messages are drained and may produce an explicitly reported
+bounded overshoot. `--probe` requires a finite maximum; warmup/extent/budget
+changes require the explicit probe flag and never alter network/batch/physics.
+Use the same semantic settings (including warmup) when resuming a probe. A
+pre-existing `resume.pt` requires `--resume` or a separate output directory.
+Training remains eight environments, full 128/8/6 Actor/Critics, effective64 /
+micro16, warmup1024, UTD0.25, target30, dt0.05, observation2Hz, canonical0.2m/s.
+
+The main process alone owns the GPU learner, replay, admission counters, exact
+credit, scene-seed/curriculum RNG and checkpoint manager. One CPU collector owns
+Actor inference (ready batches1–8) and its dedicated Torch RNG; eight workers
+import no Torch. Numerical thread settings are worker1 / collector2 / learner4,
+with no DataLoader processes. Worker reset/step/close share one persistent
+execution thread because Linux PDEATHSIG binds native children to the spawning
+thread. The worker control loop remains responsive to cancel/stop during a
+synchronous action. Three bounded infrastructure replacements per consecutive
+failure streak are allowed; the fourth failure stops training explicitly.
+Constructable ordinary navigation failures remain replay transitions.
+
+The collector asks the learner to reserve credit **before** dispatch. A worker
+retains one completed immutable message until learner replay admission,
+`schedule.collected(reserved=True)`, and ACK. A two-second retry resends that
+same completion; O(environments) ACK/admission watermarks prevent duplicates.
+Only unfinished/unconstructable actions cancel a reservation. Static scenes are
+sent once per episode; the learner keeps one active scene per slot and replay
+keeps independent reference-counted ownership. There is no scene archive.
+
+Curriculum engineering defaults use cumulative valid admissions: before50k all
+small; 50k–150k small/medium25/75%; thereafter small/medium/large20/30/50%.
+The size-specific budgets remain512/2048/8192. Each reset samples its own size;
+active episodes continue unchanged, with moon/cave slots evenly split. Training
+scene seeds occupy the namespace above2^32 using the saved issued-episode
+counter. Frozen evaluation seeds are explicit nonnegative integers below2^32.
+No coverage-success gate or zero-gain early reset controls the curriculum.
+
+A periodic save pauses dispatch and drains received completion ACKs at a complete
+optimizer boundary without waiting for long goals. It captures the collector's
+**actual published** CPU Actor record/version/RNG (potentially15 updates behind),
+not newer learner weights mislabeled with the old version. Resume restores both
+records, complete optimizer history, finite replay/credit/RNG/curriculum/counters,
+and starts new episodes. STOP/SIGINT/resource stop cancels active work and drains
+constructed completions before final save. A partial optimizer failure preserves
+the previous good checkpoint, drains acknowledgements, and reports the rollback
+boundary; partially updated weights are never saved as a completed update.
+
+Default output is `training-output/drl-exploration-redesign/`: one atomic
+`resume.pt`, bounded8MiB `metrics.jsonl`, and `run.json`, with8GiB replay /
+2GiB saved replay /20GiB total including temporary atomic files. The1800-second
+save timer uses monotonic wall time. No automatic unevaluated `best.pt`, video,
+bag, image, historical model, or map archive is written. Explicit export creates
+one existing `actor_state()` schema/config/weights file and prints its source.
+`run.json` records actual package/native paths, process/device/thread ownership,
+resource observations, final counters/credit and bounded-stop overshoot.
+
+Frozen evaluation uses joint argmax, no replay or optimizer, and reports every
+case plus family/extent groups:80/99 attainment, exhaustion and final reference
+coverage, actual distances to thresholds,80-to99 tail distance, zero gain,
+truncation, navigation failures, collisions and explicit infrastructure failures.
+Reference coverage counts only reference-intersected observed cells. Sensor
+range/FOV overrides are Actor-only evaluation/deployment inputs; they are not a
+claim of learned generalization. `infer` only attaches the existing observed
+`InferenceRuntime`; it does not spawn navigation/control or import scenes,
+reference builders or SAC. Native/environment dependencies remain needed for
+training/evaluation; inference still requires the measured native map contract.

@@ -1,0 +1,199 @@
+import importlib.util
+import os
+from pathlib import Path
+import subprocess
+import sys
+import pytest
+
+
+def test_cli_help_is_stdlib_only_and_all_commands_exist():
+    code = '''import sys, importlib.abc
+class Guard(importlib.abc.MetaPathFinder):
+ def find_spec(self, fullname, path=None, target=None):
+  if fullname.split('.')[0] in {'torch','numpy','rclpy'}: raise AssertionError(fullname)
+sys.meta_path.insert(0, Guard())
+from lunar_drl_exploration.cli import main
+main(['--help'])
+'''
+    result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True,
+        env=dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1]) + os.pathsep + os.environ.get('PYTHONPATH', '')))
+    assert result.returncode == 0, result.stderr
+    assert all(command in result.stdout for command in ('train', 'evaluate', 'infer', 'export'))
+
+
+def test_default_config_and_explicit_probe_preserve_network_and_batch():
+    assert importlib.util.find_spec('lunar_drl_exploration.cli') is not None
+    from lunar_drl_exploration.cli import parser, load_config
+    config = load_config(parser().parse_args(['train']))
+    assert (config.environments, config.target_rtf, config.warmup) == (8, 30., 1024)
+    args = parser().parse_args(['train', '--probe', '--probe-warmup', '4', '--probe-extent', '40', '--probe-budget', '2'])
+    config = load_config(args)
+    assert config.model.width == 128 and config.model.layers == 6 and config.model.heads == 8
+    assert config.learning.batch_size == 64 and config.learning.microbatch_size == 16
+    assert config.warmup == 4
+    with pytest.raises(ValueError, match='probe'):
+        load_config(parser().parse_args(['train', '--probe-warmup', '4']))
+
+
+def test_curriculum_uses_cumulative_admissions_and_retains_small_scenes():
+    assert importlib.util.find_spec('lunar_drl_exploration.training') is not None
+    import numpy as np
+    from lunar_drl_exploration.training import Curriculum
+    from lunar_drl_exploration.config import TrainingConfig
+    c = Curriculum(TrainingConfig(), np.random.default_rng(19))
+    early = [c.next(i, 0) for i in range(8)]
+    assert [s['family'] for s in early].count('moon') == 4
+    assert all(40 <= s['extent'] <= 80 and s['episode_budget'] == 512 for s in early)
+    late = [c.next(i % 8, 200000) for i in range(200)]
+    assert {s['episode_budget'] for s in late} == {512, 2048, 8192}
+    assert len({s['seed'] for s in late}) == len(late)
+
+
+def test_training_real_updates_save_actual_published_policy_and_resume_new_episodes(tmp_path):
+    torch = pytest.importorskip('torch')
+    import pickle
+    from dataclasses import replace
+    from lunar_drl_exploration.config import TrainingConfig
+    from lunar_drl_exploration.training import run_training
+    from lunar_drl_exploration.checkpoint import CheckpointManager
+    from lunar_drl_exploration.replay import loads_transport
+    config = replace(TrainingConfig(), environments=2, warmup=0, output_dir=str(tmp_path),
+        system_reserve_bytes=0, save_interval_s=.2)
+    result = run_training(config, device='cpu', max_transitions=8,
+        env_factory='worker_fixtures:ControlledEnv', probe_extent=40, probe_budget=3)
+    assert result['new_transitions'] >= 8 and result['updates'] >= 1
+    saved = CheckpointManager(tmp_path).load(config).record
+    published = saved['collector_state']
+    assert published['actor_version'] == published['actor_record']['version'] == 0
+    assert any(not torch.equal(value, saved['learner']['actor'][key])
+        for key, value in published['actor_record']['state_dict'].items())
+    assert saved['schedule']['unfinished_reservations'] == 0
+    assert loads_transport(saved['counters'])['transitions'] == saved['schedule']['transitions']
+    old_episodes = set(result['episode_ids'])
+    resumed = run_training(config, resume=True, device='cpu', max_transitions=4,
+        env_factory='worker_fixtures:ControlledEnv', probe_extent=40, probe_budget=3)
+    assert resumed['transitions'] >= result['transitions'] + 4
+    assert set(resumed['episode_ids']).isdisjoint(old_episodes)
+    assert resumed['episodes_issued'] > result['episodes_issued']
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['metrics.jsonl', 'resume.pt', 'run.json']
+
+
+def test_frozen_evaluation_metrics_keep_failed_cases_and_late_path():
+    assert importlib.util.find_spec('lunar_drl_exploration.evaluation') is not None
+    from lunar_drl_exploration.evaluation import EpisodeMetrics, summarize
+    a = EpisodeMetrics('moon', 40, -1)
+    a.observe(.2, 0., 0., 'INITIAL', False, False)
+    a.observe(.8, 10., 1., 'GOAL_REACHED', False, False)
+    a.observe(.99, 25., 2., 'GOAL_REACHED', False, True)
+    b = EpisodeMetrics('moon', 40, -2)
+    b.observe(.5, 5., 0., 'NO_PATH', True, False)
+    rows = [a.record(), b.record()]
+    assert rows[0]['path_80_to_99_m'] == 15.
+    assert rows[1]['path_to_99_m'] is None
+    summary = summarize(rows)[0]
+    assert summary['rate_99'] == .5 and summary['mean_final_coverage'] == .745
+    assert summary['exhaustion_rate'] == .5 and summary['cases'] == 2
+
+
+def test_export_actor_uses_existing_schema_and_infer_import_is_observed_only(tmp_path):
+    torch = pytest.importorskip('torch')
+    from lunar_drl_exploration.sac import SACLearner
+    from lunar_drl_exploration.evaluation import export_actor
+    from lunar_drl_exploration.runtime import ActorPolicy
+    # Existing Actor artifacts can be copied/exported without inventing a schema.
+    source, target = tmp_path / 'source.pt', tmp_path / 'actor.pt'
+    torch.save(SACLearner().actor_state(), source)
+    export_actor(source, target)
+    assert ActorPolicy.load(target).actor is not None
+    code = '''import sys, importlib.abc
+class Guard(importlib.abc.MetaPathFinder):
+ def find_spec(self, fullname, path=None, target=None):
+  if fullname in {'lunar_drl_exploration.ros_env','lunar_drl_exploration.scene','lunar_drl_exploration.reference','lunar_drl_exploration.sac'}: raise AssertionError(fullname)
+sys.meta_path.insert(0, Guard())
+from lunar_drl_exploration.evaluation import infer
+from lunar_drl_exploration.runtime import InferenceRuntime
+'''
+    result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True,
+        env=dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1]) + os.pathsep + os.environ.get('PYTHONPATH', '')))
+    assert result.returncode == 0, result.stderr
+
+
+def test_launcher_clears_old_overlays_and_preserves_user_device_selection(tmp_path):
+    root = Path(__file__).resolve().parents[4]
+    ros = tmp_path / 'ros.bash'; cache = tmp_path / 'cache'
+    (cache / 'install').mkdir(parents=True)
+    ros.write_text('export ROS_DISTRO=jazzy\nexport PYTHONPATH=/new/ros\n')
+    (cache / 'install/local_setup.bash').write_text('export PYTHONPATH=/new/drl:$PYTHONPATH\n')
+    python = tmp_path / 'python'
+    python.write_text('#!/bin/bash\n/usr/bin/env\n')
+    python.chmod(0o755)
+    env = dict(os.environ, DRL_ROS_SETUP=str(ros), DRL_CACHE=str(cache), DRL_PYTHON=str(python),
+        AMENT_PREFIX_PATH='/old/ament', COLCON_PREFIX_PATH='/old/colcon', CMAKE_PREFIX_PATH='/old/cmake',
+        ROS_PACKAGE_PATH='/old/pkg', PYTHONPATH='/old/python', LD_LIBRARY_PATH='/old/lib', CUDA_VISIBLE_DEVICES='2')
+    result = subprocess.run([str(root / 'scripts/drl/train.sh'), '--help'], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    values = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+    assert values['PYTHONPATH'] == '/new/drl:/new/ros'
+    assert values['CUDA_VISIBLE_DEVICES'] == '2'
+    assert not any('/old/' in value for key, value in values.items() if key in
+        ('AMENT_PREFIX_PATH', 'COLCON_PREFIX_PATH', 'CMAKE_PREFIX_PATH', 'ROS_PACKAGE_PATH', 'PYTHONPATH', 'LD_LIBRARY_PATH'))
+
+
+def test_resource_stop_saves_an_acknowledged_boundary_and_reason(tmp_path):
+    pytest.importorskip('torch')
+    from dataclasses import replace
+    from lunar_drl_exploration.config import TrainingConfig
+    from lunar_drl_exploration.training import run_training
+    from lunar_drl_exploration.checkpoint import CheckpointManager
+    config = replace(TrainingConfig(), environments=1, output_dir=str(tmp_path),
+        system_reserve_bytes=2**60)
+    result = run_training(config, device='cpu', max_transitions=10000,
+        env_factory='worker_fixtures:ControlledEnv', probe_extent=40, probe_budget=3)
+    assert 'system reserve' in result['stop_reason']
+    saved = CheckpointManager(tmp_path).load(config).record
+    assert saved['schedule']['unfinished_reservations'] == 0
+    assert result['transitions'] == saved['schedule']['transitions']
+
+
+def test_partial_optimizer_failure_keeps_last_good_checkpoint_and_closes_children(tmp_path, monkeypatch):
+    torch = pytest.importorskip('torch')
+    import multiprocessing as mp
+    from dataclasses import replace
+    from lunar_drl_exploration.config import TrainingConfig
+    from lunar_drl_exploration.training import run_training
+    from lunar_drl_exploration.checkpoint import CheckpointManager
+    from lunar_drl_exploration.sac import SACLearner
+    config = replace(TrainingConfig(), environments=2, warmup=0, output_dir=str(tmp_path), system_reserve_bytes=0)
+    before = {p.pid for p in mp.active_children()}
+    def fail_update(self, *args):
+        with torch.no_grad(): next(self.actor.parameters()).add_(10)
+        raise RuntimeError('injected mid optimizer failure')
+    monkeypatch.setattr(SACLearner, 'update', fail_update)
+    import time
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match='mid optimizer'):
+        run_training(config, device='cpu', max_transitions=12,
+            env_factory='worker_fixtures:ControlledEnv', probe_extent=40, probe_budget=3)
+    saved = CheckpointManager(tmp_path).load(config).record
+    assert saved['schedule']['updates'] == 0 and saved['schedule']['transitions'] == 0
+    assert saved['learner']['updates'] == 0
+    assert {p.pid for p in mp.active_children()} == before
+    assert time.monotonic() - started < 8, 'finished messages need ACK draining even after update failure'
+
+
+def test_default_sixteen_update_publication_captures_the_published_weights(tmp_path):
+    torch = pytest.importorskip('torch')
+    from dataclasses import replace
+    from lunar_drl_exploration.config import TrainingConfig
+    from lunar_drl_exploration.training import run_training
+    from lunar_drl_exploration.checkpoint import CheckpointManager
+    config = replace(TrainingConfig(), environments=2, warmup=0, output_dir=str(tmp_path), system_reserve_bytes=0)
+    result = run_training(config, device='cpu', max_transitions=72,
+        env_factory='worker_fixtures:ControlledEnv', probe_extent=40, probe_budget=100)
+    state = CheckpointManager(tmp_path).load(config).record
+    assert 16 <= result['updates'] < 32
+    assert state['collector_state']['actor_version'] == 16
+    assert state['collector_state']['actor_record']['version'] == 16
+    if result['updates'] > 16:
+        assert any(not torch.equal(value, state['learner']['actor'][key])
+            for key, value in state['collector_state']['actor_record']['state_dict'].items())
