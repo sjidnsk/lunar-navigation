@@ -1413,5 +1413,41 @@ TEST_F(IncrementalExplorationNodeTest, OnlyInternalNavigationErrorEntersError) {
   }));
 }
 
+class CoverageMilestoneTest : public IncrementalExplorationNodeTest {
+ protected:
+  void ConfigureParameters(IncrementalExplorationNodeParameters& p) override {
+    p.coverage_target = 0.80;
+  }
+};
+class SecondCoverageMilestoneTest : public CoverageMilestoneTest {
+ protected:
+  void ConfigureParameters(IncrementalExplorationNodeParameters& p) override {
+    p.coverage_target = 0.99;
+  }
+};
+TEST_F(CoverageMilestoneTest, CandidatesContinueBeyondEightyPercent) {
+  Start(false);
+  ASSERT_TRUE(WaitFor([this] { return LastStatus()->coverage_ratio > 0.99; }));
+  EXPECT_NE(LastStatus()->state, Status::COMPLETED);
+}
+TEST_F(SecondCoverageMilestoneTest, CandidatesContinueBeyondNinetyNinePercent) {
+  Start(false);
+  ASSERT_TRUE(WaitFor([this] { return LastStatus()->coverage_ratio > 0.99; }));
+  EXPECT_NE(LastStatus()->state, Status::COMPLETED);
+}
+TEST_F(CoverageMilestoneTest, FullyKnownMapCompletesWithoutNavigation) {
+  auto map = ExplorationMap(false);
+  std::fill(map.data.begin(), map.data.end(), 0);
+  map_publisher_->publish(map);
+  odometry_publisher_->publish(Odometry());
+  tf_publisher_->publish(MapFromOdom());
+  task_publisher_->publish(StartTask());
+  ASSERT_TRUE(WaitFor([this] {
+    return LastStatus() && LastStatus()->state == Status::COMPLETED;
+  }));
+  EXPECT_EQ(LastStatus()->reason_code, "COMPLETED_NO_REACHABLE_FRONTIER");
+  EXPECT_EQ(server_->goal_count(), 0U);
+}
+
 }  // namespace
 }  // namespace lunar::pure_exploration_ros

@@ -1,0 +1,56 @@
+stack:
+  mode: incremental_v2
+common:
+  platform_type: wheel
+  use_sim_time: false
+  frames:
+    map: map
+    odom: odom
+    base_link: base_link
+  coarse_resolution_m: 1.0
+  local_map_topic: /Car/T3/mapping/grid_map
+  exploration_map_topic: /Car/T4/mapping/exploration_map
+  odometry_topic: /P4/input/odometry
+  tf_topic: /P4/input/map_to_odom
+  navigation_action: /Car/T4/navigation/navigate_to_pose
+  local_map_qos:
+    reliability: reliable
+    durability: transient_local
+  exploration_map_qos:
+    reliability: reliable
+    durability: transient_local
+    history: keep_last
+    depth: 1
+  platform_config: /home/yanfa/P4/config/wheel.yaml
+exploration:
+  minimum_frontier_length_m: 1.0
+  coverage_target: 0.8
+  sensor_range_m: 10.0
+  sensor_fov_deg: 90.0
+  yaw_offsets_deg:
+  - -45.0
+  - -22.5
+  - 0.0
+  - 22.5
+  - 45.0
+  task_topic: /Car/T4/exploration/task
+  status_topic: /Car/T4/exploration/status
+  task_boundary_topic: /Car/T4/exploration/task_boundary
+  task_map_markers_topic: /Car/T4/exploration/task_map_markers
+  current_goal_topic: /Car/T4/exploration/current_goal
+  frontiers_topic: /Car/T4/exploration/frontiers
+  diagnostics_topic: /Car/T4/exploration/diagnostics
+navigation:
+  publish_local_fine_map: true
+  local_fine_map_topic: /Car/T4/mapping/local_fine_map
+  local_fine_map_window_m: 28.0
+  planning_sla_ms: 2000
+  planning_hard_timeout_ms: 3000
+  global_subdeadline_ms: 500
+  local_window_size_m: 64.0
+  path_reference_topic: /Car/T4/planning/path_reference
+  local_path_topic: /Car/T4/planning/local_path
+  global_route_topic: /Car/T4/planning/global_route
+  diagnostics_topic: /Car/T4/planning/diagnostics
+  goal_position_tolerance_m: 0.1
+  goal_yaw_tolerance_rad: 0.05

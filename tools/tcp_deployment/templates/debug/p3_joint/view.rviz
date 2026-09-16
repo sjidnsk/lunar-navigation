@@ -1,0 +1,114 @@
+Panels:
+- Class: rviz_common/Displays
+  Name: Displays
+Visualization Manager:
+  Class: ''
+  Global Options:
+    Fixed Frame: map
+    Background Color: 28; 30; 34
+    Frame Rate: 20
+  Displays:
+  - Class: rviz_default_plugins/Map
+    Name: Exploration map
+    Enabled: false
+    Value: false
+    Topic:
+      Value: /Car/T4/mapping/exploration_map
+      Reliability Policy: Reliable
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Depth: 1
+    Alpha: 0.8
+  - Class: rviz_default_plugins/Map
+    Name: Local fine map
+    Enabled: true
+    Value: true
+    Alpha: 1.0
+    Topic:
+      Value: /Car/T4/mapping/local_fine_map
+      Reliability Policy: Reliable
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Depth: 1
+  - Class: rviz_default_plugins/Path
+    Name: Global route
+    Enabled: true
+    Value: true
+    Topic:
+      Value: /Car/T4/planning/global_route
+      Reliability Policy: Reliable
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Depth: 1
+    Color: 70; 130; 255
+    Line Style: Billboards
+    Line Width: 0.08
+  - Class: rviz_default_plugins/Path
+    Name: Local path
+    Enabled: true
+    Value: true
+    Topic:
+      Value: /Car/T4/planning/local_path
+      Reliability Policy: Reliable
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Depth: 1
+    Color: 255; 180; 0
+    Line Style: Billboards
+    Line Width: 0.12
+  - Class: rviz_default_plugins/MarkerArray
+    Name: Frontiers
+    Enabled: true
+    Value: true
+    Topic:
+      Value: /Car/T4/exploration/frontiers
+      Reliability Policy: Reliable
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Depth: 1
+  - Class: rviz_default_plugins/MarkerArray
+    Name: Task boundary
+    Enabled: true
+    Value: true
+    Topic:
+      Value: /Car/T4/exploration/task_boundary
+      Reliability Policy: Reliable
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Depth: 1
+  - Class: rviz_default_plugins/Pose
+    Name: Current goal
+    Enabled: true
+    Value: true
+    Topic:
+      Value: /Car/T4/exploration/current_goal
+      Reliability Policy: Reliable
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Depth: 1
+  - Class: rviz_default_plugins/Odometry
+    Name: Odometry
+    Enabled: true
+    Value: true
+    Topic:
+      Value: /P4/input/odometry
+      Reliability Policy: Best Effort
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Depth: 10
+  Tools:
+  - Class: rviz_default_plugins/Interact
+  - Class: rviz_default_plugins/MoveCamera
+  - Class: rviz_default_plugins/Select
+  - Class: rviz_default_plugins/SetGoal
+    Topic: /Car/T4/rviz_goal
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Scale: 18.0
+      Target Frame: <Fixed Frame>
+      X: 0.0
+      Y: 0.0
+Window Geometry:
+  Width: 1280
+  Height: 850

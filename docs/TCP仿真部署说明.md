@@ -83,3 +83,9 @@ python3 tools/create_obj_tcp_deployment.py \
 - 内部包依赖完整性、Shell 语法、启动 dry-run 和源码/地图 SHA-256 校验通过。构建在只读源码挂载下完成；输出写入独立验证目录，未混入部署包。
 
 上述闭环均使用本机运动学车辆，不模拟 Unreal 重力、轮胎接触或坡面滑移。本轮 Jetson Orin 原生运行、远端 Unreal 联调、GUI 人工操作及坡面物理精度均为 `NOT_RUN`。详细历史验证见配套记录；本轮证据目录 `/tmp/tcp-audit-20260916-103436/`，该临时路径不随包交付。
+
+## P4/P3 现场联合运行（2026-09-16 同步）
+
+源码包同时提供 `debug/p3_joint/` 的 Orin 现场配置，使用说明见该目录 README.md。它使用 P3 的地图和旧车辆接口，并通过域 57/10 常驻转发；不要与本包 TCP 直连启动方式同时运行。源码中的对应模板位于 `tools/tcp_deployment/templates/debug/p3_joint/`。这套配置保留现场绝对路径，迁移机器需检查配置。
+
+探索覆盖率 80% / 99% 仅为阶段指标，不触发完成。详情见 `docs/exploration-completion-policy.md`。
