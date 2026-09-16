@@ -757,9 +757,12 @@ def test_incremental_reference_identity_invalidation_and_retired_session():
         rclpy.shutdown()
 
 
-@pytest.mark.parametrize("linear_speed,angular_speed", [(0.2, 0.0), (0.0, 0.2)])
+@pytest.mark.parametrize("linear_speed,lateral_speed,angular_speed", [
+    (0.2, 0.0, 0.0), (0.0, 0.0, 0.2), (0.0, 0.02, 0.0),
+    (0.008, 0.008, 0.0),
+])
 def test_incremental_feedback_reports_measured_stop_and_reference_identity(
-    linear_speed, angular_speed, monkeypatch
+    linear_speed, lateral_speed, angular_speed, monkeypatch
 ):
     from types import SimpleNamespace
     from lunar_planning_msgs.msg import PathReference, TrackingStatus
@@ -780,6 +783,7 @@ def test_incremental_feedback_reports_measured_stop_and_reference_identity(
         controller._on_tf(make_direct_map_from_odom())
         odometry = make_odometry(x=1.)
         odometry.twist.twist.linear.x = linear_speed
+        odometry.twist.twist.linear.y = lateral_speed
         odometry.twist.twist.angular.z = angular_speed
         controller._on_odometry(odometry)
         controller._tick()

@@ -132,3 +132,32 @@ def test_final_alignment_losing_endpoint_position_brakes_then_fails(final, yaw_r
     result = executor.update(TrackingState(0.5, 0, 1), 0.05)
     assert result.phase == "FAILED"
     assert result.command.failure_reason == "GOAL_POSITION_LOST"
+
+
+def test_rotation_can_stop_when_vehicle_response_exceeds_command():
+    policy=replace(TrackingPolicy(),max_angular_radps=.15,max_angular_accel_radps2=.1)
+    executor=PathExecutor(policy)
+    executor.set_path(((0,0,0),(0,0,.5235987756)))
+    yaw=w=previous=0.
+    for _ in range(400):
+        result=executor.update(TrackingState(0,0,yaw,angular_radps=w),.05)
+        command=result.command.angular_z_radps
+        assert abs(command-previous)<=.1*.05+1e-9 or result.phase in ('BRAKING','COMPLETED','FAILED')
+        previous=command
+        w=1.2*command
+        yaw+=w*.05
+        if result.phase=='COMPLETED':break
+    assert result.phase=='COMPLETED'
+    assert abs(yaw-.5235987756)<=policy.goal_yaw_tolerance_rad
+
+
+def test_tracking_feedback_spike_does_not_reset_command_ramp():
+    e = PathExecutor(TrackingPolicy())
+    e.set_path(((0, 0, 0), (10, 0, 0)))
+    previous = e.update(TrackingState(0, 0, 0), .05).command.linear_x_mps
+    for measured in (.3, .01, .25, .0, .3):
+        result = e.update(TrackingState(.1, 0, 0, measured, .02), .05)
+        assert result.phase == 'TRACKING'
+        assert 0 < result.command.linear_x_mps <= .2
+        assert abs(result.command.linear_x_mps-previous) <= e.policy.max_linear_accel_mps2*.05+1e-9
+        previous = result.command.linear_x_mps

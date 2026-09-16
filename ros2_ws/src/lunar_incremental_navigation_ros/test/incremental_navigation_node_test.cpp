@@ -122,12 +122,13 @@ bool WaitFor(Predicate&& predicate,
 
 [[nodiscard]] std::shared_ptr<const core::FineTraversabilitySnapshot>
 MakeFine(const std::uint64_t revision = 1U,
-         const std::optional<core::GridIndex> blocked = std::nullopt) {
+         const std::optional<core::GridIndex> blocked = std::nullopt,
+         const double resolution_m = 1.0) {
   core::PersistentElevationMap map;
   const core::GridGeometry geometry{.frame_id = "map",
                                     .width = 8U,
                                     .height = 8U,
-                                    .resolution_m = 1.0};
+                                    .resolution_m = resolution_m};
   const std::vector<float> elevation(geometry.CellCount(), 0.0F);
   const auto update = map.Apply(core::ElevationEvidence{
       .geometry = geometry,
@@ -412,7 +413,8 @@ struct TimingOverrides final {
 
 [[nodiscard]] rclcpp::NodeOptions ServerOptions(
     const std::string& suffix, const bool debug_enabled = false,
-    const std::optional<TimingOverrides>& timing = std::nullopt) {
+    const std::optional<TimingOverrides>& timing = std::nullopt,
+    const std::vector<rclcpp::Parameter>& overrides = {}) {
   rclcpp::NodeOptions options;
   options.arguments({"--ros-args", "-r", "__node:=incremental_navigation_" + suffix});
   options.parameter_overrides({
@@ -453,6 +455,9 @@ struct TimingOverrides final {
                                       "/planning_demo/debug/" + suffix);
   }
 #endif
+  for (const auto& parameter : overrides) {
+    options.append_parameter_override(parameter.get_name(), parameter.get_parameter_value());
+  }
   return options;
 }
 
@@ -512,10 +517,11 @@ class RunningSystem final {
  public:
   RunningSystem(std::string suffix, IncrementalNavigationNodeDependencies hooks,
                 const bool debug_enabled = false,
-                const std::optional<TimingOverrides>& timing = std::nullopt)
+                const std::optional<TimingOverrides>& timing = std::nullopt,
+                const std::vector<rclcpp::Parameter>& overrides = {})
       : suffix_(std::move(suffix)),
         server_(std::make_shared<IncrementalNavigationNode>(
-            ServerOptions(suffix_, debug_enabled, timing), std::move(hooks))),
+            ServerOptions(suffix_, debug_enabled, timing, overrides), std::move(hooks))),
         client_node_(std::make_shared<rclcpp::Node>("client_" + suffix_)),
         client_(rclcpp_action::create_client<Action>(
             client_node_, "/test/" + suffix_ + "/navigate_to_pose")) {
@@ -587,10 +593,13 @@ class RunningSystem final {
 
   [[nodiscard]] rclcpp_action::ClientGoalHandle<Action>::SharedPtr Send(
       const double x, const double y,
-      std::vector<Action::Feedback>* feedback = nullptr) {
+      std::vector<Action::Feedback>* feedback = nullptr,
+      const std::optional<double> yaw = std::nullopt) {
     Action::Goal goal;
     goal.target_x_m = x;
     goal.target_y_m = y;
+    goal.has_target_yaw = yaw.has_value();
+    goal.target_yaw_rad = yaw.value_or(0.0);
     rclcpp_action::Client<Action>::SendGoalOptions options;
     if (feedback) {
       options.feedback_callback =
@@ -946,8 +955,12 @@ TEST(IncrementalNavigationNode,
   auto handle = system.Send(5.5, 0.5);
   ASSERT_TRUE(handle);
   ASSERT_TRUE(WaitFor([&] {
+    // The first cycle reports PLAN_FOUND; EXECUTING follows on the next
+    // cycle. Receipt of an arbitrary diagnostic does not establish this state.
+    const auto diagnostics = system.Diagnostics();
     return !system.FineStates().empty() && !system.GuidanceStates().empty() &&
-           !system.StartPatches().empty() && !system.Diagnostics().empty() &&
+           !system.StartPatches().empty() && !diagnostics.empty() &&
+           FindDiagnosticValue(diagnostics.back(), "reason_code") == "EXECUTING" &&
            !system.Paths().empty();
   }));
 
@@ -1285,6 +1298,46 @@ TEST(IncrementalNavigationNode, GoalReachedInvalidatesThenSucceeds) {
   EXPECT_FALSE(FindDiagnosticValue(terminal_diagnostics, "session_id").empty());
   EXPECT_EQ(FindDiagnosticValue(terminal_diagnostics, "path_points"), "0");
   EXPECT_EQ(wrapped.result->last_segment_revision, 1U);
+}
+
+TEST(IncrementalNavigationNode, ConfiguredTightArrivalRequiresBothPositionAndYaw) {
+  auto control = std::make_shared<FakeControl>();
+  control->reaches_final_goal = true;
+  auto states = std::make_shared<StateQueue>();
+  RunningSystem system("tight_arrival", IncrementalNavigationNodeDependencies{
+      .ports_factory = FakePorts(control),
+      .snapshots = core::SnapshotBundle{.fine = MakeFine(1U, std::nullopt, 0.2)},
+      .state = core::StateInput{.base_link_pose = {
+          .position_m = {.x = 0.5, .y = 0.5}}},
+      .state_source = [states] { return states->Take(); },
+  }, false, std::nullopt, {
+      rclcpp::Parameter("goal_position_tolerance_m", 0.1),
+      rclcpp::Parameter("goal_yaw_tolerance_rad", 0.05),
+  });
+  auto handle = system.Send(1.1, 0.5, nullptr, 0.0);
+  ASSERT_TRUE(handle);
+  ASSERT_TRUE(WaitFor([&] { return !system.Paths().empty(); }));
+  auto result = system.Result(handle);
+  // Each pose would pass the old 0.3 m / 15 degree contract.
+  states->Push({.position_m = {.x = 0.9, .y = 0.5}, .yaw_rad = 0.0});
+  ASSERT_EQ(result.wait_for(150ms), std::future_status::timeout);
+  states->Push({.position_m = {.x = 1.05, .y = 0.5}, .yaw_rad = 0.1});
+  ASSERT_EQ(result.wait_for(150ms), std::future_status::timeout);
+  states->Push({.position_m = {.x = 1.05, .y = 0.5}, .yaw_rad = 0.04});
+  ASSERT_EQ(result.wait_for(3s), std::future_status::ready);
+  const auto wrapped = result.get();
+  ASSERT_TRUE(wrapped.result);
+  EXPECT_EQ(wrapped.result->outcome, Action::Result::GOAL_REACHED);
+}
+
+TEST(IncrementalNavigationNode, RejectsInvalidArrivalToleranceOverrides) {
+  for (const auto& name : {"goal_position_tolerance_m", "goal_yaw_tolerance_rad"}) {
+    for (const double value : {-0.1, 0.0}) {
+      auto options = ServerOptions("invalid_arrival");
+      options.append_parameter_override(name, value);
+      EXPECT_THROW(std::make_shared<IncrementalNavigationNode>(options), std::runtime_error);
+    }
+  }
 }
 
 TEST(IncrementalNavigationNode,

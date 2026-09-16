@@ -204,6 +204,16 @@ struct RuntimeParameters final {
 #endif
   parameters.profile = PlatformProfileFor(
       parameters.capability, *loaded.start_blind_zone_margin_m);
+  parameters.profile.goal_position_tolerance_m = node.declare_parameter<double>(
+      "goal_position_tolerance_m", parameters.profile.goal_position_tolerance_m);
+  parameters.profile.goal_yaw_tolerance_rad = node.declare_parameter<double>(
+      "goal_yaw_tolerance_rad", parameters.profile.goal_yaw_tolerance_rad);
+  if (!std::isfinite(parameters.profile.goal_position_tolerance_m) ||
+      parameters.profile.goal_position_tolerance_m <= 0.0 ||
+      !std::isfinite(parameters.profile.goal_yaw_tolerance_rad) ||
+      parameters.profile.goal_yaw_tolerance_rad <= 0.0) {
+    throw std::runtime_error("goal tolerances must be finite and positive");
+  }
   return parameters;
 }
 

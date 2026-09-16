@@ -584,6 +584,23 @@ class IncrementalExplorationDefaultMapWaitTest
   double MapWaitTimeoutSeconds() const override { return -1.0; }
 };
 
+class OmnidirectionalExplorationTest : public IncrementalExplorationNodeTest {
+ protected:
+  void ConfigureParameters(IncrementalExplorationNodeParameters& p) override {
+    p.sensor_model.field_of_view_rad = 2.0 * std::numbers::pi;
+  }
+};
+
+TEST_F(OmnidirectionalExplorationTest, RequiresTerminalViewingYaw) {
+  Start();
+  EXPECT_TRUE(server_->goal(0).has_target_yaw);
+}
+
+TEST_F(IncrementalExplorationNodeTest, DirectionalSensorRequiresTerminalViewingYaw) {
+  Start();
+  EXPECT_TRUE(server_->goal(0).has_target_yaw);
+}
+
 TEST_F(IncrementalExplorationDefaultMapWaitTest,
        DefaultThirtySecondsCancelsOnlyAtDeadline) {
   EXPECT_DOUBLE_EQ(node_->get_parameter("navigation_map_wait_timeout_s").as_double(), 30.0);

@@ -58,7 +58,7 @@ struct CellBounds final {
 
 [[nodiscard]] CellBounds WindowBounds(
     const core::SparseGridGeometry& geometry,
-    const PlanningVisualizationWindow& window) {
+    const PlanningVisualizationWindow& window, const bool clip_to_map = true) {
   const core::Vec3 origin = geometry.origin_m();
   const double resolution = geometry.resolution_m();
   const double half_length = window.length_m / 2.0;
@@ -73,20 +73,16 @@ struct CellBounds final {
         (upper - origin_coordinate) / resolution - 0.5));
   };
   const core::GridIndex minimum{
-      .x = std::max(geometry.min_inclusive().x,
-                    first_center_index(window.center_map_m.x - half_length,
-                                       origin.x)),
-      .y = std::max(geometry.min_inclusive().y,
-                    first_center_index(window.center_map_m.y - half_length,
-                                       origin.y))};
+      .x = first_center_index(window.center_map_m.x - half_length, origin.x),
+      .y = first_center_index(window.center_map_m.y - half_length, origin.y)};
   const core::GridIndex maximum{
-      .x = std::min(geometry.max_exclusive().x - 1,
-                    last_center_index(window.center_map_m.x + half_length,
-                                      origin.x)),
-      .y = std::min(geometry.max_exclusive().y - 1,
-                    last_center_index(window.center_map_m.y + half_length,
-                                      origin.y))};
-  return {.minimum = minimum, .maximum = maximum};
+      .x = last_center_index(window.center_map_m.x + half_length, origin.x),
+      .y = last_center_index(window.center_map_m.y + half_length, origin.y)};
+  if (!clip_to_map) return {.minimum = minimum, .maximum = maximum};
+  return {.minimum = {.x = std::max(geometry.min_inclusive().x, minimum.x),
+                      .y = std::max(geometry.min_inclusive().y, minimum.y)},
+          .maximum = {.x = std::min(geometry.max_exclusive().x - 1, maximum.x),
+                      .y = std::min(geometry.max_exclusive().y - 1, maximum.y)}};
 }
 
 [[nodiscard]] bool HasCells(const CellBounds& bounds) noexcept {
@@ -276,6 +272,13 @@ FineVisualization ProjectFineVisualization(
   }
   const CellBounds bounds = WindowBounds(geometry, window);
   if (!HasCells(bounds)) {
+    // The vehicle can lie outside the currently loaded snapshot. Publish an
+    // explicitly unknown display window, never a default message with no frame.
+    const auto requested = WindowBounds(geometry, window, false);
+    if (HasCells(requested)) {
+      const auto unknown = MakeGrid(geometry, requested);
+      return {.state = unknown, .cost = unknown, .risk = unknown};
+    }
     FineVisualization output;
     return output;
   }

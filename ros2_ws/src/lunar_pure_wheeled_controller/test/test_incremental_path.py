@@ -117,3 +117,11 @@ def test_configured_world_frame_is_checked():
     path = make_path(frame_id="world", points=[(1., 2., 0.), (2., 2., 0.)])
     assert parse_incremental_path(path, "world").reason is None
     assert parse_incremental_path(path).reason == "INVALID_PATH"
+
+
+@pytest.mark.parametrize('component', ['x', 'y'])
+def test_nonfinite_body_translation_cannot_be_used_as_stopped_feedback(component):
+    from lunar_pure_wheeled_controller.frame import MapFromOdom
+    odometry = make_odometry(x=1., y=0., yaw=0.)
+    setattr(odometry.twist.twist.linear, component, float('nan'))
+    assert map_tracking_state(odometry, MapFromOdom(0., 0., 0.)) is None

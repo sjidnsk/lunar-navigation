@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <chrono>
 #include <memory>
 #include <numbers>
@@ -15,6 +16,7 @@
 #include "lunar_incremental_navigation_core/fine_traversability_builder.hpp"
 #include "lunar_incremental_navigation_core/global_guidance_builder.hpp"
 #include "lunar_incremental_navigation_ros/incremental_map_publisher.hpp"
+#include "lunar_incremental_navigation_ros/planning_snapshot_visualization.hpp"
 
 namespace lunar::incremental_navigation_ros {
 namespace {
@@ -78,6 +80,22 @@ using namespace std::chrono_literals;
   auto guidance = core::GlobalGuidanceBuilder{1.0}.Derive(
       fine, std::nullopt);
   return {.fine = std::move(fine), .guidance = std::move(guidance)};
+}
+
+TEST(FineVisualization, OutsideSnapshotPublishesFramedUnknownWindow) {
+  const auto bundle = Bundle();
+  const auto display = ProjectFineVisualization(*bundle.fine,
+      {.center_map_m = {.x = 100.0, .y = 100.0}, .length_m = 2.0}, 2.0);
+  for (const auto* grid : {&display.state, &display.cost, &display.risk}) {
+    EXPECT_EQ(grid->header.frame_id, "map");
+    EXPECT_EQ(grid->info.width, 4U);
+    EXPECT_EQ(grid->info.height, 4U);
+    EXPECT_DOUBLE_EQ(grid->info.origin.position.x, 99.0);
+    EXPECT_DOUBLE_EQ(grid->info.origin.position.y, 99.0);
+    ASSERT_EQ(grid->data.size(), 16U);
+    EXPECT_TRUE(std::all_of(grid->data.begin(), grid->data.end(),
+                           [](auto value) { return value == -1; }));
+  }
 }
 
 [[nodiscard]] core::SnapshotBundle MismatchedBundle(

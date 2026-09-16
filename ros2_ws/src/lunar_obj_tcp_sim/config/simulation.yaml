@@ -1,0 +1,49 @@
+simulation:
+  host: 127.0.0.1
+  port: 6668
+  vehicle_id: 0
+  map_directory: ""
+  known_chunk_cells: 512
+  mode: explore
+  prefix: /lunar_sim
+  sensor_range_m: 30.0
+  sensor_fov_deg: 360.0
+  near_field_radius_m: 2.1
+  # Virtual front edge from wheel.yaml footprint; 1 m above the body origin plane.
+  sensor_offset_xyz_m: [0.591, 0.0, 1.0]
+  observation_window_m: 64.0
+  observation_rate_hz: 5.0
+  coarse_resolution_m: 1.0
+  local_window_size_m: 64.0
+  bridge_send_rate_hz: 20.0
+  command_timeout_s: 0.5
+  feedback_timeout_s: 0.5
+  connect_timeout_s: 5.0
+  max_wheel_speed_radps: 10.0
+  # Each wire slot names a canonical wheel: 0 FL, 1 FR, 2 RL, 3 RR.
+  # Steering order/right-positive confirmed by UE observation on 2026-09-11.
+  # WheelSpeed front/rear slot identity has not been individually observed.
+  wheel_order: [0, 1, 2, 3]
+  steering_order: [0, 1, 2, 3]
+  wheel_signs: [1.0, 1.0, 1.0, 1.0]
+  steering_signs: [-1.0, -1.0, -1.0, -1.0]
+  steering_zero_rad: [0.0, 0.0, 0.0, 0.0]
+  max_steering_angle_rad: 1.5707963267948966
+  steering_tolerance_rad: 0.1
+  goal_position_tolerance_m: 0.1
+  goal_yaw_tolerance_rad: 0.05
+  max_linear_mps: 0.2
+  max_angular_radps: 0.15
+  max_angular_accel_radps2: 0.1
+  exploration_size_m: 120.0
+  coverage_target: 1.0
+  navigation_map_wait_timeout_s: 30.0
+  auto_start: true
+  initial_scan: false
+  scan_max_angular_radps: 0.15
+  scan_max_angular_accel_radps2: 0.1
+  scan_step_deg: 30.0
+  scan_reanchor_distance_m: 0.1
+  bootstrap_timeout_s: 45.0
+  start_rviz: true
+  start_local_rviz: false

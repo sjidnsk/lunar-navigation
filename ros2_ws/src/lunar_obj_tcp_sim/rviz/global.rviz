@@ -1,0 +1,64 @@
+Panels:
+- Class: rviz_common/Displays
+  Name: Displays
+Visualization Manager:
+  Class: ''
+  Global Options: {Background Color: 24; 27; 32, Fixed Frame: map, Frame Rate: 20}
+  Displays:
+  - Class: rviz_default_plugins/Grid
+    Name: 1 m global ruler
+    Enabled: true
+    Cell Size: 1.0
+    Plane Cell Count: 1000
+  - Class: rviz_default_plugins/Map
+    Name: Global exploration projection
+    Enabled: true
+    Topic: {Value: /lunar_sim/exploration_map, Durability Policy: Transient Local, Reliability Policy: Reliable, Depth: 1}
+  - Class: rviz_default_plugins/MarkerArray
+    Name: Explorer boundary (thin reference)
+    Enabled: false
+    Topic: {Value: /lunar_sim/exploration/task_boundary, Durability Policy: Transient Local, Reliability Policy: Reliable, Depth: 1}
+  - Class: rviz_default_plugins/MarkerArray
+    Name: Frontiers and candidates
+    Enabled: true
+    Topic: {Value: /lunar_sim/exploration/frontiers, Durability Policy: Transient Local, Reliability Policy: Reliable, Depth: 1}
+  - Class: rviz_default_plugins/Path
+    Name: Global guidance
+    Enabled: true
+    Color: 255; 180; 40
+    Topic: {Value: /lunar_sim/global_route, Durability Policy: Transient Local, Reliability Policy: Reliable, Depth: 1}
+  - Class: rviz_default_plugins/Path
+    Name: Certified local path
+    Enabled: true
+    Color: 70; 255; 110
+    Topic: {Value: /lunar_sim/local_path, Durability Policy: Transient Local, Reliability Policy: Reliable, Depth: 1}
+  - Class: rviz_default_plugins/Path
+    Name: Feedback trajectory
+    Enabled: true
+    Color: 80; 170; 255
+    Topic: {Value: /lunar_sim/trace, Durability Policy: Transient Local, Reliability Policy: Reliable, Depth: 1}
+  - Class: rviz_default_plugins/MarkerArray
+    Name: Vehicle sensor and planning display
+    Enabled: true
+    Topic: {Value: /lunar_sim/display, Durability Policy: Transient Local, Reliability Policy: Reliable, Depth: 1}
+  - Class: rviz_default_plugins/MarkerArray
+    Name: Observed cells
+    Enabled: true
+    Topic: {Value: /lunar_sim/observed_cells, Durability Policy: Transient Local, Reliability Policy: Reliable, Depth: 1}
+  - Class: rviz_default_plugins/MarkerArray
+    Name: Mission status
+    Enabled: true
+    Topic: {Value: /lunar_sim/hud_local, Durability Policy: Transient Local, Reliability Policy: Reliable, Depth: 1}
+  - Class: rviz_default_plugins/MarkerArray
+    Name: Terrain truth preview (disabled)
+    Enabled: false
+    Topic: {Value: /lunar_sim/terrain_preview, Durability Policy: Transient Local, Reliability Policy: Reliable, Depth: 1}
+  Tools:
+  - Class: rviz_default_plugins/Interact
+  - Class: rviz_default_plugins/MoveCamera
+  - Class: rviz_default_plugins/Select
+  - Class: rviz_default_plugins/SetGoal
+    Topic: /lunar_sim/goal_pose
+  Views:
+    Current: {Class: rviz_default_plugins/TopDownOrtho, Name: Global, Target Frame: map, Scale: 1.7}
+Window Geometry: {Width: 1250, Height: 900, X: 30, Y: 80}
