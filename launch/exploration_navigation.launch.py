@@ -40,6 +40,11 @@ def _load_config(path: str) -> dict[str, object]:
         "stack", "common", "exploration", "navigation"
     }:
         raise RuntimeError("exploration_navigation config has an invalid shape")
+    common = document.get("common")
+    if isinstance(common, dict) and isinstance(common.get("platform_config"), str):
+        configured = common["platform_config"]
+        if configured.strip() and not Path(configured).is_absolute():
+            common["platform_config"] = str((Path(path).resolve().parent / configured).resolve())
     return document
 
 

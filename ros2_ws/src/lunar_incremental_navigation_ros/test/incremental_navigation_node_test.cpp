@@ -1187,6 +1187,15 @@ TEST(IncrementalNavigationNode, RejectsInvalidPlanningTimingParameters) {
   }
 }
 
+TEST(IncrementalNavigationNode, RejectsNonpositiveConfiguredGoalTolerances) {
+  for (const auto* name : {"goal_position_tolerance_m", "goal_yaw_tolerance_rad"}) {
+    auto options = ServerOptions(name, false);
+    options.append_parameter_override(name, 0.0);
+    EXPECT_THROW(std::make_shared<IncrementalNavigationNode>(
+        options, IncrementalNavigationNodeDependencies{}), std::runtime_error);
+  }
+}
+
 TEST(IncrementalNavigationNode,
      NewGoalAlwaysPreemptsAndEveryTerminalInvalidatesTheActiveSegmentFirst) {
   auto control = std::make_shared<FakeControl>();

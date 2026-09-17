@@ -463,6 +463,7 @@ class PureWheeledControllerNode(Node):
         message.linear.x = linear
         message.angular.z = angular
         self._commands.publish(message)
+        self._executor.note_command(message.linear.x, message.angular.z)
 
     def destroy_node(self) -> bool:
         self._publish_twist()

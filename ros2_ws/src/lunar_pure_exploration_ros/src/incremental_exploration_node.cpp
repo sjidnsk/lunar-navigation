@@ -941,14 +941,8 @@ void Decide(const std::shared_ptr<Runtime>& runtime) {
         PublishLocked(*runtime);
         return;
       }
-      if (runtime->coverage.coverage_ratio >=
-          runtime->parameters.coverage_target) {
-        runtime->state = Status::COMPLETED;
-        runtime->reason_code = "COVERAGE_TARGET_REACHED";
-        PublishLocked(*runtime);
-        return;
-      }
-      if (runtime->frontiers.empty()) {
+      // Coverage milestones (80% / 99%) are reporting targets, not stop gates.
+      if (runtime->frontiers.empty() || runtime->candidates.empty()) {
         runtime->state = Status::COMPLETED;
         runtime->reason_code = "COMPLETED_NO_REACHABLE_FRONTIER";
         PublishLocked(*runtime);

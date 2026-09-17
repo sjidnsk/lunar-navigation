@@ -529,6 +529,22 @@ class IncrementalExplorationNodeTest : public ::testing::Test {
   std::jthread spin_;
 };
 
+class IncrementalExplorationCoverageMilestoneTest : public IncrementalExplorationNodeTest {
+ protected:
+  void ConfigureParameters(IncrementalExplorationNodeParameters& parameters) override {
+    parameters.coverage_target = 0.01;
+  }
+};
+
+TEST_F(IncrementalExplorationCoverageMilestoneTest,
+       CoverageTargetDoesNotStopReachableFrontierNavigation) {
+  Start();
+  ASSERT_TRUE(LastStatus());
+  EXPECT_GT(LastStatus()->coverage_ratio, 0.01);
+  EXPECT_NE(LastStatus()->state, Status::COMPLETED);
+  EXPECT_EQ(server_->goal_count(), 1U);
+}
+
 class IncrementalExplorationMapWaitTest : public IncrementalExplorationNodeTest {
  protected:
   double MapWaitTimeoutSeconds() const override { return 45.0; }

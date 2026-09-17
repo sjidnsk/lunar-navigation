@@ -68,6 +68,7 @@ def map_tracking_state(
         transform_y_m = float(transform.y_m)
         transform_yaw_rad = float(transform.yaw_rad)
         linear_mps = float(odometry.twist.twist.linear.x)
+        lateral_mps = float(odometry.twist.twist.linear.y)
         angular_radps = float(odometry.twist.twist.angular.z)
     except (AttributeError, TypeError, ValueError, OverflowError):
         return None
@@ -81,6 +82,7 @@ def map_tracking_state(
         odometry_x_m,
         odometry_y_m,
         linear_mps,
+        lateral_mps,
         angular_radps,
         transform_x_m,
         transform_yaw_rad,
@@ -99,4 +101,5 @@ def map_tracking_state(
         ),
         linear_mps,
         angular_radps,
+        lateral_mps,
     )

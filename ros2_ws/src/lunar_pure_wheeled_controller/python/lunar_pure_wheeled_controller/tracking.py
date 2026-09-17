@@ -17,6 +17,7 @@ class TrackingState:
     yaw_rad: float
     linear_mps: float = 0.0
     angular_radps: float = 0.0
+    lateral_mps: float = 0.0
 
 
 @dataclass(frozen=True)

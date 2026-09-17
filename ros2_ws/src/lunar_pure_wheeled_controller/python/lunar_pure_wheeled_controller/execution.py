@@ -39,8 +39,19 @@ class PathExecutor:
         self._stop_index = 0
         self._chosen = False
         self.final = True
+        self._last_angular_command = 0.0
+        self._last_linear_command = 0.0
+
+    def note_angular_command(self, value):
+        """Track emitted commands, including node-level stops on stale input."""
+        self._last_angular_command = value
+
+    def note_command(self, linear, angular):
+        self._last_linear_command = linear
+        self.note_angular_command(angular)
 
     def clear(self):
+        self.note_command(0.0, 0.0)
         self.path = None
         self.phase = "WAITING"
         self.failure = None
@@ -79,6 +90,7 @@ class PathExecutor:
         return True
 
     def _result(self, v=0.0, w=0.0) -> ExecutionResult:
+        self.note_command(v, w)
         command = TrackingCommand(
             v,
             w,
@@ -97,7 +109,7 @@ class PathExecutor:
     def _stopped(self, state):
         p = self.policy
         return (
-            abs(state.linear_mps) <= p.stopped_linear_mps
+            math.hypot(state.linear_mps, state.lateral_mps) <= p.stopped_linear_mps
             and abs(state.angular_radps) <= p.stopped_angular_radps
         )
 
@@ -125,7 +137,11 @@ class PathExecutor:
                 error,
             )
         bound = p.max_angular_accel_radps2 * dt
-        w = max(state.angular_radps - bound, min(state.angular_radps + bound, target))
+        # Slew the command itself. Anchoring at measured rate can prevent
+        # braking when plant gain or feedback lag makes measurement exceed
+        # the commanded limit; measured speed still governs _stopped().
+        previous = self._last_angular_command
+        w = max(previous - bound, min(previous + bound, target))
         return self._result(0.0, max(-p.max_angular_radps, min(p.max_angular_radps, w)))
 
     def update(self, state: TrackingState, dt: float) -> ExecutionResult:
@@ -138,6 +154,7 @@ class PathExecutor:
                     state.y_m,
                     state.yaw_rad,
                     state.linear_mps,
+                    state.lateral_mps,
                     state.angular_radps,
                     dt,
                 )
@@ -306,8 +323,8 @@ class PathExecutor:
                 p.max_angular_radps / abs(k),
                 math.sqrt(p.max_lateral_accel_mps2 / abs(k)),
             )
-        current = max(0.0, self.direction * state.linear_mps)
-        speed = tracking_speed(k, speed, current, state.angular_radps, dt, p)
+        current = max(0.0, self.direction * self._last_linear_command)
+        speed = tracking_speed(k, speed, current, self._last_angular_command, dt, p)
         if speed is None:
             self.phase = "BRAKING"
             return self._result()

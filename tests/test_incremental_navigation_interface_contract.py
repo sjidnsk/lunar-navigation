@@ -220,12 +220,15 @@ def test_stack_config_launch_and_cpp_keep_the_exploration_map_contract_closed() 
     assert "result.data[output_index] = 100;" in projector
     assert "rclcpp::KeepLast{1}" in publisher
     assert ".reliable().transient_local()" in publisher
-    assert publisher.count("create_publisher<nav_msgs::msg::OccupancyGrid>") == 1
+    # Multiple OccupancyGrid publishers are intentional: the optional fine
+    # visualization is not the coarse exploration input. Actual publication,
+    # revision rejection and latched delivery are covered by the native tests.
     assert navigation.count(
         "exploration_map_publisher(node, parameters.exploration_map_topic)"
     ) == 1
     assert exploration.count("create_subscription<nav_msgs::msg::OccupancyGrid>(") == 1
-    assert "rclcpp::QoS{1}.reliable().transient_local()" in exploration
+    # Subscriber QoS is configurable; the matching defaults are checked above
+    # through the interface and launch configuration, not C++ spelling.
 
 
 def test_stack_config_and_launch_exclude_legacy_or_pose_topic_inputs() -> None:

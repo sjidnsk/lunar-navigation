@@ -121,6 +121,9 @@ install(
   DESTINATION share/${PROJECT_NAME}/config
   FILES_MATCHING
     PATTERN "wheel.yaml"
+    PATTERN "wheel_orin.yaml"
+    PATTERN "orin_hardware.yaml"
+    PATTERN "orin_controller.yaml"
     PATTERN "legged.yaml"
     PATTERN "incremental_navigation_interfaces.yaml")
 install(

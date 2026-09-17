@@ -1,25 +1,13 @@
 #include "lunar_incremental_navigation_ros/planning_debug_publisher.hpp"
 
 #include <stdexcept>
+#include <rclcpp/expand_topic_or_service_name.hpp>
 #include "lunar_incremental_navigation_core/local_goal_region.hpp"
 #include <utility>
 
 #include "lunar_incremental_navigation_ros/planning_snapshot_visualization.hpp"
 
 namespace lunar::incremental_navigation_ros {
-namespace {
-
-[[nodiscard]] bool IsPlanningDemoTopicPrefix(
-    const std::string_view prefix) noexcept {
-  for (const std::string_view root : {"/planning_demo", "/lunar_demo"}) {
-    if (prefix.size() > root.size() && prefix.starts_with(root) &&
-        prefix[root.size()] == '/') return true;
-  }
-  return false;
-}
-
-}  // namespace
-
 std::string NormalizeDebugTopicPrefix(const std::string_view prefix) {
   if (prefix.empty()) {
     throw std::invalid_argument("debug topic prefix must not be empty");
@@ -31,9 +19,14 @@ std::string NormalizeDebugTopicPrefix(const std::string_view prefix) {
   while (normalized.size() > 1U && normalized.back() == '/') {
     normalized.pop_back();
   }
-  if (!IsPlanningDemoTopicPrefix(normalized)) {
-    throw std::invalid_argument(
-        "debug topic prefix must be below /planning_demo/ or /lunar_demo/");
+  if (normalized == "/") {
+    throw std::invalid_argument("debug topic prefix must name a namespace");
+  }
+  try {
+    static_cast<void>(rclcpp::expand_topic_or_service_name(
+        normalized + "/fine_state", "planning_debug", "/"));
+  } catch (const rclcpp::exceptions::InvalidTopicNameError& error) {
+    throw std::invalid_argument("debug_topic_prefix: " + std::string(error.what()));
   }
   return normalized;
 }
@@ -105,6 +98,8 @@ void PlanningDebugPublisher::PublishLocalGoals(
   visualization_msgs::msg::MarkerArray array;
   Marker clear;
   clear.action = Marker::DELETEALL;
+  clear.header.frame_id = frame_id;
+  clear.header.stamp = clock_->now();
   array.markers.push_back(clear);
   Marker candidates;
   candidates.header.frame_id = frame_id;

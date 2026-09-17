@@ -281,6 +281,12 @@ def test_stale_incremental_inputs_stop_without_discarding_path(
     monkeypatch.setattr(controller_module, "monotonic", lambda: clock[0])
     controller, observer, received = incremental_controller_with_observer
 
+    # This test drives each control cycle explicitly. A real timer firing while
+    # DDS is being serviced adds extra commands and makes count=N observe the
+    # previous cycle on slower machines, rather than the stale-input stop.
+    for timer in controller.timers:
+        timer.cancel()
+
     controller._on_path(
         make_path(frame_id="map", points=[(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)])
     )

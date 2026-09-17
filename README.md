@@ -1,5 +1,7 @@
 # Pure Planner 操作手册
 
+104 实机非 TCP 对齐配置见 [Orin 静态 TF 与导航配置](docs/STATIC_TF_INPUT.md)，源码范围与分层验证见 [104/216 对齐记录](docs/ORIN_NON_TCP_ALIGNMENT.md)。实机启动脚本仅启动导航，不启动控制器。
+
 本次主线导入及 30 秒默认等待超时的验证见[集成记录](docs/集成地图探索规划控制修改.md)。下文历史 demo 数据保留其当时参数。
 
 新增独立 Jazzy [复杂地形完整探索 demo](docs/复杂地形完整探索demo.md)：300 m 复杂地形、全局 1 m / 局部 0.2 m、正式探索规划控制、默认 30 倍可调仿真时钟。[简单控制闭环 demo](docs/增量规划控制闭环demo.md)及旧演示保留。

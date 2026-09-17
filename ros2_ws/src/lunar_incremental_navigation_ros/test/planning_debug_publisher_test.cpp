@@ -113,12 +113,11 @@ TEST(PlanningDebugPublisher, NormalizesRelativePlanningDemoPrefix) {
 
 TEST(PlanningDebugPublisher, AcceptsIsolatedControllerDemoPrefix) {
   EXPECT_EQ(NormalizeDebugTopicPrefix("/lunar_demo/controller/"), "/lunar_demo/controller");
-  EXPECT_THROW(static_cast<void>(NormalizeDebugTopicPrefix("/lunar_demo_vehicle")),
-               std::invalid_argument);
+  EXPECT_EQ(NormalizeDebugTopicPrefix("/P4/debug/"), "/P4/debug");
 }
 
 TEST(PlanningDebugPublisher, RejectsInvalidDebugTopicPrefixes) {
-  for (const std::string& prefix : {"", "/", "/planning_demo", "/other"}) {
+  for (const std::string& prefix : {"", "/", "/bad namespace", "/1invalid"}) {
     EXPECT_THROW(static_cast<void>(NormalizeDebugTopicPrefix(prefix)),
                  std::invalid_argument)
         << prefix;

@@ -15,6 +15,7 @@
 #include "lunar_incremental_navigation_core/fine_traversability_builder.hpp"
 #include "lunar_incremental_navigation_core/global_guidance_builder.hpp"
 #include "lunar_incremental_navigation_ros/incremental_map_publisher.hpp"
+#include "lunar_incremental_navigation_ros/planning_snapshot_visualization.hpp"
 
 namespace lunar::incremental_navigation_ros {
 namespace {
@@ -109,6 +110,16 @@ class IncrementalMapPublisherTest : public ::testing::Test {
     }
   }
 };
+
+TEST_F(IncrementalMapPublisherTest,
+       FineWindowOutsideSnapshotStillHasFrameAndUnknownCells) {
+  const auto bundle = Bundle();
+  const auto display = ProjectFineVisualization(
+      *bundle.fine, {.center_map_m = {.x = 100.0, .y = 100.0}, .length_m = 4.0}, 2.0);
+  EXPECT_EQ(display.state.header.frame_id, "map");
+  ASSERT_FALSE(display.state.data.empty());
+  for (auto value : display.state.data) EXPECT_EQ(value, -1);
+}
 
 TEST_F(IncrementalMapPublisherTest,
        RejectsInconsistentFineAndGuidanceSourceRevisions) {
