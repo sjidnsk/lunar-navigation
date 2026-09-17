@@ -10,6 +10,6 @@ lunar_pure_wheeled_controller:
     odometry_timeout_s: 0.5
     tf_timeout_s: 5.0
     max_linear_mps: 0.2
-    max_angular_radps: 0.03
+    max_angular_radps: 0.1
     goal_position_tolerance_m: 0.1
     goal_yaw_tolerance_rad: 0.05

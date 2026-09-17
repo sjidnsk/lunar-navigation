@@ -19,7 +19,7 @@ bash /home/yanfa/P4/debug/p3_joint/start_preview.sh
 - 旧接口继续独占 TCP；`legacy_feedback_input.py` 复用 P4 坐标转换和 PoseRates，生成 `/P4/input/odometry`，不发布车辆命令。
 - `persistent_command_relay.py` 常驻桥接域 57/10，到点停车后仍可执行下一个任务，校验路径版本和反馈时效。
 - 导航开启 `enable_tracking_feedback: true`，处理局部段完成和跟踪失败反馈。
-- 起点盲区余量 2 m；线速度上限 0.2 m/s、角速度上限 0.03 rad/s；终点位置/朝向容差 0.10 m / 0.05 rad。快速反馈启用后控制器里程计超时为 0.5 s，TF 超时为 5 s。
+- 起点盲区余量 3 m；线速度上限 0.2 m/s、角速度上限 0.1 rad/s；终点位置/朝向容差 0.10 m / 0.05 rad。快速反馈启用后控制器里程计超时为 0.5 s，TF 超时为 5 s。
 - 80% 与 99% 仅作为阶段指标；候选耗尽才结束，暂时抑制仍等待地图变化。详见 EXPLORATION_COMPLETION_POLICY.md。
 
 ## 已知操作限制

@@ -33,14 +33,14 @@ simulation:
   goal_position_tolerance_m: 0.1
   goal_yaw_tolerance_rad: 0.05
   max_linear_mps: 0.2
-  max_angular_radps: 0.15
+  max_angular_radps: 0.1
   max_angular_accel_radps2: 0.1
   exploration_size_m: 120.0
   coverage_target: 1.0
   navigation_map_wait_timeout_s: 30.0
   auto_start: true
   initial_scan: false
-  scan_max_angular_radps: 0.15
+  scan_max_angular_radps: 0.1
   scan_max_angular_accel_radps2: 0.1
   scan_step_deg: 30.0
   scan_reanchor_distance_m: 0.1

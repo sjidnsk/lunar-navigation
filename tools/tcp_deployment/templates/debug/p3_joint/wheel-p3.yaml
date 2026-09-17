@@ -98,4 +98,4 @@ capability:
     - 0.0
     - 0.0
     yaw_change_rad: 0.0
-start_blind_zone_margin_m: 2.0
+start_blind_zone_margin_m: 3.0

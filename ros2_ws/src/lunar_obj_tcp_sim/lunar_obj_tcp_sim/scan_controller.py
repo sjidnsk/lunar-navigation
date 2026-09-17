@@ -20,7 +20,7 @@ class ScanControllerNode(PureWheeledControllerNode):
     def __init__(self):
         super().__init__()
         self.declare_parameter('scan_profile_enabled',False)
-        self.declare_parameter('scan_max_angular_radps',.15)
+        self.declare_parameter('scan_max_angular_radps',.1)
         self.declare_parameter('scan_max_angular_accel_radps2',.1)
         self.declare_parameter('observation_status_topic','/lunar_sim/observation_status')
         self._normal_policy=self._policy
