@@ -73,4 +73,4 @@ Files: lunar_pure_exploration_ros incremental node/tests, lunar_pure_exploration
 - [x] Import the terrain and 3 m margin tests first; confirm the old implementation fails the intended cases.
 - [x] Integrate robust 5×5 terrain evaluation, UNKNOWN bounds retention and fine-map rederivation.
 - [x] Retain goal tolerance parameters and resolve the hardware margin to the latest 3.0 m requirement.
-- [ ] Run final Jazzy build/tests, commit the result, then remove only `fix/orin-terrain-sync` after ancestry and cleanliness checks.
+- [x] Run final Jazzy build/tests, commit the result, then remove only `fix/orin-terrain-sync` after ancestry and cleanliness checks.
