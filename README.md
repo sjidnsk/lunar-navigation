@@ -1,6 +1,6 @@
-# TCP 开发分支
+# Orin Unreal 仿真应用分支
 
-统一开发入口：`feat/tcp-development`。分支来源、模块位置、验证和设备端差异见 [TCP 开发说明](docs/TCP开发分支.md)。
+应用分支：`app/orin-unreal-simulation`。分支来源、模块位置、验证和设备端差异见 [TCP 开发说明](docs/TCP开发分支.md)。
 
 # Pure Planner 操作手册
 

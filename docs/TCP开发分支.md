@@ -1,6 +1,6 @@
-# TCP 开发分支
+# Orin Unreal 仿真应用分支
 
-统一开发分支：`feat/tcp-development`。工作树：`lunar-runtime/.worktrees/tcp-development`。
+应用分支：`app/orin-unreal-simulation`。工作树：`lunar-runtime/.worktrees/orin-unreal-simulation`。
 建立日期：2026-09-17。只整合本地 P4/TCP 源码；没有更新 Orin、重启节点或启动车辆。
 
 ## 分支归并
@@ -15,7 +15,7 @@
 | `fix/unreal-target-path` 的未提交内容 | 纳入 `deployment/p4_unreal_target` 与设计记录 |
 | `fix/p4-gui-no-heartbeat` 的未提交内容 | 纳入 `deployment/p4_vehicle_gui` |
 | `feat/unreal-tcp-exploration-planning-test`，`b92d8c2e` | 独立旧架构、无共同祖先，保留原分支作参考，不执行跨架构合并 |
-| `feat/orin-nontcp-alignment`、`orin-humble`、发布分支 | 非 TCP 部署线，不整支引入 |
+| `app/orin-real-vehicle`、历史 Orin 分支和发布分支 | 实车部署线，不整支引入 |
 
 所有原分支、原工作树及其中未提交内容均保留。原 import 快照和 integration 主线未移动。
 未推送、未删除分支、未设置 upstream。逐文件来源、来源 HEAD 和 SHA256 见
@@ -51,7 +51,7 @@ Unreal IP 示例已采用用户最后指定的 `192.168.10.23`，运行时需核
 ## 开发和验证
 
 ```bash
-cd /home/kai/WS/lunar-navigation/lunar-runtime/.worktrees/tcp-development
+cd /home/kai/WS/lunar-navigation/lunar-runtime/.worktrees/orin-unreal-simulation
 git status --short
 LUNAR_ROS_DISTRO=jazzy LUNAR_OBJ_TCP_SIM_BUILD_BASE=/tmp/tcp-development-jazzy \
   bash scripts/simulation/build.sh --parallel-workers 3

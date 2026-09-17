@@ -1,6 +1,6 @@
 # TCP 开发分支整合验证
 
-日期：2026-09-17。本记录针对 `feat/tcp-development` 本轮本地整合；历史 Orin 验证见各功能原始文档。
+日期：2026-09-17。本记录针对现为 `app/orin-unreal-simulation` 的本地整合；当时分支名为 `feat/tcp-development`。历史 Orin 验证见各功能原始文档。
 
 ## 结果
 
