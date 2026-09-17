@@ -1,3 +1,7 @@
+# TCP 开发分支
+
+统一开发入口：`feat/tcp-development`。分支来源、模块位置、验证和设备端差异见 [TCP 开发说明](docs/TCP开发分支.md)。
+
 # Pure Planner 操作手册
 
 TCP 分支部署包见 [TCP 仿真部署说明](docs/TCP仿真部署说明.md)，包含源码、完整预处理地图、Humble 构建与启动入口。

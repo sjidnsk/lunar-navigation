@@ -420,6 +420,7 @@ FineTraversabilityBuilder::Derive(
     const std::set<GridIndex> changed_raw(changed.begin(), changed.end());
     const double influence_m =
         hard_radius_m + profile.preferred_clearance_m +
+        (std::holds_alternative<WheeledCapability>(capability) ? 2.0 : 1.0) *
         std::sqrt(2.0) * raw->geometry().resolution_m();
     recompute_cells =
         InfluenceCells(raw->geometry(), changed_raw, influence_m);

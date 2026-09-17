@@ -46,22 +46,23 @@ bool ElevationPipeline::RunFineDerivation() {
   std::shared_ptr<const lunar::incremental_navigation::ElevationSnapshot> raw;
   std::set<lunar::incremental_navigation::TileIndex> dirty_tiles;
   std::set<lunar::incremental_navigation::GridIndex> dirty_cells;
-  {
-    std::scoped_lock lock{work_mutex_};
-    if (pending_fine_dirty_tiles_.empty()) {
-      return false;
-    }
-    raw = elevation_.Snapshot();
-    dirty_tiles.swap(pending_fine_dirty_tiles_);
-    dirty_cells.swap(pending_fine_dirty_cells_);
-  }
   const auto captured =
       std::atomic_load_explicit(&bundle_, std::memory_order_acquire);
   const auto previous = captured->fine;
+  {
+    std::scoped_lock lock{work_mutex_};
+    raw = elevation_.Snapshot();
+    // A new revision may change only UNKNOWN bounds, with no dirty heights.
+    if (!raw || (previous && previous->elevation() == raw)) {
+      return false;
+    }
+    dirty_tiles.swap(pending_fine_dirty_tiles_);
+    dirty_cells.swap(pending_fine_dirty_cells_);
+  }
   std::vector<lunar::incremental_navigation::GridIndex> merged_cells(
       dirty_cells.begin(), dirty_cells.end());
   const std::optional<lunar::incremental_navigation::FineElevationChangeSet> changes =
-      previous
+      previous && !merged_cells.empty()
           ? std::optional<lunar::incremental_navigation::FineElevationChangeSet>(
                 lunar::incremental_navigation::FineElevationChangeSet{
                     .base_raw_elevation_revision =

@@ -1,0 +1,6 @@
+__pycache__/
+backups/
+*.log
+gui.lock
+runtime.json
+original-source-sha256.json

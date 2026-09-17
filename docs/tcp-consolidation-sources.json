@@ -1,0 +1,341 @@
+{
+  "branch": "feat/tcp-development",
+  "base": "af5feef0a0df5156ed64248d8a1d126655b5f9a2",
+  "files": [
+    {
+      "source_worktree": "wheel-terrain-basic",
+      "path": "ros2_ws/src/lunar_incremental_navigation_core/CMakeLists.txt",
+      "source_sha256": "74d121e03910406f07a5670d373ea0d874f4cc5c22ca502a560a882e6216dd4a",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "74d121e03910406f07a5670d373ea0d874f4cc5c22ca502a560a882e6216dd4a"
+    },
+    {
+      "source_worktree": "wheel-terrain-basic",
+      "path": "ros2_ws/src/lunar_incremental_navigation_core/src/map/fine_traversability_builder.cpp",
+      "source_sha256": "32b9f561050bba3896fc1af2c80bafa44fbd52c869f3c39d3d9ea9de9635c88e",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "32b9f561050bba3896fc1af2c80bafa44fbd52c869f3c39d3d9ea9de9635c88e"
+    },
+    {
+      "source_worktree": "wheel-terrain-basic",
+      "path": "ros2_ws/src/lunar_incremental_navigation_core/src/map/persistent_elevation_map.cpp",
+      "source_sha256": "04c86dfdf08800a884270456a25ef33a35ea8e11a4075903dea1fc9e00bcf0d0",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "04c86dfdf08800a884270456a25ef33a35ea8e11a4075903dea1fc9e00bcf0d0"
+    },
+    {
+      "source_worktree": "wheel-terrain-basic",
+      "path": "ros2_ws/src/lunar_incremental_navigation_core/src/map/platform_elevation_physics.cpp",
+      "source_sha256": "2e73eeefe9cdfbd36c9281f84c8a4f584666fb0fe8bf64087431d8c84bb39e91",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "2e73eeefe9cdfbd36c9281f84c8a4f584666fb0fe8bf64087431d8c84bb39e91"
+    },
+    {
+      "source_worktree": "wheel-terrain-basic",
+      "path": "ros2_ws/src/lunar_incremental_navigation_core/test/fine_traversability_builder_test.cpp",
+      "source_sha256": "3314185f53fa7341704192e6ee9dae2bb89a300c15659a4748a0de2172a27b82",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "3314185f53fa7341704192e6ee9dae2bb89a300c15659a4748a0de2172a27b82"
+    },
+    {
+      "source_worktree": "wheel-terrain-basic",
+      "path": "ros2_ws/src/lunar_incremental_navigation_core/test/persistent_elevation_map_test.cpp",
+      "source_sha256": "cdb72ec94d23ea062e455494f5e60ed0bdbd5873df8de0fae3c68782af83864d",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "cdb72ec94d23ea062e455494f5e60ed0bdbd5873df8de0fae3c68782af83864d"
+    },
+    {
+      "source_worktree": "wheel-terrain-basic",
+      "path": "ros2_ws/src/lunar_incremental_navigation_core/test/request_local_start_patch_test.cpp",
+      "source_sha256": "a88eb24915a9f194afdaf21f7f4bb109ef608d538c38bab76484743dc09e5929",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "a88eb24915a9f194afdaf21f7f4bb109ef608d538c38bab76484743dc09e5929"
+    },
+    {
+      "source_worktree": "wheel-terrain-basic",
+      "path": "ros2_ws/src/lunar_incremental_navigation_ros/src/elevation_pipeline.cpp",
+      "source_sha256": "b1e0158f1450d31b92efadd012f54f25cfb025ad6c5d73c575de7ebd80f7cc1c",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "b1e0158f1450d31b92efadd012f54f25cfb025ad6c5d73c575de7ebd80f7cc1c"
+    },
+    {
+      "source_worktree": "wheel-terrain-basic",
+      "path": "ros2_ws/src/lunar_incremental_navigation_ros/src/incremental_navigation_node.cpp",
+      "source_sha256": "ab54919bdd7bfeff6f3fbebc795d35a9c023c4de0e418b2792e92c6a6ea54705",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "546f9d1159a007c5fa7f1e94afe8711abb96c4ca4f4cb3fab297f1a00cc6a2c7"
+    },
+    {
+      "source_worktree": "wheel-terrain-basic",
+      "path": "ros2_ws/src/lunar_incremental_navigation_ros/test/elevation_pipeline_test.cpp",
+      "source_sha256": "60ecd4abadbde44b6411bdf3b212fdef14ce5ec45ef6d4c16ba83583def0676d",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "60ecd4abadbde44b6411bdf3b212fdef14ce5ec45ef6d4c16ba83583def0676d"
+    },
+    {
+      "source_worktree": "wheel-terrain-basic",
+      "path": "docs/P4未知地图边界修复.md",
+      "source_sha256": "552cdd6bb4e81401bd041376509009b64db02d3064d60996962d8c28e650482a",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "552cdd6bb4e81401bd041376509009b64db02d3064d60996962d8c28e650482a"
+    },
+    {
+      "source_worktree": "wheel-terrain-basic",
+      "path": "docs/轮式地形判定基础版.md",
+      "source_sha256": "ca3f4c7547085003fb9194ee56c584f76b281fb860371103314e9716d2cbf0d6",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "ca3f4c7547085003fb9194ee56c584f76b281fb860371103314e9716d2cbf0d6"
+    },
+    {
+      "source_worktree": "wheel-terrain-basic",
+      "path": "ros2_ws/src/lunar_incremental_navigation_core/test/wheel_terrain_basic_test.cpp",
+      "source_sha256": "0678221c24972610a294950387abad4fa1fa0839f84543f4a52260496f707ebf",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "0678221c24972610a294950387abad4fa1fa0839f84543f4a52260496f707ebf"
+    },
+    {
+      "source_worktree": "unreal-target-path",
+      "path": "deployment/p4_unreal_target/COLCON_IGNORE",
+      "source_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "source_worktree": "unreal-target-path",
+      "path": "deployment/p4_unreal_target/README_CN.md",
+      "source_sha256": "17ad48a9ca5addd6a0781880f2478bec91ca823714c40c1ddb2b888ce64d7fde",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "07b1b4d1dfbda6e9481f84d67f2878f0a0f4385b103f324d11d793e96ebb8a83"
+    },
+    {
+      "source_worktree": "unreal-target-path",
+      "path": "deployment/p4_unreal_target/VALIDATION.md",
+      "source_sha256": "3a39f4876c7bda3f437f1a86ad1eb5ec7dbf396f7511b25fd1777254cd90c150",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "3a39f4876c7bda3f437f1a86ad1eb5ec7dbf396f7511b25fd1777254cd90c150"
+    },
+    {
+      "source_worktree": "unreal-target-path",
+      "path": "deployment/p4_unreal_target/joint/feedback_geometry.py",
+      "source_sha256": "77f6111fdba83c0911058692823b6c45fb99b202879c041153a6f6f7a7129f5c",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "77f6111fdba83c0911058692823b6c45fb99b202879c041153a6f6f7a7129f5c"
+    },
+    {
+      "source_worktree": "unreal-target-path",
+      "path": "deployment/p4_unreal_target/joint/legacy_feedback_input.py",
+      "source_sha256": "77089c43f9de20d3d3559c3fc9169afafed16ab22c7e2a74472e4d1a35a8eb5b",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "77089c43f9de20d3d3559c3fc9169afafed16ab22c7e2a74472e4d1a35a8eb5b"
+    },
+    {
+      "source_worktree": "unreal-target-path",
+      "path": "deployment/p4_unreal_target/joint/persistent_command_relay.py",
+      "source_sha256": "4e2edac412bcae60c78d1e4c932538dacbf6d8bb48f65001302b30ff89dbd56f",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "4e2edac412bcae60c78d1e4c932538dacbf6d8bb48f65001302b30ff89dbd56f"
+    },
+    {
+      "source_worktree": "unreal-target-path",
+      "path": "deployment/p4_unreal_target/joint/ue_navigation.py",
+      "source_sha256": "a70d386c74f78166b1336227e85c6064f2fb6689ba8f7fd8a4422a5aa5e6cca4",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "a70d386c74f78166b1336227e85c6064f2fb6689ba8f7fd8a4422a5aa5e6cca4"
+    },
+    {
+      "source_worktree": "unreal-target-path",
+      "path": "deployment/p4_unreal_target/joint/ue_path.py",
+      "source_sha256": "6fa6712cb8e6b2b0bae5814382ab657e1621ac14aae9f9715df3b08dd09fa934",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "6fa6712cb8e6b2b0bae5814382ab657e1621ac14aae9f9715df3b08dd09fa934"
+    },
+    {
+      "source_worktree": "unreal-target-path",
+      "path": "deployment/p4_unreal_target/test/native_loopback_check.py",
+      "source_sha256": "4d3f338b1671ecb60c62cd8aff8be36502f2c354750a16c79cefbbd5beb44bfd",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "4d3f338b1671ecb60c62cd8aff8be36502f2c354750a16c79cefbbd5beb44bfd"
+    },
+    {
+      "source_worktree": "unreal-target-path",
+      "path": "deployment/p4_unreal_target/test/test_ue_path.py",
+      "source_sha256": "71b82ed08e2ed94acc430811724c21dfdc82a7ed488f1a0876fb9411cc1fed97",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "71b82ed08e2ed94acc430811724c21dfdc82a7ed488f1a0876fb9411cc1fed97"
+    },
+    {
+      "source_worktree": "unreal-target-path",
+      "path": "deployment/p4_unreal_target/vehicle_interface/src/lunar_car_ctrl/CMakeLists.txt",
+      "source_sha256": "a2d4f8261b2350e567bfb8b50ce1c30220ff25461ea8e14ee09dd834ee4b311f",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "a2d4f8261b2350e567bfb8b50ce1c30220ff25461ea8e14ee09dd834ee4b311f"
+    },
+    {
+      "source_worktree": "unreal-target-path",
+      "path": "deployment/p4_unreal_target/vehicle_interface/src/lunar_car_ctrl/include/lunar_car_ctrl/coord_transform.hpp",
+      "source_sha256": "96ae84eed1e0e80f22d4c1318aed905be8e1e749b4eebe67efd26a788b44f73a",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "96ae84eed1e0e80f22d4c1318aed905be8e1e749b4eebe67efd26a788b44f73a"
+    },
+    {
+      "source_worktree": "unreal-target-path",
+      "path": "deployment/p4_unreal_target/vehicle_interface/src/lunar_car_ctrl/include/lunar_car_ctrl/kinematics.hpp",
+      "source_sha256": "ed4259b4a6df45e32297928be6d4c49336a85f3cab3b08763abf365e55e8f5be",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "ed4259b4a6df45e32297928be6d4c49336a85f3cab3b08763abf365e55e8f5be"
+    },
+    {
+      "source_worktree": "unreal-target-path",
+      "path": "deployment/p4_unreal_target/vehicle_interface/src/lunar_car_ctrl/include/lunar_car_ctrl/main.hpp",
+      "source_sha256": "9be4c8bf66dcafed07e757f5a5de3240b00cfd15506d0b34e9f466d8605fa0d4",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "9be4c8bf66dcafed07e757f5a5de3240b00cfd15506d0b34e9f466d8605fa0d4"
+    },
+    {
+      "source_worktree": "unreal-target-path",
+      "path": "deployment/p4_unreal_target/vehicle_interface/src/lunar_car_ctrl/include/lunar_car_ctrl/protocol_codec.hpp",
+      "source_sha256": "bf7aa65879984c63379872f9591720f07c55c0e4a97ddb584bf92735b0380f04",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "bf7aa65879984c63379872f9591720f07c55c0e4a97ddb584bf92735b0380f04"
+    },
+    {
+      "source_worktree": "unreal-target-path",
+      "path": "deployment/p4_unreal_target/vehicle_interface/src/lunar_car_ctrl/include/lunar_car_ctrl/tcp_client.hpp",
+      "source_sha256": "ca9272d45cc80f0df7fb360931e9a6fe189dc1574e500184f5d58695ba55b45b",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "ca9272d45cc80f0df7fb360931e9a6fe189dc1574e500184f5d58695ba55b45b"
+    },
+    {
+      "source_worktree": "unreal-target-path",
+      "path": "deployment/p4_unreal_target/vehicle_interface/src/lunar_car_ctrl/include/lunar_car_ctrl/telemetry_parser.hpp",
+      "source_sha256": "6e8238fce8d59ed8daecb1d5cc0884a02f971b8293c5f3c26118a60fd0d16f98",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "6e8238fce8d59ed8daecb1d5cc0884a02f971b8293c5f3c26118a60fd0d16f98"
+    },
+    {
+      "source_worktree": "unreal-target-path",
+      "path": "deployment/p4_unreal_target/vehicle_interface/src/lunar_car_ctrl/msg/VehicleTelemetry.msg",
+      "source_sha256": "8f47486990e2ccf010a9a6f98418af617cb42a81a739887d5257744f156078f3",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "8f47486990e2ccf010a9a6f98418af617cb42a81a739887d5257744f156078f3"
+    },
+    {
+      "source_worktree": "unreal-target-path",
+      "path": "deployment/p4_unreal_target/vehicle_interface/src/lunar_car_ctrl/msg/WheelCommands.msg",
+      "source_sha256": "adec0b2cc03c68ebe10e61f1acb576e774218c8bddc1b0a107c4428dc540a6c3",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "adec0b2cc03c68ebe10e61f1acb576e774218c8bddc1b0a107c4428dc540a6c3"
+    },
+    {
+      "source_worktree": "unreal-target-path",
+      "path": "deployment/p4_unreal_target/vehicle_interface/src/lunar_car_ctrl/package.xml",
+      "source_sha256": "331e539e3c42f8baec7af57ec221190c15137328205375a8000105984cf08d35",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "331e539e3c42f8baec7af57ec221190c15137328205375a8000105984cf08d35"
+    },
+    {
+      "source_worktree": "unreal-target-path",
+      "path": "deployment/p4_unreal_target/vehicle_interface/src/lunar_car_ctrl/src/kinematics.cpp",
+      "source_sha256": "336ccd248b0a31ad4d17c33d0e37c89497e165cab5bc78245a1f6696fd585615",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "336ccd248b0a31ad4d17c33d0e37c89497e165cab5bc78245a1f6696fd585615"
+    },
+    {
+      "source_worktree": "unreal-target-path",
+      "path": "deployment/p4_unreal_target/vehicle_interface/src/lunar_car_ctrl/src/main.cpp",
+      "source_sha256": "4a3134d4de7fcaa2004cc80bf3490bfa323518b62459e4a796bb62068b15fde7",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "4a3134d4de7fcaa2004cc80bf3490bfa323518b62459e4a796bb62068b15fde7"
+    },
+    {
+      "source_worktree": "unreal-target-path",
+      "path": "deployment/p4_unreal_target/vehicle_interface/src/lunar_car_ctrl/src/protocol_codec.cpp",
+      "source_sha256": "d88a3aa3c158eef6cf766d08d7195876b9f8990c58f5df9dd7113adca857d91b",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "d88a3aa3c158eef6cf766d08d7195876b9f8990c58f5df9dd7113adca857d91b"
+    },
+    {
+      "source_worktree": "unreal-target-path",
+      "path": "deployment/p4_unreal_target/vehicle_interface/src/lunar_car_ctrl/src/tcp_client.cpp",
+      "source_sha256": "4cb7a617a5cb529786faf4f33c90b9cdb47ebd6ecf61b3bfa2030148dea1cb9d",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "4cb7a617a5cb529786faf4f33c90b9cdb47ebd6ecf61b3bfa2030148dea1cb9d"
+    },
+    {
+      "source_worktree": "unreal-target-path",
+      "path": "deployment/p4_unreal_target/vehicle_interface/src/lunar_car_ctrl/src/telemetry_parser.cpp",
+      "source_sha256": "b726b55bf8f91c2002c1c21342cf934ff9d238dd75b41584d06b906017d69963",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "b726b55bf8f91c2002c1c21342cf934ff9d238dd75b41584d06b906017d69963"
+    },
+    {
+      "source_worktree": "unreal-target-path",
+      "path": "docs/superpowers/plans/2026-09-17-unreal-target-path.md",
+      "source_sha256": "778b2a8d750745b81fceb53d542455565facc8864617a33444feca87e377e286",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "778b2a8d750745b81fceb53d542455565facc8864617a33444feca87e377e286"
+    },
+    {
+      "source_worktree": "p4-gui-no-heartbeat",
+      "path": "deployment/p4_vehicle_gui/.gitignore",
+      "source_sha256": "8dfc6e5cf0ac9aaef0f046ebc5f83cb76afafeb34ea7bd429edec0f7294e03d3",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "8dfc6e5cf0ac9aaef0f046ebc5f83cb76afafeb34ea7bd429edec0f7294e03d3"
+    },
+    {
+      "source_worktree": "p4-gui-no-heartbeat",
+      "path": "deployment/p4_vehicle_gui/README_CN.md",
+      "source_sha256": "1906cd66c953986a7f07a3325c14054aee5341acd49e625d4747563dbf11984d",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "1906cd66c953986a7f07a3325c14054aee5341acd49e625d4747563dbf11984d"
+    },
+    {
+      "source_worktree": "p4-gui-no-heartbeat",
+      "path": "deployment/p4_vehicle_gui/VALIDATION.md",
+      "source_sha256": "fd47dcb101b2eaff136cce3112fdf0bbba31a474077b4c50ccbc33b2902dd38f",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "fd47dcb101b2eaff136cce3112fdf0bbba31a474077b4c50ccbc33b2902dd38f"
+    },
+    {
+      "source_worktree": "p4-gui-no-heartbeat",
+      "path": "deployment/p4_vehicle_gui/ensure_gui.py",
+      "source_sha256": "3631d93b638dd6ab3dbba1fe2a15aba9119be92d8208896cbcb105ed13ea0096",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "3631d93b638dd6ab3dbba1fe2a15aba9119be92d8208896cbcb105ed13ea0096"
+    },
+    {
+      "source_worktree": "p4-gui-no-heartbeat",
+      "path": "deployment/p4_vehicle_gui/lunar_car_gui_node.py",
+      "source_sha256": "86e79ac9cc0307a86512966deaac100c04308fa295943f794008c2015a8f319b",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "86e79ac9cc0307a86512966deaac100c04308fa295943f794008c2015a8f319b"
+    },
+    {
+      "source_worktree": "p4-gui-no-heartbeat",
+      "path": "deployment/p4_vehicle_gui/start_nodes.sh",
+      "source_sha256": "4d941ca4ab293848df2b9716841a00a371a65f1a1e9d5bb22eb42690a519bc8d",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "4d941ca4ab293848df2b9716841a00a371a65f1a1e9d5bb22eb42690a519bc8d"
+    },
+    {
+      "source_worktree": "p4-gui-no-heartbeat",
+      "path": "deployment/p4_vehicle_gui/test/native_ros_check.py",
+      "source_sha256": "469230c92cbf080cc256ff4118acb9030889699709826f4669f5b718d42d5e70",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "469230c92cbf080cc256ff4118acb9030889699709826f4669f5b718d42d5e70"
+    },
+    {
+      "source_worktree": "p4-gui-no-heartbeat",
+      "path": "deployment/p4_vehicle_gui/test/test_ownership.py",
+      "source_sha256": "2385bac6f4073826bbbbaccef9622aeb60992029f725528af2fc1e618405a427",
+      "source_head": "5c23c13cd0605955412ba6f470ee051d4fe8a9a2",
+      "integrated_sha256": "2385bac6f4073826bbbbaccef9622aeb60992029f725528af2fc1e618405a427"
+    }
+  ],
+  "recovered_dependency": {
+    "path": "deployment/p4_unreal_target/joint/command_gate.py",
+    "source": "2026-09-17 prior read-only Orin command output in session 01a0ada5-0b5f-7043-8c9c-4c6afd4dc36e",
+    "sha256": "1421b66c6cd65c7a453e2191f13782a97ce54ad67806186dadd5fa016ca4405f",
+    "live_recheck": "NOT_RUN: SSH timeout"
+  }
+}

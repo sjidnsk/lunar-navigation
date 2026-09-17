@@ -1,3 +1,7 @@
+#include "lunar_incremental_navigation_core/request_local_start_patch.hpp"
+
+#include <gtest/gtest.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -10,11 +14,9 @@
 #include <stdexcept>
 #include <vector>
 
-#include <gtest/gtest.h>
-
 #include "lunar_incremental_navigation_core/elevation_map.hpp"
 #include "lunar_incremental_navigation_core/fine_traversability_builder.hpp"
-#include "lunar_incremental_navigation_core/request_local_start_patch.hpp"
+#include "lunar_incremental_navigation_core/local_planning_window.hpp"
 #include "lunar_incremental_navigation_core/types/platform_capability.hpp"
 
 namespace lunar::incremental_navigation {
@@ -162,6 +164,31 @@ struct SnapshotFixture final {
 }
 
 TEST(RequestLocalStartPatch,
+     UnknownInputBorderContainsStartAndAllowsExistingPatch) {
+  GridGeometry geometry = Geometry(50U, 50U, .2);
+  geometry.origin_m = {.x = -5., .y = -5.};
+  std::vector<float> heights(geometry.CellCount(),
+                             std::numeric_limits<float>::quiet_NaN());
+  for (int y = 0; y < 50; ++y)
+    for (int x = 30; x < 50; ++x) heights[Offset(geometry, {x, y})] = 0.F;
+  const auto profile = Profile(2.0);
+  const auto fixture =
+      MakeFixture(geometry, heights, WheelCapability(), profile);
+  const auto pose = PoseAt(geometry, {25, 25});
+  const auto window =
+      BuildLocalPlanningWindow(*fixture.fine, pose.position_m, 10.);
+  ASSERT_EQ(window.status, LocalPlanningWindowStatus::kReady);
+  ASSERT_TRUE(window.geometry);
+  EXPECT_EQ(fixture.fine->State({25, 25}), FineCellState::kUnknown);
+  const auto result = RequestLocalStartPatchBuilder().Build(
+      fixture.fine, *window.geometry, pose, WheelCapability(), profile);
+  EXPECT_EQ(result.status, StartPatchResult::Status::kReady);
+  EXPECT_GT(result.assumed_cells, 0U);
+  EXPECT_FALSE(fixture.raw->ElevationAt({25, 25}));
+  EXPECT_EQ(fixture.fine->State({25, 25}), FineCellState::kUnknown);
+}
+
+TEST(RequestLocalStartPatch,
      UsesExactRadiusAndCellAreaIntersectionForMissingRawCells) {
   const GridGeometry geometry = Geometry();
   const GridIndex start{.x = 12, .y = 12};
@@ -266,7 +293,7 @@ TEST(RequestLocalStartPatch,
   EXPECT_GT(result.assumed_cells, 0U);
 }
 
-TEST(RequestLocalStartPatch, KeepsFiniteObstacleAndItsInflationAuthoritative) {
+TEST(RequestLocalStartPatch, KeepsIsolatedFiniteAnomalyUnresolved) {
   const GridGeometry geometry = Geometry();
   const GridIndex start{.x = 12, .y = 12};
   std::vector<float> elevation = FlatWithMissingSquare(geometry, start, 1);
@@ -278,9 +305,24 @@ TEST(RequestLocalStartPatch, KeepsFiniteObstacleAndItsInflationAuthoritative) {
   const StartPatchResult result = RequestLocalStartPatchBuilder().Build(
       fixture.fine, PoseAt(geometry, start), WheelCapability(), profile);
 
-  EXPECT_EQ(result.status, StartPatchResult::Status::kStartBlocked);
+  EXPECT_EQ(result.status, StartPatchResult::Status::kUnresolved);
   EXPECT_FALSE(result.view);
   EXPECT_EQ(fixture.fine->State(start), FineCellState::kUnknown);
+}
+
+TEST(RequestLocalStartPatch, KeepsSupportedObstacleAuthoritative) {
+  const GridGeometry geometry = Geometry();
+  const GridIndex start{.x = 12, .y = 12};
+  std::vector<float> elevation = FlatWithMissingSquare(geometry, start, 1);
+  for (int y = 11; y <= 12; ++y)
+    for (int x = 10; x <= 11; ++x) elevation[Offset(geometry, {x, y})] = 1.0F;
+  const TraversabilityProfile profile = Profile(2.0);
+  const auto fixture =
+      MakeFixture(geometry, elevation, WheelCapability(), profile);
+  const auto result = RequestLocalStartPatchBuilder().Build(
+      fixture.fine, PoseAt(geometry, start), WheelCapability(), profile);
+  EXPECT_EQ(result.status, StartPatchResult::Status::kStartBlocked);
+  EXPECT_FALSE(result.view);
 }
 
 TEST(RequestLocalStartPatch,
@@ -319,7 +361,7 @@ TEST(RequestLocalStartPatch,
   const StartPatchResult result = RequestLocalStartPatchBuilder().Build(
       fine, PoseAt(geometry, start), WheelCapability(), profile);
 
-  EXPECT_EQ(result.status, StartPatchResult::Status::kStartBlocked);
+  EXPECT_EQ(result.status, StartPatchResult::Status::kUnresolved);
   EXPECT_FALSE(result.view);
   EXPECT_EQ(raw->ElevationRangeAt({.x = 4, .y = 5}), obstacle_range);
 }

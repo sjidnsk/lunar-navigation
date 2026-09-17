@@ -106,6 +106,61 @@ struct ElevationLineage final {};
   return static_cast<std::int64_t>(value);
 }
 
+struct InputBounds final {
+  GridIndex minimum;
+  GridIndex maximum;
+};
+
+// Preserve the source rectangle independently of its finite height samples.
+// Project its reference-plane corners; actual 3D samples can expand it further.
+[[nodiscard]] std::optional<InputBounds> ProjectInputBounds(
+    const ElevationEvidence& evidence, const Vec3 canonical_origin) {
+  const auto& geometry = evidence.geometry;
+  const double resolution = geometry.resolution_m;
+  double min_x = std::numeric_limits<double>::infinity();
+  double min_y = min_x;
+  double max_x = -min_x;
+  double max_y = -min_y;
+  for (const std::size_t y : {std::size_t{0}, geometry.height}) {
+    for (const std::size_t x : {std::size_t{0}, geometry.width}) {
+      const Vec3 corner =
+          TransformPoint(evidence.map_from_source,
+                         {.x = std::fma(static_cast<double>(x), resolution,
+                                        geometry.origin_m.x),
+                          .y = std::fma(static_cast<double>(y), resolution,
+                                        geometry.origin_m.y),
+                          .z = geometry.origin_m.z});
+      if (!Finite(corner)) return std::nullopt;
+      const double grid_x = (corner.x - canonical_origin.x) / resolution;
+      const double grid_y = (corner.y - canonical_origin.y) / resolution;
+      min_x = std::min(min_x, grid_x);
+      max_x = std::max(max_x, grid_x);
+      min_y = std::min(min_y, grid_y);
+      max_y = std::max(max_y, grid_y);
+    }
+  }
+  const auto boundary = [](double value,
+                           bool upper) -> std::optional<std::int64_t> {
+    if (!Finite(value)) return std::nullopt;
+    // Avoid an extra UNKNOWN row for roundoff at exact grid-aligned corners.
+    const double nearest = std::round(value);
+    if (std::abs(value - nearest) <= 1.0e-9) value = nearest;
+    value = upper ? std::ceil(value) : std::floor(value);
+    if (value < static_cast<double>(std::numeric_limits<std::int64_t>::min()) ||
+        value >=
+            static_cast<double>(std::numeric_limits<std::int64_t>::max())) {
+      return std::nullopt;
+    }
+    return static_cast<std::int64_t>(value);
+  };
+  const auto x0 = boundary(min_x, false), y0 = boundary(min_y, false);
+  const auto x1 = boundary(max_x, true), y1 = boundary(max_y, true);
+  if (!x0 || !y0 || !x1 || !y1) return std::nullopt;
+  return InputBounds{
+      .minimum = {*x0, *y0},
+      .maximum = {std::max(*x1, *x0 + 1), std::max(*y1, *y0 + 1)}};
+}
+
 [[nodiscard]] std::size_t IndexSpan(const std::int64_t min_inclusive,
                                     const std::int64_t max_exclusive) noexcept {
   if (max_exclusive <= min_inclusive) {
@@ -391,6 +446,18 @@ ElevationUpdateResult PersistentElevationMap::Apply(
     canonical_origin_m = canonical_origin;
   }
 
+  const auto input_bounds = ProjectInputBounds(evidence, canonical_origin_m);
+  if (!input_bounds) return reject();
+  GridIndex min_inclusive = input_bounds->minimum;
+  GridIndex max_exclusive = input_bounds->maximum;
+  if (impl_->state) {
+    const auto& old = impl_->state->geometry;
+    min_inclusive.x = std::min(min_inclusive.x, old.min_inclusive().x);
+    min_inclusive.y = std::min(min_inclusive.y, old.min_inclusive().y);
+    max_exclusive.x = std::max(max_exclusive.x, old.max_exclusive().x);
+    max_exclusive.y = std::max(max_exclusive.y, old.max_exclusive().y);
+  }
+
   std::map<GridIndex, ElevationRange> projected;
   for (std::size_t source_y = 0U; source_y < evidence.geometry.height;
        ++source_y) {
@@ -424,6 +491,10 @@ ElevationUpdateResult PersistentElevationMap::Apply(
       const float canonical_elevation_m =
           static_cast<float>(canonical_point.z);
       const GridIndex target{.x = *target_x, .y = *target_y};
+      min_inclusive.x = std::min(min_inclusive.x, target.x);
+      min_inclusive.y = std::min(min_inclusive.y, target.y);
+      max_exclusive.x = std::max(max_exclusive.x, target.x + 1);
+      max_exclusive.y = std::max(max_exclusive.y, target.y + 1);
       const auto [found, inserted] = projected.try_emplace(
           target, ElevationRange{.min_m = canonical_elevation_m,
                                  .max_m = canonical_elevation_m});
@@ -445,7 +516,14 @@ ElevationUpdateResult PersistentElevationMap::Apply(
     }
   }
 
-  if (changed.empty()) {
+  const SparseGridGeometry next_geometry(
+      evidence.map_from_source.parent_frame, canonical_resolution_m,
+      canonical_origin_m, min_inclusive, max_exclusive);
+  if (!next_geometry.valid()) return reject();
+  const bool same_bounds =
+      impl_->state && impl_->state->geometry.min_inclusive() == min_inclusive &&
+      impl_->state->geometry.max_exclusive() == max_exclusive;
+  if (changed.empty() && same_bounds) {
     ++impl_->counters.duplicate_updates;
     return ElevationUpdateResult{
         .status = ElevationUpdateResult::Status::kDuplicate,
@@ -455,19 +533,12 @@ ElevationUpdateResult PersistentElevationMap::Apply(
 
   auto next = std::make_shared<ElevationSnapshot::Impl>();
   next->lineage = impl_->lineage;
-  GridIndex min_inclusive;
-  GridIndex max_exclusive;
   if (impl_->state) {
     next->previous = impl_->state;
     next->tiles = impl_->state->tiles;
     next->revision = impl_->state->revision + 1U;
-    min_inclusive = impl_->state->geometry.min_inclusive();
-    max_exclusive = impl_->state->geometry.max_exclusive();
   } else {
     next->revision = 1U;
-    const GridIndex first = changed.begin()->second.front().first;
-    min_inclusive = first;
-    max_exclusive = GridIndex{.x = first.x + 1, .y = first.y + 1};
   }
 
   std::size_t updated_cells = 0U;
@@ -496,9 +567,7 @@ ElevationUpdateResult PersistentElevationMap::Apply(
     dirty_tiles.push_back(tile_index);
   }
   next->changed_tiles = dirty_tiles;
-  next->geometry = SparseGridGeometry(evidence.map_from_source.parent_frame, canonical_resolution_m,
-                                      canonical_origin_m, min_inclusive,
-                                      max_exclusive);
+  next->geometry = next_geometry;
 
   impl_->state = next;
   impl_->snapshot = std::shared_ptr<const ElevationSnapshot>(

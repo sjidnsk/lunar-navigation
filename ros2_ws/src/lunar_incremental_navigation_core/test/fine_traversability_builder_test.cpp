@@ -233,7 +233,11 @@ TEST(FineTraversabilityBuilder, PreservesWheelAndLeggedPhysicsDifferences) {
   const GridGeometry geometry = Geometry(21U, 21U);
   std::vector<float> values(geometry.CellCount(), 0.0F);
   const GridIndex bump{.x = 10, .y = 10};
-  values[Offset(geometry, bump)] = 0.4F;
+  for (int dy = 0; dy < 2; ++dy) {
+    for (int dx = 0; dx < 2; ++dx) {
+      values[Offset(geometry, {bump.x + dx, bump.y + dy})] = 0.4F;
+    }
+  }
   PersistentElevationMap map;
   const auto raw = Snapshot(map, geometry, values);
   const TraversabilityProfile profile = Profile(0.01, 0.01, 0.0, {});
@@ -254,6 +258,7 @@ TEST(FineTraversabilityBuilder, BlockedTakesPriorityOverInflatedUnknown) {
   std::vector<float> values(geometry.CellCount(), 0.0F);
   const GridIndex center{.x = 12, .y = 12};
   values[Offset(geometry, center)] = 0.5F;
+  values[Offset(geometry, {center.x, center.y + 1})] = 0.5F;
   values[Offset(geometry, {.x = 13, .y = 12})] =
       std::numeric_limits<float>::quiet_NaN();
   PersistentElevationMap map;
@@ -412,6 +417,7 @@ TEST(FineTraversabilityBuilder,
   const GridIndex center{.x = 12, .y = 12};
   std::vector<float> obstructed_values(geometry.CellCount(), 0.0F);
   obstructed_values[Offset(geometry, center)] = 0.5F;
+  obstructed_values[Offset(geometry, {center.x, center.y + 1})] = 0.5F;
   std::vector<float> flat_values(geometry.CellCount(), 0.0F);
   PersistentElevationMap obstructed_map;
   PersistentElevationMap flat_map;
@@ -551,6 +557,37 @@ TEST(FineTraversabilityBuilder,
             first->TraversalCost({.x = 100, .y = 8}));
 }
 
+TEST(FineTraversabilityBuilder, WheelTwoCellSupportUpdatesMatchFullDerivation) {
+  const GridGeometry geometry = Geometry(520U, 16U);
+  PersistentElevationMap map;
+  auto raw =
+      Snapshot(map, geometry, std::vector<float>(geometry.CellCount(), 0.0F));
+  FineTraversabilityBuilder builder;
+  const auto capability = WheelCapability();
+  const auto profile = Profile(0.01, 0.01, 0.0);
+  auto previous = builder.Derive(raw, capability, profile);
+  // Across the tile seam: flat -> isolated UNKNOWN -> supported BLOCKED ->
+  // flat.
+  for (const auto& values : {std::vector<float>{0.3F, 0.F, 0.F, 0.F},
+                             std::vector<float>{0.3F, 0.3F, 0.3F, 0.3F},
+                             std::vector<float>{0.F, 0.F, 0.F, 0.F}}) {
+    GridGeometry update = Geometry(2U, 2U);
+    update.origin_m = {.x = 255 * .2, .y = 7 * .2};
+    ASSERT_EQ(Apply(map, update, values).status,
+              ElevationUpdateResult::Status::kApplied);
+    raw = map.Snapshot();
+    const auto incremental = builder.Derive(raw, capability, profile, previous);
+    const auto fresh = builder.Derive(raw, capability, profile);
+    for (int y = 0; y < 16; ++y)
+      for (int x = 0; x < 520; ++x) {
+        EXPECT_EQ(incremental->State({x, y}), fresh->State({x, y}));
+        EXPECT_DOUBLE_EQ(incremental->TraversalCost({x, y}),
+                         fresh->TraversalCost({x, y}));
+      }
+    previous = incremental;
+  }
+}
+
 TEST(FineTraversabilityBuilder,
      GeometryGrowthDerivesNewBlockedHaloInEveryDirectionAndAtCorners) {
   struct GrowthCase {
@@ -574,7 +611,8 @@ TEST(FineTraversabilityBuilder,
     std::vector<float> values(geometry.CellCount(), 0.0F);
     values[Offset(geometry, fixture.surface)] = 1.3F;
     const auto first_raw = Snapshot(map, geometry, values);
-    const auto capability = WheelCapability();
+    // The wheel model deliberately leaves unsupported boundary spikes UNKNOWN.
+    const auto capability = LeggedCapabilityForTest();
     const auto profile = Profile(0.25, 0.01, 0.0, {});
     FineTraversabilityBuilder builder;
     const auto first = builder.Derive(first_raw, capability, profile);
@@ -630,7 +668,8 @@ TEST(FineTraversabilityBuilder,
   std::vector<float> values(geometry.CellCount(), 0.0F);
   values[Offset(geometry, {16, 0})] = 1.3F;
   const auto first_raw = Snapshot(map, geometry, values);
-  const auto capability = WheelCapability();
+  // The wheel model deliberately leaves unsupported boundary spikes UNKNOWN.
+  const auto capability = LeggedCapabilityForTest();
   const auto profile = Profile(0.25, 0.01, 0.0, {});
   FineTraversabilityBuilder builder;
   const auto first = builder.Derive(first_raw, capability, profile);
@@ -667,7 +706,8 @@ TEST(FineTraversabilityBuilder,
   std::vector<float> values(geometry.CellCount(), 0.0F);
   values[Offset(geometry, {16, 0})] = 1.3F;
   const auto first_raw = Snapshot(map, geometry, values);
-  const auto capability = WheelCapability();
+  // The wheel model deliberately leaves unsupported boundary spikes UNKNOWN.
+  const auto capability = LeggedCapabilityForTest();
   const auto profile = Profile(0.25, 0.01, 0.0, {});
   FineTraversabilityBuilder builder;
   const auto first = builder.Derive(first_raw, capability, profile);
