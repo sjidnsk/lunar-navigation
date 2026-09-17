@@ -15,7 +15,7 @@ def test_hardware_platform_path_resolves_independently_of_working_directory():
 def test_hardware_profile_keeps_physics_and_sets_navigation_margin():
     base = yaml.safe_load((ROOT / 'config/wheel.yaml').read_text())
     hardware = yaml.safe_load((ROOT / 'config/wheel_orin.yaml').read_text())
-    assert hardware.pop('start_blind_zone_margin_m') == 2.0
+    assert hardware.pop('start_blind_zone_margin_m') == 3.0
     for name in ('maximum_forward_speed_mps', 'maximum_reverse_speed_mps'):
         assert hardware['capability'][name] == 0.2
         hardware['capability'][name] = base['capability'][name]

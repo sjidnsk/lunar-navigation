@@ -1,16 +1,17 @@
+#include "lunar_incremental_navigation_ros/elevation_pipeline.hpp"
+
+#include <gtest/gtest.h>
+
 #include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <future>
+#include <limits>
 #include <memory>
 #include <numbers>
 #include <stdexcept>
 #include <thread>
 #include <vector>
-
-#include <gtest/gtest.h>
-
-#include "lunar_incremental_navigation_ros/elevation_pipeline.hpp"
 
 namespace lunar::incremental_navigation_ros {
 namespace {
@@ -38,8 +39,8 @@ using lunar::incremental_navigation::WheeledCapability;
 }
 
 [[nodiscard]] OwnedElevationEvidence BlockedTerrainEvidence(
-    const double origin_x_m = 0.0) {
-  auto evidence = Evidence(0.0F, origin_x_m);
+    const double origin_x_m = 0.0, const std::size_t side = 7U) {
+  auto evidence = Evidence(0.0F, origin_x_m, side, side);
   for (std::size_t index = 0U; index < evidence.elevation_m.size(); ++index) {
     evidence.elevation_m[index] = index % 2U == 0U ? 0.0F : 10.0F;
   }
@@ -126,6 +127,41 @@ struct FailureGate final {
       .clearance_weight = 0.0,
       .start_blind_zone_margin_m = 0.0,
   };
+}
+
+TEST(ElevationPipelineTest,
+     UnknownOnlyBoundsReachFineAndGuidanceWithoutDirtyHeights) {
+  ElevationPipeline pipeline(Capability(), Profile(), 1.0);
+  auto evidence =
+      Evidence(std::numeric_limits<float>::quiet_NaN(), -32., 320U, 320U);
+  evidence.geometry.origin_m.y = -32.;
+  ASSERT_EQ(
+      pipeline.ApplyLocal(evidence).status,
+      lunar::incremental_navigation::ElevationUpdateResult::Status::kApplied);
+  EXPECT_EQ(pipeline.PendingFineDirtyTileCount(), 0U);
+  ASSERT_TRUE(pipeline.RunFineDerivation());
+  ASSERT_TRUE(pipeline.RunGuidanceDerivation());
+  const auto first = pipeline.CaptureBundle();
+  ASSERT_TRUE(first.fine);
+  ASSERT_TRUE(first.guidance);
+  EXPECT_EQ(first.fine->geometry().width(), 320U);
+  EXPECT_EQ(first.guidance->geometry().width(), 64U);
+  EXPECT_EQ(first.fine->State({160, 160}),
+            lunar::incremental_navigation::FineCellState::kUnknown);
+  EXPECT_EQ(first.fine->elevation()->allocated_tiles(), 0U);
+  EXPECT_FALSE(pipeline.RunFineDerivation());
+  evidence.geometry.origin_m.x = -40.;
+  ASSERT_EQ(
+      pipeline.ApplyLocal(evidence).status,
+      lunar::incremental_navigation::ElevationUpdateResult::Status::kApplied);
+  EXPECT_EQ(pipeline.PendingFineDirtyTileCount(), 0U);
+  ASSERT_TRUE(pipeline.RunFineDerivation());
+  ASSERT_TRUE(pipeline.RunGuidanceDerivation());
+  const auto grown = pipeline.CaptureBundle();
+  EXPECT_EQ(grown.fine->geometry().width(), 360U);
+  EXPECT_EQ(grown.guidance->geometry().width(), 72U);
+  EXPECT_EQ(first.fine->geometry().width(), 320U);
+  EXPECT_FALSE(pipeline.RunFineDerivation());
 }
 
 TEST(ElevationPipelineTest, CallbacksOnlyWriteRawAndMergeDirtyWork) {
@@ -259,8 +295,9 @@ TEST(ElevationPipelineTest, RejectedAdapterInputPreservesPublishedSnapshots) {
 TEST(ElevationPipelineTest,
      FineAndGuidanceWorkersPublishContentChangesIndependentlyWithoutPrior) {
   ElevationPipeline pipeline(Capability(), Profile(), 1.0);
-  ASSERT_EQ(pipeline.ApplyLocal(Evidence(0.0F)).status,
-            lunar::incremental_navigation::ElevationUpdateResult::Status::kApplied);
+  ASSERT_EQ(
+      pipeline.ApplyLocal(Evidence(0.0F, 0.0, 15U, 15U)).status,
+      lunar::incremental_navigation::ElevationUpdateResult::Status::kApplied);
   ASSERT_TRUE(pipeline.RunFineDerivation());
   EXPECT_EQ(pipeline.CaptureBundle().guidance, nullptr);
 
@@ -270,8 +307,9 @@ TEST(ElevationPipelineTest,
   EXPECT_EQ(first.guidance->source_fine_traversability_revision(), 1U);
   EXPECT_EQ(first.guidance->global_guidance_revision(), 1U);
 
-  ASSERT_EQ(pipeline.ApplyLocal(BlockedTerrainEvidence()).status,
-            lunar::incremental_navigation::ElevationUpdateResult::Status::kApplied);
+  ASSERT_EQ(
+      pipeline.ApplyLocal(BlockedTerrainEvidence(0.0, 15U)).status,
+      lunar::incremental_navigation::ElevationUpdateResult::Status::kApplied);
   ASSERT_TRUE(pipeline.RunFineDerivation());
   const auto fine_only = pipeline.CaptureBundle();
   EXPECT_EQ(fine_only.fine->fine_traversability_revision(), 2U);
@@ -358,8 +396,9 @@ TEST(ElevationPipelineTest, ConcurrentCaptureNeverObservesGuidanceAheadOfFine) {
 
 TEST(ElevationPipelineTest, CapturedBundleRemainsImmutableAcrossLaterWorkers) {
   ElevationPipeline pipeline(Capability(), Profile(), 1.0);
-  ASSERT_EQ(pipeline.ApplyLocal(Evidence(0.0F)).status,
-            lunar::incremental_navigation::ElevationUpdateResult::Status::kApplied);
+  ASSERT_EQ(
+      pipeline.ApplyLocal(Evidence(0.0F, 0.0, 15U, 15U)).status,
+      lunar::incremental_navigation::ElevationUpdateResult::Status::kApplied);
   ASSERT_TRUE(pipeline.RunFineDerivation());
   ASSERT_TRUE(pipeline.RunGuidanceDerivation());
   const auto captured = pipeline.CaptureBundle();
@@ -367,8 +406,9 @@ TEST(ElevationPipelineTest, CapturedBundleRemainsImmutableAcrossLaterWorkers) {
   const auto old_guidance_revision =
       captured.guidance->global_guidance_revision();
 
-  ASSERT_EQ(pipeline.ApplyLocal(BlockedTerrainEvidence()).status,
-            lunar::incremental_navigation::ElevationUpdateResult::Status::kApplied);
+  ASSERT_EQ(
+      pipeline.ApplyLocal(BlockedTerrainEvidence(0.0, 15U)).status,
+      lunar::incremental_navigation::ElevationUpdateResult::Status::kApplied);
   ASSERT_TRUE(pipeline.RunFineDerivation());
   ASSERT_TRUE(pipeline.RunGuidanceDerivation());
   const auto latest = pipeline.CaptureBundle();

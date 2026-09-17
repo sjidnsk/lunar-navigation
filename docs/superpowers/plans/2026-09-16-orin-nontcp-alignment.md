@@ -2,13 +2,13 @@
 
 > Execute inline with superpowers:executing-plans, retaining per-task red/green evidence. No parallel agent work is required.
 
-**Goal:** Integrate the 104 static TF adapter and 2 m start margin, then align transport-neutral P4 behavior/configuration with the audited 216 deployment.
+**Goal:** Integrate the 104 static TF adapter and the latest 3 m start margin, then align transport-neutral P4 behavior/configuration with the audited 216 deployment.
 
 **Architecture:** P3 owns localization/elevation; an Orin adapter relays static map-to-odom without restamping. Navigation owns certified planning and derived maps; exploration owns task progression; the single controller owns vehicle commands. TCP, UE, fabricated feedback and simulation calibration remain excluded.
 
 **Tech Stack:** C++20, Python, ROS 2 Humble/Orin deployment; separate Jazzy development tests.
 
-**Spec:** User-approved design in the conversation: all non-TCP differences, including completion, error-state and longitudinal feedback semantics; retain real 104 input interfaces. Explicitly include static TF adapter and start_blind_zone_margin_m=2.0.
+**Spec:** User-approved design in the conversation: all non-TCP differences, including completion, error-state and longitudinal feedback semantics; retain real 104 input interfaces. Explicitly include the static TF adapter and the latest `start_blind_zone_margin_m=3.0` setting.
 
 ## Global Constraints
 
@@ -17,7 +17,7 @@
 - No controller startup or vehicle commands during deployment verification.
 - Do not clear BLOCKED cells, relax physical limits or report arrival from planning alone.
 - Runtime logs, snapshots and build artifacts remain outside Git.
-- A 2.0 m start margin adds to the footprint circumscribed radius; it is not a 2.0 m total radius.
+- A 3.0 m start margin adds to the footprint circumscribed radius; it is not a 3.0 m total radius.
 
 ## Task 1 — Baseline and audit
 
@@ -34,7 +34,7 @@ Consumes /tf_static (Reliable/TransientLocal). Produces only /P4/input/map_to_od
 
 - [x] Import the archived DDS regression test first; run in isolated domain 181 and confirm missing implementation fails.
 - [x] Integrate the audited adapter; run its three real-DDS cases for no invented identity, late-join repeat without restamping, replacement and absence of shared outputs.
-- [x] Add hardware-only profile rather than changing demo/global defaults; set margin 2.0 and explicit private TF input.
+- [x] Add hardware-only profile rather than changing demo/global defaults; set the latest margin to 3.0 and keep explicit private TF input.
 - [x] Test configuration loading and relative platform path resolution; inspect navigation-only launch; document startup and rollback. Live parameter checks remain in Task 5.
 
 ## Task 3 — Navigation alignment
@@ -66,3 +66,11 @@ Files: lunar_pure_exploration_ros incremental node/tests, lunar_pure_exploration
 - [ ] Test PLAN_FOUND plus revision-consistent ACTIVE reference, then cancel. START_BLOCKED remains a failure, not a reason to weaken certification.
 - Deferred: P3 stopped; user requested candidate switch without waiting for joint testing. No goal sent.
 - [ ] Hand off exact source SHA or dirty-tree manifest, startup commands, test evidence and rollback. Do not merge/push without explicit instruction.
+
+## Task 6 — Consolidate Orin terrain worktree
+
+- [x] Preserve the non-TCP hardware/P3/T5 boundary and commit the existing alignment separately.
+- [x] Import the terrain and 3 m margin tests first; confirm the old implementation fails the intended cases.
+- [x] Integrate robust 5×5 terrain evaluation, UNKNOWN bounds retention and fine-map rederivation.
+- [x] Retain goal tolerance parameters and resolve the hardware margin to the latest 3.0 m requirement.
+- [ ] Run final Jazzy build/tests, commit the result, then remove only `fix/orin-terrain-sync` after ancestry and cleanliness checks.

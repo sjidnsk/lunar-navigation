@@ -802,9 +802,7 @@ struct IncrementalNavigationNode::Impl final {
   }
 
   void RunFineDerivationWorker() {
-    if (pipeline.PendingFineDirtyTileCount() == 0U) {
-      return;
-    }
+    // RunFineDerivation also detects revisions that expand UNKNOWN bounds.
     bool fine_updated = false;
     double fine_ms{};
     try {
@@ -818,6 +816,7 @@ struct IncrementalNavigationNode::Impl final {
                   error.what());
       return;
     }
+    if (!fine_updated) return;
     if (fine_updated) {
       std::scoped_lock lock{event_mutex};
       fine_changed = true;

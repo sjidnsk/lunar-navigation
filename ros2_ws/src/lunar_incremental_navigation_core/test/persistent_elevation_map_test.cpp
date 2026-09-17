@@ -50,6 +50,84 @@ namespace {
   });
 }
 
+TEST(PersistentElevationMap,
+     RetainsEntireUnknownInputRectangleWithoutAllocatingTiles) {
+  PersistentElevationMap map;
+  const auto geometry = Geometry(320U, 320U, .2, {.x = -32., .y = -32.});
+  std::vector<float> values(geometry.CellCount(),
+                            std::numeric_limits<float>::quiet_NaN());
+  const auto result = Apply(map, geometry, values);
+  ASSERT_EQ(result.status, ElevationUpdateResult::Status::kApplied);
+  const auto raw = map.Snapshot();
+  ASSERT_TRUE(raw);
+  EXPECT_TRUE(raw->valid());
+  EXPECT_EQ(raw->geometry().min_inclusive(), (GridIndex{0, 0}));
+  EXPECT_EQ(raw->geometry().max_exclusive(), (GridIndex{320, 320}));
+  EXPECT_EQ(raw->allocated_tiles(), 0U);
+  EXPECT_EQ(result.updated_cells, 0U);
+  EXPECT_TRUE(raw->changed_cells().empty());
+  EXPECT_FALSE(raw->ElevationAtWorld(0., 0.));
+  EXPECT_EQ(Apply(map, geometry, values).status,
+            ElevationUpdateResult::Status::kDuplicate);
+}
+
+TEST(PersistentElevationMap, SparseFiniteSamplesDoNotTrimUnknownBorder) {
+  PersistentElevationMap map;
+  const auto geometry = Geometry(20U, 20U, .2, {.x = -2., .y = -2.});
+  std::vector<float> values(geometry.CellCount(),
+                            std::numeric_limits<float>::quiet_NaN());
+  values[15U * 20U + 15U] = .4F;
+  ASSERT_EQ(Apply(map, geometry, values).status,
+            ElevationUpdateResult::Status::kApplied);
+  const auto raw = map.Snapshot();
+  EXPECT_EQ(raw->geometry().min_inclusive(), (GridIndex{0, 0}));
+  EXPECT_EQ(raw->geometry().max_exclusive(), (GridIndex{20, 20}));
+  EXPECT_EQ(raw->ElevationAt({15, 15}), std::optional<float>(.4F));
+  EXPECT_FALSE(raw->ElevationAtWorld(0., 0.));
+}
+
+TEST(PersistentElevationMap,
+     UnknownOnlyGrowthPublishesRevisionAndPreservesHistory) {
+  PersistentElevationMap map;
+  ASSERT_EQ(Apply(map, Geometry(1U, 1U, 1.), {2.F}).status,
+            ElevationUpdateResult::Status::kApplied);
+  const auto before = map.Snapshot();
+  const auto geometry = Geometry(10U, 8U, 1., {.x = -3., .y = -2.});
+  const std::vector<float> unknown(geometry.CellCount(),
+                                   std::numeric_limits<float>::quiet_NaN());
+  const auto update = Apply(map, geometry, unknown);
+  ASSERT_EQ(update.status, ElevationUpdateResult::Status::kApplied);
+  const auto after = map.Snapshot();
+  EXPECT_EQ(after->geometry().min_inclusive(), (GridIndex{-3, -2}));
+  EXPECT_EQ(after->geometry().max_exclusive(), (GridIndex{7, 6}));
+  EXPECT_TRUE(after->IsDirectSuccessorOf(*before));
+  EXPECT_EQ(after->raw_elevation_revision(),
+            before->raw_elevation_revision() + 1);
+  EXPECT_EQ(after->allocated_tiles(), before->allocated_tiles());
+  EXPECT_EQ(update.updated_cells, 0U);
+  EXPECT_TRUE(update.dirty_tiles.empty());
+  EXPECT_EQ(after->ElevationAt({0, 0}), std::optional<float>(2.F));
+  EXPECT_EQ(before->geometry().CellCount(), 1U);
+  EXPECT_EQ(Apply(map, geometry, unknown).status,
+            ElevationUpdateResult::Status::kDuplicate);
+}
+
+TEST(PersistentElevationMap, RotatesAndTranslatesUnknownInputRectangle) {
+  PersistentElevationMap map;
+  const auto geometry = Geometry(4U, 2U, 1.);
+  ASSERT_EQ(
+      Apply(map, geometry,
+            std::vector<float>(8U, std::numeric_limits<float>::quiet_NaN()),
+            MapFromSource({.x = 10., .y = 20.}, std::numbers::pi / 2.))
+          .status,
+      ElevationUpdateResult::Status::kApplied);
+  const auto raw = map.Snapshot();
+  ASSERT_TRUE(raw);
+  EXPECT_EQ(raw->geometry().min_inclusive(), (GridIndex{-2, 0}));
+  EXPECT_EQ(raw->geometry().max_exclusive(), (GridIndex{0, 4}));
+  EXPECT_EQ(raw->allocated_tiles(), 0U);
+}
+
 TEST(PersistentElevationMap, InsertsFiniteValuesInCanonicalMap) {
   PersistentElevationMap map;
   const ElevationUpdateResult result =

@@ -539,9 +539,13 @@ class IncrementalExplorationCoverageMilestoneTest : public IncrementalExploratio
 TEST_F(IncrementalExplorationCoverageMilestoneTest,
        CoverageTargetDoesNotStopReachableFrontierNavigation) {
   Start();
-  ASSERT_TRUE(LastStatus());
-  EXPECT_GT(LastStatus()->coverage_ratio, 0.01);
-  EXPECT_NE(LastStatus()->state, Status::COMPLETED);
+  ASSERT_TRUE(WaitFor([this] {
+    const auto status = LastStatus();
+    return status && status->coverage_ratio > 0.01;
+  }));
+  const auto status = LastStatus();
+  ASSERT_TRUE(status);
+  EXPECT_NE(status->state, Status::COMPLETED);
   EXPECT_EQ(server_->goal_count(), 1U);
 }
 

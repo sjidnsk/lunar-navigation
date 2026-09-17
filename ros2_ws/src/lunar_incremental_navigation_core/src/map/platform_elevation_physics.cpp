@@ -212,6 +212,153 @@ struct LocalElevationMeasurements final {
   };
 }
 
+// Basic wheel terrain model: a fixed 5x5 support window (60% coverage),
+// robust background plane, then unsmoothed local residuals for steps/rocks.
+// Legged evaluation below deliberately retains its existing 3x3 model.
+struct WheelPatchPoint {
+  int x{}, y{};
+  double low{}, high{}, z{}, residual{};
+};
+
+template <std::size_t N>
+double PatchMedian(std::array<double, N> values, std::size_t count) {
+  std::sort(values.begin(), values.begin() + count);
+  return values[count / 2];
+}
+
+IntrinsicTraversalEvaluation EvaluateWheelPatch(
+    const ElevationRangeView& elevation, GridIndex center,
+    const WheeledCapability& capability) {
+  if (!elevation.ElevationRangeAt(center)) return {};
+  std::array<WheelPatchPoint, 25> points{};
+  std::array<double, 25> heights{};
+  std::array<int, 25> indices{};
+  indices.fill(-1);
+  std::size_t count = 0;
+  int min_x = 2, max_x = -2, min_y = 2, max_y = -2;
+  const double resolution = elevation.geometry().resolution_m();
+  for (int y = -2; y <= 2; ++y)
+    for (int x = -2; x <= 2; ++x) {
+      const auto cell =
+          detail::OffsetWithinGeometry(elevation.geometry(), center, x, y);
+      const auto range =
+          cell ? elevation.ElevationRangeAt(*cell) : std::nullopt;
+      if (!range) continue;
+      indices[(y + 2) * 5 + x + 2] = static_cast<int>(count);
+      const double z = .5 * (double(range->min_m) + double(range->max_m));
+      points[count++] = {x, y, range->min_m, range->max_m, z, 0.};
+      min_x = std::min(min_x, x);
+      max_x = std::max(max_x, x);
+      min_y = std::min(min_y, y);
+      max_y = std::max(max_y, y);
+    }
+  if (count < 15 || min_x >= 0 || max_x <= 0 || min_y >= 0 || max_y <= 0)
+    return {};
+
+  // Median adjacent derivatives initialize the background: a sharp step must
+  // not tilt the initial fit into an artificial ramp joining its two surfaces.
+  std::array<double, 20> gx{}, gy{};
+  std::size_t nx = 0, ny = 0;
+  for (int y = 0; y < 5; ++y)
+    for (int x = 0; x < 5; ++x) {
+      const int i = indices[y * 5 + x];
+      if (i < 0) continue;
+      if (x < 4 && indices[y * 5 + x + 1] >= 0)
+        gx[nx++] =
+            (points[indices[y * 5 + x + 1]].z - points[i].z) / resolution;
+      if (y < 4 && indices[(y + 1) * 5 + x] >= 0)
+        gy[ny++] =
+            (points[indices[(y + 1) * 5 + x]].z - points[i].z) / resolution;
+    }
+  if (nx < 4 || ny < 4) return {};
+  double a = PatchMedian(gx, nx), b = PatchMedian(gy, ny);
+  for (std::size_t i = 0; i < count; ++i)
+    heights[i] = points[i].z - resolution * (a * points[i].x + b * points[i].y);
+  double c = PatchMedian(heights, count);
+  const double background_a = a, background_b = b, background_c = c;
+  for (std::size_t i = 0; i < count; ++i) heights[i] = std::abs(heights[i] - c);
+  // A 5 mm robust scale floor prevents nearly exact flats from producing
+  // singular weights. It is a numerical/noise scale, not an obstacle threshold.
+  const double cutoff =
+      2.5 * std::max(.005, 1.4826 * PatchMedian(heights, count));
+  double sw = 0., sx = 0., sy = 0., sz = 0., sxx = 0., syy = 0., sxy = 0.,
+         sxz = 0., syz = 0.;
+  for (std::size_t i = 0; i < count; ++i) {
+    const auto& p = points[i];
+    const double x = p.x * resolution, y = p.y * resolution;
+    const double residual = p.z - (a * x + b * y + c);
+    const double w = std::min(1., cutoff / std::max(std::abs(residual), 1e-12));
+    sw += w;
+    sx += w * x;
+    sy += w * y;
+    sz += w * p.z;
+    sxx += w * x * x;
+    syy += w * y * y;
+    sxy += w * x * y;
+    sxz += w * x * p.z;
+    syz += w * y * p.z;
+  }
+  sxx -= sx * sx / sw;
+  syy -= sy * sy / sw;
+  sxy -= sx * sy / sw;
+  sxz -= sx * sz / sw;
+  syz -= sy * sz / sw;
+  const double det = sxx * syy - sxy * sxy;
+  if (!(sxx > 0. && syy > 0. && det > 1e-8 * sxx * syy)) return {};
+  a = (sxz * syy - syz * sxy) / det;
+  b = (syz * sxx - sxz * sxy) / det;
+  c = (sz - a * sx - b * sy) / sw;
+  const double slope = std::atan(std::hypot(a, b));
+  if (!std::isfinite(slope) || !std::isfinite(c)) return {};
+  double low = std::numeric_limits<double>::infinity(), high = -low,
+         center_residual = 0.;
+  for (std::size_t i = 0; i < count; ++i) {
+    auto& p = points[i];
+    // Use the robust background before least-squares refinement for
+    // discontinuities: even a small fitted tilt must not shave a 21 cm
+    // step below the existing 20 cm limit.
+    const double plane =
+        resolution * (background_a * p.x + background_b * p.y) + background_c;
+    p.residual = p.z - plane;
+    if (p.x == 0 && p.y == 0) center_residual = p.residual;
+    if (std::abs(p.x) <= 1 && std::abs(p.y) <= 1) {
+      low = std::min(low, p.low - plane);
+      high = std::max(high, p.high - plane);
+    }
+  }
+  const double relief = high - low;
+  const double rise = std::max(0., high - center_residual);
+  const bool discontinuity =
+      relief > capability.maximum_local_obstacle_relief_m ||
+      rise > capability.minimum_underbody_clearance_m;
+  if (discontinuity) {
+    // Both surfaces need adjacent support. One tall/low cell stays UNKNOWN,
+    // never FREE; small real obstacles are not silently discarded as outliers.
+    const double band =
+        .25 * std::min(capability.maximum_local_obstacle_relief_m,
+                       capability.minimum_underbody_clearance_m);
+    bool low_supported = false, high_supported = false;
+    for (std::size_t i = 0; i < count; ++i)
+      for (std::size_t j = i + 1; j < count; ++j) {
+        const auto& p = points[i];
+        const auto& q = points[j];
+        if (std::max(std::abs(p.x - q.x), std::abs(p.y - q.y)) != 1) continue;
+        low_supported |= p.residual <= low + band && q.residual <= low + band;
+        high_supported |=
+            p.residual >= high - band && q.residual >= high - band;
+      }
+    if (!low_supported || !high_supported)
+      return {.state = IntrinsicCellState::kUnknown,
+              .slope_rad = slope,
+              .relief_m = relief};
+  }
+  return {.state = (discontinuity || slope > capability.maximum_slope_rad)
+                       ? IntrinsicCellState::kBlocked
+                       : IntrinsicCellState::kFree,
+          .slope_rad = slope,
+          .relief_m = relief};
+}
+
 class WheelElevationEvaluator final : public PlatformElevationEvaluator {
  public:
   explicit WheelElevationEvaluator(WheeledCapability capability)
@@ -227,30 +374,7 @@ class WheelElevationEvaluator final : public PlatformElevationEvaluator {
   [[nodiscard]] IntrinsicTraversalEvaluation Evaluate(
       const ElevationRangeView& elevation,
       const GridIndex index) const override {
-    const LocalElevationMeasurements measured =
-        MeasureLocalElevation(elevation, index);
-    if (!measured.center_known) {
-      return {};
-    }
-    const bool exceeds_physical_limit =
-        measured.slope_rad > capability_.maximum_slope_rad ||
-        measured.relief_m > capability_.maximum_local_obstacle_relief_m ||
-        measured.positive_rise_m >
-            capability_.minimum_underbody_clearance_m;
-    if (exceeds_physical_limit) {
-      return IntrinsicTraversalEvaluation{
-          .state = IntrinsicCellState::kBlocked,
-          .slope_rad = measured.slope_rad,
-          .relief_m = measured.relief_m,
-      };
-    }
-    return IntrinsicTraversalEvaluation{
-        .state = measured.neighborhood_complete
-                     ? IntrinsicCellState::kFree
-                     : IntrinsicCellState::kUnknown,
-        .slope_rad = measured.slope_rad,
-        .relief_m = measured.relief_m,
-    };
+    return EvaluateWheelPatch(elevation, index, capability_);
   }
 
  private:
