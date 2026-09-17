@@ -1,7 +1,7 @@
 # 104/216 非 TCP 对齐记录（2026-09-16）
 
-开发基线：integration/pure-planner-orin `5c23c13c`；保留开发分支
-`feat/orin-nontcp-alignment`。本记录不代表已合入 `orin-humble`。
+开发基线：integration/pure-planner-orin `5c23c13c`。原开发分支
+`feat/orin-nontcp-alignment` 已规范为实车应用分支 `app/orin-real-vehicle`；该名称调整不代表已完成 Humble/Orin 实车验收。
 
 ## 对齐范围与职责
 
