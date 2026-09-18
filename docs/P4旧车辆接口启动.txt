@@ -1,0 +1,52 @@
+P4 维护的旧车辆接口副本启动方法（Orin 216）
+
+用途：连接 Unreal 192.168.10.23:6668，接收车辆位置、姿态、速度和车轮反馈。
+该接口不采集雷达/双目，也不生成 P3 地图。整套系统从零启动时，先启动本接口，再启动 P3 定位建图，最后启动 P4。
+
+一、启动前检查
+
+ssh yanfa@192.168.100.216
+pgrep -af lunar_car_node
+ss -tnp | grep ':6668'
+
+如果已有 lunar_car_node 或其他程序连接 6668，不要重复启动。
+
+二、启动接口
+
+unset PYTHONHOME
+export PYTHONNOUSERSITE=1
+export PATH="/usr/bin:/bin:$PATH"
+source /opt/ros/humble/setup.bash
+source /home/yanfa/P4/vehicle_interface/install/setup.bash
+export ROS_DOMAIN_ID=10
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export ROS_LOCALHOST_ONLY=0
+
+mkdir -p /home/yanfa/P4/run
+nohup /home/yanfa/P4/vehicle_interface/install/lunar_car_ctrl/lib/lunar_car_ctrl/lunar_car_node \
+  --ros-args \
+  -p tcp_host:=192.168.10.23 \
+  -p tcp_port:=6668 \
+  -p big_endian:=false \
+  -p max_linear_speed:=0.2 \
+  -p control_mode:=park \
+  > /home/yanfa/P4/run/lunar_car_ctrl.log 2>&1 &
+echo $! | tee /home/yanfa/P4/run/lunar_car_ctrl.pid
+
+三、检查连接和反馈
+
+tail -n 50 /home/yanfa/P4/run/lunar_car_ctrl.log
+ros2 node list | grep lunar_car_node
+ros2 topic echo --once /car/ue_connected
+timeout 5 ros2 topic echo --once /car/telemetry
+
+看到 /car/ue_connected 为 true，并能收到 /car/telemetry 后，再启动 P3 定位建图。
+P3 地图和里程计稳定后，再启动 P4 导航或探索。
+
+四、停止接口
+
+pid="$(cat /home/yanfa/P4/run/lunar_car_ctrl.pid)"
+kill -INT "$pid"
+
+说明：接口以 park 模式启动，不会自行驱动车辆。不要同时运行 Env_X 原接口、P4 TCP 桥或第二个 lunar_car_node。
+若 Unreal IP 改变，只替换 tcp_host；端口仍为 6668。
