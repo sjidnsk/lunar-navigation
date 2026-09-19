@@ -214,6 +214,12 @@ struct RuntimeParameters final {
       parameters.profile.goal_yaw_tolerance_rad <= 0.0) {
     throw std::runtime_error("goal tolerances must be finite and positive");
   }
+  parameters.profile.clearance_weight = node.declare_parameter<double>(
+      "clearance_weight", parameters.profile.clearance_weight);
+  if (!std::isfinite(parameters.profile.clearance_weight) ||
+      parameters.profile.clearance_weight < 0.0) {
+    throw std::runtime_error("PLANNER_ERROR: clearance_weight must be finite and nonnegative");
+  }
   return parameters;
 }
 
@@ -380,6 +386,8 @@ core::TraversabilityProfile PlatformProfileFor(
   profile.clearance_weight = 0.0;
   profile.start_blind_zone_margin_m = start_blind_zone_margin_m;
   if (const auto* wheel = std::get_if<core::WheeledCapability>(&capability)) {
+    // Paired clearance/length calibration; see the 2026-09-19 validation report.
+    profile.clearance_weight = 2.0;
     profile.planar_envelope_xy_m = wheel->footprint_xy_m;
     profile.preferred_clearance_m = wheel->minimum_clearance_m;
     profile.maximum_slope_rad = wheel->maximum_slope_rad;
