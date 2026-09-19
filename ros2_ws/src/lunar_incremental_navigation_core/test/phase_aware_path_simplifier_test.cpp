@@ -1,4 +1,7 @@
 #include <chrono>
+#include <array>
+#include <queue>
+#include <random>
 #include <limits>
 #include <memory>
 #include <set>
@@ -414,5 +417,115 @@ TEST(PhaseAwareSimplifier,
   EXPECT_GT(SimplifyPhaseAwarePath(view, raw).size(), 2U);
 }
 
+
+// A straight segment can be entirely FREE yet cut much closer to a cell corner.
+// Distances are geometric cell-boundary distances, independent of resolution.
+TEST(PhaseAwareSimplifier, DoesNotTradeCornerClearanceForFewerVertices) {
+  for (const double resolution : {1.0, 0.2, 1.0e-8}) {
+    for (const auto hazard : {FineCellState::kBlocked, FineCellState::kUnknown}) {
+      SCOPED_TRACE(resolution);
+      SCOPED_TRACE(static_cast<int>(hazard));
+      std::vector<std::pair<GridIndex, FineCellState>> cells;
+      for (std::int64_t y = 0; y < 8; ++y)
+        for (std::int64_t x = 0; x < 8; ++x)
+          cells.emplace_back(GridIndex{x,y}, x == 3 && y == 3 ? hazard : FineCellState::kFree);
+      const auto fine = MakeFine(GridGeometry{.frame_id="map", .width=8U, .height=8U,
+          .resolution_m=resolution, .origin_m={.x=-20*resolution,.y=-20*resolution}}, cells);
+      const auto point = [=](double x, double y) {
+        return P((x-20)*resolution, (y-20)*resolution, StartPhase::kNormal);
+      };
+      const std::vector<PathPoint> raw{point(3.5,4.6),point(4.5,4.6),point(4.6,3.5)};
+      const RequestLocalPlanningView view(fine,
+          {.position_m={.x=raw.front().pose.position_m.x,.y=raw.front().pose.position_m.y}},0.,{});
+      const auto simplified=SimplifyPhaseAwarePath(view,raw);
+      ASSERT_EQ(simplified.size(),3U);
+      for (std::size_t i=0;i<raw.size();++i) EXPECT_EQ(simplified[i].pose,raw[i].pose);
+    }
+  }
+}
+
+TEST(PhaseAwareSimplifier, OpenSpaceStillUsesOneSegment) {
+  std::vector<std::pair<GridIndex,FineCellState>> cells;
+  for (std::int64_t y=0;y<8;++y)
+    for (std::int64_t x=0;x<8;++x) cells.emplace_back(GridIndex{x,y},FineCellState::kFree);
+  const auto fine=MakeFine(GridGeometry{.frame_id="map",.width=8U,.height=8U,.resolution_m=1.},cells);
+  const RequestLocalPlanningView view(fine,{.position_m={.x=1.5,.y=1.5}},0.,{});
+  const std::vector<PathPoint> raw{P(1.5,1.5,StartPhase::kNormal),P(1.5,3.5,StartPhase::kNormal),
+      P(3.5,3.5,StartPhase::kNormal),P(5.5,5.5,StartPhase::kNormal)};
+  const auto simplified=SimplifyPhaseAwarePath(view,raw);
+  ASSERT_EQ(simplified.size(),2U);
+  EXPECT_EQ(simplified.front().pose,raw.front().pose);
+  EXPECT_EQ(simplified.back().pose,raw.back().pose);
+}
+
+
+TEST(PhaseAwareSimplifier, CollinearCompressionDoesNotBypassLegality) {
+  const auto fine=MakeFine({{{0,1},FineCellState::kFree},{{1,1},FineCellState::kBlocked},
+                            {{2,1},FineCellState::kFree},{{3,1},FineCellState::kFree}});
+  const RequestLocalPlanningView view(fine,{.position_m={.x=.5,.y=1.5}},0.,{});
+  const std::vector<PathPoint> raw{P(.5,1.5,StartPhase::kNormal),P(2.5,1.5,StartPhase::kNormal),
+                                 P(3.5,1.5,StartPhase::kNormal)};
+  EXPECT_TRUE(SimplifyPhaseAwarePath(view,raw).empty());
+}
+
+TEST(PhaseAwareSimplifier, DenseStraightPathDoesNotNeedAFreeSpaceRaster) {
+  const auto fine=MakeFine({{{0,1},FineCellState::kFree},{{1,1},FineCellState::kFree},
+                            {{2,1},FineCellState::kFree},{{3,1},FineCellState::kFree}});
+  const RequestLocalPlanningView view(fine,{.position_m={.x=.5,.y=1.5}},0.,{});
+  std::vector<PathPoint> raw;
+  for(int i=0;i<=1000;++i) raw.push_back(P(.5+3.*i/1000,1.5,StartPhase::kNormal));
+  const auto simplified=SimplifyPhaseAwarePath(view,raw);
+  ASSERT_EQ(simplified.size(),2U);
+  EXPECT_EQ(simplified.front().pose,raw.front().pose);
+  EXPECT_EQ(simplified.back().pose,raw.back().pose);
+}
+
+// Independent dense geometric oracle on cardinal grid paths: every raw edge
+// has at least half a cell of clearance. Check returned segments directly
+// against all non-FREE rectangles and the outside boundary, not our evaluator.
+TEST(PhaseAwareSimplifier, SeededMapsPreserveHalfCellRawClearance) {
+  std::mt19937 random(731);
+  int checked=0;
+  for (int trial=0;trial<80;++trial) {
+    std::array<bool,64> free{};
+    for(auto& value:free) value=(random()%4)!=0;
+    free[9]=free[54]=true;
+    std::array<int,64> parent;parent.fill(-1);parent[9]=9;
+    std::queue<int> queue;queue.push(9);
+    while(!queue.empty() && parent[54]<0) {
+      const int cell=queue.front();queue.pop();
+      for(auto [dx,dy]:{std::pair{1,0},{-1,0},{0,1},{0,-1}}) {
+        const int x=cell%8+dx,y=cell/8+dy;
+        if(x<0 || x>=8 || y<0 || y>=8) continue;
+        const int next=y*8+x;
+        if(free[next] && parent[next]<0) {parent[next]=cell;queue.push(next);}
+      }
+    }
+    if(parent[54]<0) continue;
+    ++checked;
+    std::vector<std::pair<GridIndex,FineCellState>> cells;
+    for(int i=0;i<64;++i) cells.emplace_back(GridIndex{i%8,i/8},free[i] ? FineCellState::kFree : FineCellState::kUnknown);
+    const auto fine=MakeFine(GridGeometry{.frame_id="map",.width=8U,.height=8U,.resolution_m=1.},cells);
+    const RequestLocalPlanningView view(fine,{.position_m={.x=1.5,.y=1.5}},0.,{});
+    std::vector<PathPoint> raw;
+    for(int i=54;;i=parent[i]) {raw.push_back(P(i%8+.5,i/8+.5,StartPhase::kNormal));if(i==9)break;}
+    std::reverse(raw.begin(),raw.end());
+    const auto out=SimplifyPhaseAwarePath(view,raw);
+    ASSERT_GE(out.size(),2U);EXPECT_LE(out.size(),raw.size());
+    for(std::size_t k=1;k<out.size();++k) {
+      const auto a=out[k-1].pose.position_m,b=out[k].pose.position_m;
+      for(int sample=0;sample<=1000;++sample) {
+        const double t=sample/1000.;const double x=a.x+t*(b.x-a.x),y=a.y+t*(b.y-a.y);
+        double clearance=std::min({x,y,8-x,8-y});
+        for(int i=0;i<64;++i) if(!free[i]) {
+          const double dx=std::max({0.,i%8-x,x-(i%8+1)}),dy=std::max({0.,i/8-y,y-(i/8+1)});
+          clearance=std::min(clearance,std::hypot(dx,dy));
+        }
+        ASSERT_GE(clearance,.5-1e-10) << "trial "<<trial<<" segment "<<k;
+      }
+    }
+  }
+  EXPECT_GE(checked,20);
+}
 }  // namespace
 }  // namespace lunar::incremental_navigation

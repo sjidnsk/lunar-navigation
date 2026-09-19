@@ -10,145 +10,218 @@
 namespace lunar::incremental_navigation {
 namespace {
 
-[[nodiscard]] bool Interrupted(const SearchControl* control) {
-  return control != nullptr &&
-         (control->canceled() || control->expired());
+[[nodiscard]] bool Interrupted(const SearchControl& control) {
+  return control.canceled() || control.expired();
 }
 
 [[nodiscard]] bool Allowed(const RequestLocalPlanningView& view,
-                           const GridIndex index,
-                           const StartPhase phase) noexcept {
-  const LocalCellSource source = view.Source(index);
-  return phase == StartPhase::kStartPrefix
-             ? source == LocalCellSource::kStartAssumedFree
-             : source == LocalCellSource::kEvidenceFree;
+                           const GridIndex index, const StartPhase phase) {
+  return view.Source(index) ==
+         (phase == StartPhase::kStartPrefix
+              ? LocalCellSource::kStartAssumedFree
+              : LocalCellSource::kEvidenceFree);
 }
 
-[[nodiscard]] bool HasLineOfSight(const RequestLocalPlanningView& view,
-                                  const PathPoint& from,
-                                  const PathPoint& to,
-                                  const SearchControl* control) {
-  if (Interrupted(control)) {
-    return false;
-  }
-  if (from.phase != to.phase) {
-    return false;
-  }
-  const SparseGridGeometry& geometry = view.geometry();
-  return local::VisitSupercoverCells(
-      geometry, from.pose.position_m, to.pose.position_m,
-      [&](const GridIndex index) {
-        return !Interrupted(control) && Allowed(view, index, from.phase);
-      });
+// Local cell coordinates keep the distance comparison independent of world
+// offsets and resolution. No physical clearance threshold is introduced.
+struct Point {
+  long double x, y;
+};
+struct Segment {
+  Point a, b;
+};
+
+[[nodiscard]] long double PointDistanceSquared(Point p, Segment s) {
+  const long double dx = s.b.x - s.a.x, dy = s.b.y - s.a.y;
+  const long double length = dx * dx + dy * dy;
+  const long double t = length > 0
+      ? std::clamp(((p.x - s.a.x) * dx + (p.y - s.a.y) * dy) / length,
+                   0.0L, 1.0L)
+      : 0;
+  const long double ex = p.x - s.a.x - t * dx;
+  const long double ey = p.y - s.a.y - t * dy;
+  return ex * ex + ey * ey;
 }
 
-[[nodiscard]] bool SameDirectionCollinear(const PathPoint& first,
-                                          const PathPoint& middle,
-                                          const PathPoint& last) noexcept {
-  if (first.phase != middle.phase || middle.phase != last.phase) {
-    return false;
-  }
-  const double first_dx = middle.pose.position_m.x - first.pose.position_m.x;
-  const double first_dy = middle.pose.position_m.y - first.pose.position_m.y;
-  const double second_dx = last.pose.position_m.x - middle.pose.position_m.x;
-  const double second_dy = last.pose.position_m.y - middle.pose.position_m.y;
-  const double first_length_squared =
-      std::fma(first_dx, first_dx, first_dy * first_dy);
-  const double second_length_squared =
-      std::fma(second_dx, second_dx, second_dy * second_dy);
-  if (first_length_squared == 0.0 || second_length_squared == 0.0) {
-    return false;
-  }
-  const double dot = std::fma(first_dx, second_dx, first_dy * second_dy);
-  if (dot <= 0.0) {
-    return false;
-  }
-  const double cross = std::fma(first_dx, second_dy,
-                                -first_dy * second_dx);
-  const double cross_scale =
-      std::abs(first_dx * second_dy) +
-      std::abs(first_dy * second_dx);
-  const double tolerance =
-      64.0 * std::numeric_limits<double>::epsilon() * cross_scale;
-  return std::abs(cross) <= tolerance;
+// LOS has excluded intersections. For disjoint segments, the minimum distance
+// is attained at an endpoint of at least one segment.
+[[nodiscard]] long double DistanceSquared(Segment a, Segment b) {
+  return std::min({PointDistanceSquared(a.a, b), PointDistanceSquared(a.b, b),
+                   PointDistanceSquared(b.a, a), PointDistanceSquared(b.b, a)});
 }
 
-[[nodiscard]] bool CollectPhaseCorners(
-    const std::span<const PathPoint> phase_path,
-    std::vector<PathPoint>& corners, const SearchControl* control) {
-  corners.clear();
-  corners.reserve(phase_path.size());
-  for (const PathPoint& point : phase_path) {
-    if (Interrupted(control)) {
-      corners.clear();
-      return false;
+// Per-call geometry of the current phase's allowed-cell union, including the
+// local-window boundary. This does not modify maps or their source semantics.
+class PhaseGeometry final {
+ public:
+  PhaseGeometry(const RequestLocalPlanningView& view, StartPhase phase,
+                const SearchControl& control)
+      : view_(view), phase_(phase), control_(control) {}
+
+  [[nodiscard]] bool Build() {
+    const auto& geometry = view_.geometry();
+    const auto lo = geometry.min_inclusive();
+    const std::size_t width = geometry.width(), height = geometry.height();
+    std::vector<unsigned char> allowed(geometry.CellCount());
+    for (std::size_t y = 0; y < height; ++y) {
+      if (Interrupted(control_)) return false;
+      for (std::size_t x = 0; x < width; ++x) {
+        allowed[y * width + x] = Allowed(
+            view_, {lo.x + static_cast<std::int64_t>(x),
+                    lo.y + static_cast<std::int64_t>(y)}, phase_);
+      }
     }
-    if (corners.size() >= 2U &&
-        SameDirectionCollinear(corners[corners.size() - 2U], corners.back(),
-                               point)) {
-      corners.back() = point;
+    // Merge consecutive exposed cell faces into exact boundary segments.
+    for (std::size_t y = 0; y <= height; ++y) {
+      if (Interrupted(control_)) return false;
+      std::size_t start = 0;
+      bool active = false;
+      for (std::size_t x = 0; x <= width; ++x) {
+        const bool face = x < width &&
+            ((y > 0 && allowed[(y - 1) * width + x]) !=
+             (y < height && allowed[y * width + x]));
+        if (face && !active) {
+          start = x;
+          active = true;
+        }
+        if (!face && active) {
+          boundary_.push_back(
+              {{static_cast<long double>(start), static_cast<long double>(y)},
+               {static_cast<long double>(x), static_cast<long double>(y)}});
+          active = false;
+        }
+      }
+    }
+    for (std::size_t x = 0; x <= width; ++x) {
+      if (Interrupted(control_)) return false;
+      std::size_t start = 0;
+      bool active = false;
+      for (std::size_t y = 0; y <= height; ++y) {
+        const bool face = y < height &&
+            ((x > 0 && allowed[y * width + x - 1]) !=
+             (x < width && allowed[y * width + x]));
+        if (face && !active) {
+          start = y;
+          active = true;
+        }
+        if (!face && active) {
+          boundary_.push_back(
+              {{static_cast<long double>(x), static_cast<long double>(start)},
+               {static_cast<long double>(x), static_cast<long double>(y)}});
+          active = false;
+        }
+      }
+    }
+    return !Interrupted(control_);
+  }
+
+  [[nodiscard]] bool Legal(const PathPoint& a, const PathPoint& b) const {
+    return local::VisitSupercoverCells(
+        view_.geometry(), a.pose.position_m, b.pose.position_m,
+        [&](GridIndex index) {
+          return !Interrupted(control_) && Allowed(view_, index, phase_);
+        });
+  }
+
+  // Negative means illegal/interrupted. Original and replacement segments use
+  // exactly the same evaluation; there are no shortcut boundary exceptions.
+  [[nodiscard]] long double Evaluate(const PathPoint& a,
+                                     const PathPoint& b) const {
+    if (!Legal(a, b)) return -1;
+    const Segment line{Convert(a.pose.position_m), Convert(b.pose.position_m)};
+    long double minimum = std::numeric_limits<long double>::infinity();
+    for (std::size_t i = 0; i < boundary_.size(); ++i) {
+      if (i % 64 == 0 && Interrupted(control_)) return -1;
+      const auto& edge = boundary_[i];
+      const long double dx = std::max({
+          0.0L, std::min(line.a.x, line.b.x) - std::max(edge.a.x, edge.b.x),
+          std::min(edge.a.x, edge.b.x) - std::max(line.a.x, line.b.x)});
+      const long double dy = std::max({
+          0.0L, std::min(line.a.y, line.b.y) - std::max(edge.a.y, edge.b.y),
+          std::min(edge.a.y, edge.b.y) - std::max(line.a.y, line.b.y)});
+      if (dx * dx + dy * dy < minimum) {
+        minimum = std::min(minimum, DistanceSquared(line, edge));
+      }
+    }
+    return minimum;
+  }
+
+ private:
+  [[nodiscard]] Point Convert(Vec3 p) const {
+    const auto& geometry = view_.geometry();
+    const auto origin = geometry.origin_m();
+    const auto lo = geometry.min_inclusive();
+    return {(static_cast<long double>(p.x) - origin.x) /
+                geometry.resolution_m() - lo.x,
+            (static_cast<long double>(p.y) - origin.y) /
+                geometry.resolution_m() - lo.y};
+  }
+
+  const RequestLocalPlanningView& view_;
+  StartPhase phase_;
+  const SearchControl& control_;
+  std::vector<Segment> boundary_;
+};
+
+[[nodiscard]] bool SameDirection(const PathPoint& a, const PathPoint& b,
+                                 const PathPoint& c) {
+  const long double dx = static_cast<long double>(b.pose.position_m.x) - a.pose.position_m.x;
+  const long double dy = static_cast<long double>(b.pose.position_m.y) - a.pose.position_m.y;
+  const long double ex = static_cast<long double>(c.pose.position_m.x) - b.pose.position_m.x;
+  const long double ey = static_cast<long double>(c.pose.position_m.y) - b.pose.position_m.y;
+  // Exact same-direction collinearity changes sampling, not geometry.
+  return dx * ey == dy * ex && dx * ex + dy * ey > 0;
+}
+
+[[nodiscard]] bool SimplifyPhase(
+    const RequestLocalPlanningView& view, std::span<const PathPoint> raw,
+    std::vector<PathPoint>& output, const SearchControl& control) {
+  std::vector<PathPoint> path;
+  path.reserve(raw.size());
+  for (const auto& point : raw) {
+    if (Interrupted(control)) return false;
+    if (path.size() >= 2 &&
+        SameDirection(path[path.size() - 2], path.back(), point)) {
+      path.back() = point;
     } else {
-      corners.push_back(point);
+      path.push_back(point);
     }
   }
-  return true;
-}
-
-[[nodiscard]] bool AdjacentEdgesAreCertified(
-    const RequestLocalPlanningView& view,
-    const std::span<const PathPoint> path, const SearchControl* control) {
-  for (std::size_t index = 1U; index < path.size(); ++index) {
-    if (!HasLineOfSight(view, path[index - 1U], path[index], control)) {
-      return false;
-    }
-  }
-  return true;
-}
-
-[[nodiscard]] bool SimplifyOnePhase(
-    const RequestLocalPlanningView& view,
-    const std::span<const PathPoint> phase_path,
-    std::vector<PathPoint>& output, const SearchControl* control) {
-  if (phase_path.empty()) {
+  PhaseGeometry geometry(view, raw.front().phase, control);
+  if (path.size() < 3) {
+    if (path.size() == 2 && !geometry.Legal(path[0], path[1])) return false;
+    output.insert(output.end(), path.begin(), path.end());
     return true;
   }
-  std::vector<PathPoint> corners;
-  if (!CollectPhaseCorners(phase_path, corners, control)) {
-    return false;
+  if (!geometry.Build()) return false;
+  std::vector<long double> clearance(path.size() - 1), minimum(path.size());
+  for (std::size_t i = 0; i < clearance.size(); ++i) {
+    clearance[i] = geometry.Evaluate(path[i], path[i + 1]);
+    if (clearance[i] < 0) return false;
   }
-  std::span<const PathPoint> candidate_path(corners);
-  if (!AdjacentEdgesAreCertified(view, candidate_path, control)) {
-    if (Interrupted(control)) {
-      return false;
+  output.push_back(path.front());
+  std::size_t anchor = 0;
+  while (anchor + 1 < path.size()) {
+    if (Interrupted(control)) return false;
+    minimum[anchor] = std::numeric_limits<long double>::infinity();
+    for (std::size_t j = anchor + 1; j < path.size(); ++j) {
+      minimum[j] = std::min(minimum[j - 1], clearance[j - 1]);
     }
-    candidate_path = phase_path;
-    if (!AdjacentEdgesAreCertified(view, candidate_path, control)) {
-      return false;
-    }
-  }
-  if (output.empty() ||
-      output.back().pose != candidate_path.front().pose ||
-      output.back().phase != candidate_path.front().phase) {
-    output.push_back(candidate_path.front());
-  }
-  std::size_t anchor = 0U;
-  while (anchor + 1U < candidate_path.size()) {
-    if (Interrupted(control)) {
-      return false;
-    }
-    std::size_t selected = anchor + 1U;
-    for (std::size_t candidate = candidate_path.size() - 1U;
-         candidate > anchor + 1U; --candidate) {
-      if (HasLineOfSight(view, candidate_path[anchor], candidate_path[candidate],
-                         control)) {
-        selected = candidate;
+    std::size_t selected = anchor + 1;
+    for (std::size_t j = path.size() - 1; j > anchor + 1; --j) {
+      const long double candidate = geometry.Evaluate(path[anchor], path[j]);
+      if (Interrupted(control)) return false;
+      // Numerical roundoff in squared cell units, not a physical margin.
+      // Reference values always come from the original geometry, so repeated
+      // shortcuts cannot accumulate a sequence of tolerance relaxations.
+      const long double tolerance = 64 * std::numeric_limits<double>::epsilon() *
+                                    std::max(1.0L, minimum[j]);
+      if (candidate >= 0 && candidate + tolerance >= minimum[j]) {
+        selected = j;
         break;
       }
-      if (Interrupted(control)) {
-        return false;
-      }
     }
-    output.push_back(candidate_path[selected]);
+    output.push_back(path[selected]);
     anchor = selected;
   }
   return true;
@@ -157,42 +230,28 @@ namespace {
 }  // namespace
 
 std::vector<PathPoint> SimplifyPhaseAwarePath(
-    const RequestLocalPlanningView& view,
-    const std::span<const PathPoint> raw_path,
+    const RequestLocalPlanningView& view, std::span<const PathPoint> raw,
     const SearchControl& control) {
-  if (Interrupted(&control)) {
-    return {};
-  }
-  if (raw_path.size() < 3U) {
-    return {raw_path.begin(), raw_path.end()};
-  }
-  std::vector<PathPoint> simplified;
-  simplified.reserve(raw_path.size());
-  std::size_t begin = 0U;
-  while (begin < raw_path.size()) {
-    if (Interrupted(&control)) {
-      return {};
-    }
-    std::size_t end = begin + 1U;
-    while (end < raw_path.size() &&
-           raw_path[end].phase == raw_path[begin].phase) {
-      ++end;
-    }
-    if (!SimplifyOnePhase(view, raw_path.subspan(begin, end - begin),
-                          simplified, &control)) {
+  if (Interrupted(control)) return {};
+  if (raw.size() < 3) return {raw.begin(), raw.end()};
+  std::vector<PathPoint> output;
+  output.reserve(raw.size());
+  for (std::size_t begin = 0; begin < raw.size();) {
+    if (Interrupted(control)) return {};
+    std::size_t end = begin + 1;
+    while (end < raw.size() && raw[end].phase == raw[begin].phase) ++end;
+    if (!SimplifyPhase(view, raw.subspan(begin, end - begin), output, control)) {
       return {};
     }
     begin = end;
   }
-  return simplified;
+  return output;
 }
 
 std::vector<PathPoint> SimplifyPhaseAwarePath(
-    const RequestLocalPlanningView& view,
-    const std::span<const PathPoint> raw_path) {
+    const RequestLocalPlanningView& view, std::span<const PathPoint> raw) {
   return SimplifyPhaseAwarePath(
-      view, raw_path,
-      SearchControl{.deadline = SteadyClock::time_point::max()});
+      view, raw, SearchControl{.deadline = SteadyClock::time_point::max()});
 }
 
 }  // namespace lunar::incremental_navigation
