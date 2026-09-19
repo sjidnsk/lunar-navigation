@@ -784,6 +784,30 @@ TEST(IncrementalNavigationNode, StartupParametersRequireRestart) {
   EXPECT_EQ(server->get_parameter("map_frame").as_string(), "map");
 }
 
+TEST(IncrementalNavigationNode, ClearanceCostHasCalibratedDefaultAndStartupOverride) {
+  auto defaults = std::make_shared<IncrementalNavigationNode>(
+      ServerOptions("clearance_default"), IncrementalNavigationNodeDependencies{});
+  ASSERT_TRUE(defaults->has_parameter("clearance_weight"));
+  EXPECT_DOUBLE_EQ(defaults->get_parameter("clearance_weight").as_double(), 2.0);
+  auto options = ServerOptions("clearance_override");
+  options.append_parameter_override("clearance_weight", 0.0);
+  auto disabled = std::make_shared<IncrementalNavigationNode>(
+      options, IncrementalNavigationNodeDependencies{});
+  EXPECT_DOUBLE_EQ(disabled->get_parameter("clearance_weight").as_double(), 0.0);
+  EXPECT_FALSE(disabled->set_parameters_atomically(
+      {rclcpp::Parameter("clearance_weight", 2.0)}).successful);
+}
+
+TEST(IncrementalNavigationNode, ClearanceWeightMustBeFiniteAndNonnegative) {
+  for (const double weight : {-1.0, std::numeric_limits<double>::infinity(),
+                               std::numeric_limits<double>::quiet_NaN()}) {
+    auto options = ServerOptions("clearance_invalid");
+    options.append_parameter_override("clearance_weight", weight);
+    EXPECT_THROW(std::make_shared<IncrementalNavigationNode>(
+        options, IncrementalNavigationNodeDependencies{}), std::runtime_error);
+  }
+}
+
 TEST(IncrementalNavigationNode, RejectsUnsupportedLocalMapQosParameters) {
   auto options = ServerOptions("invalid_map_qos");
   options.append_parameter_override("local_map_qos_durability", "volatilee");
@@ -1009,7 +1033,7 @@ TEST(IncrementalNavigationNode, GoalTolerancesAreFrozenPerPlatformProfile) {
   EXPECT_DOUBLE_EQ(legged.start_blind_zone_margin_m, 0.6);
   EXPECT_DOUBLE_EQ(wheel.preferred_clearance_m, 0.2);
   EXPECT_DOUBLE_EQ(legged.preferred_clearance_m, 0.3);
-  EXPECT_DOUBLE_EQ(wheel.clearance_weight, 0.0);
+  EXPECT_DOUBLE_EQ(wheel.clearance_weight, 2.0);
   EXPECT_DOUBLE_EQ(legged.clearance_weight, 0.0);
 }
 
