@@ -146,6 +146,12 @@ ros2 launch lunar_pure_exploration_ros exploration_navigation.launch.py \
 当前 fine resolution 下超出该容量，导航周期以 `LOCAL_WINDOW_CAPACITY_EXCEEDED` 明确结束，不会把物理
 窗口静默缩短。
 
+轮式 `incremental_v2` 默认启用净空软代价，`clearance_weight=2.0`（足式仍为 `0.0`）。
+可在 `config/exploration_navigation.yaml` 的 `navigation` 下设置 `clearance_weight`；
+`0.0` 关闭该偏好，参数在启动时读取，修改后需重启导航节点。净空作用范围沿用平台的
+`minimum_clearance_m`，轮式当前为 `0.2 m`；它是路径偏好，不是新增的硬性禁入距离。
+标定方法和结果见 [净空权重实验](docs/validation/2026-09-19-clearance-cost-calibration.md)。
+
 导航进程拥有唯一的 `PersistentElevationMap` 和由其派生的 fine snapshot。它从同一 fine snapshot
 发布 `/Car/T4/mapping/exploration_map`（`nav_msgs/msg/OccupancyGrid`）：`-1=UNKNOWN`、
 `0=FREE/CANDIDATE`、`100=PROVEN_BLOCKED`，QoS 固定为 Reliable、Transient Local、KeepLast(1)。
