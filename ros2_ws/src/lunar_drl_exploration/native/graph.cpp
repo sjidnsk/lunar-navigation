@@ -44,12 +44,13 @@ PyObject* distances(PyObject*,PyObject* args){
  Py_RETURN_NONE;}catch(const std::exception&e){return error(e);}
 }
 PyObject* cover(PyObject*,PyObject* args){
- PyObject *m,*s;double r,bound;if(!PyArg_ParseTuple(args,"OdOd",&m,&r,&s,&bound))return nullptr;
- try{Buffer mb(m,"?",2),sb(s,"l",2);std::vector<int> nodes;
+ PyObject *m,*s,*o;double r,bound;if(!PyArg_ParseTuple(args,"OdOdO",&m,&r,&s,&bound,&o))return nullptr;
+ try{Buffer mb(m,"?",2),sb(s,"l",2),ob(o,"l",2);std::vector<int> nodes;
+ if(sb.view.shape[1]!=2||ob.view.shape[1]!=2)throw std::invalid_argument("cover cells require x/y pairs");
  {ReleasedGIL release;Grid g(mb,r);std::vector<bool> covered(g.w*g.h,false),selected(g.w*g.h,false);
  auto add=[&](int p){if(p<0||selected[p])return;selected[p]=true;nodes.push_back(p);g.run({{p,0.}},bound);for(int n:g.touched)covered[n]=true;};
  for(int i=0;i<sb.view.shape[0];++i)add(g.index(sb.data<std::int64_t>()+2*i));
- for(int y=0;y<g.h;++y)for(int x=0;x<g.w;++x){int p=y*g.w+x;if(g.m[p]&&!covered[p])add(p);}}
+ for(int i=0;i<ob.view.shape[0];++i){int p=g.index(ob.data<std::int64_t>()+2*i);if(p>=0&&!covered[p])add(p);}}
  PyObject* list=PyList_New(nodes.size());int w=mb.view.shape[1];for(size_t i=0;i<nodes.size();++i)PyList_SET_ITEM(list,i,Py_BuildValue("(ii)",nodes[i]%w,nodes[i]/w));return list;
  }catch(const std::exception&e){return error(e);}
 }

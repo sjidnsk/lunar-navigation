@@ -64,7 +64,7 @@ class GraphBuilder:
         shift = np.array(w.bounds[:2])
         origin = np.asarray(w.origin)
         resolution = snapshot.resolution_m
-        metric = MetricGrid(w.reachable, resolution)
+        metric = MetricGrid(w.reachable, resolution, navigation_free=w.navigation == 1)
         retained = np.rint((self._base_points-origin)/resolution-.5).astype(np.int64)
         base = metric.cover(retained, self.config.coverage_radius_m)
         self._base_points = (base+.5)*resolution+origin

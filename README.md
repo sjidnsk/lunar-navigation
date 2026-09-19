@@ -12,6 +12,7 @@
 [操作指令的 DRL 章节](docs/操作指令.md#drl-稀疏图探索独立-redesign-分支)开训、恢复、评估、导出和挂接推理。
 默认预热 1024、有效 batch 64、30 倍目标、0.2 m/s；已测短程 GPU 闭环不代表训练收敛或 Orin/实车就绪。
 2026-09-19 已接入[路径尺度决策图与候选对应 Critic](docs/validation/2026-09-19-drl-graph-critic-implementation.md)。
+后续采用[净空优先基础选点与单线C=0训练基线](docs/validation/2026-09-19-drl-clearance-baseline.md)，入口为 `scripts/drl/baseline.sh`。
 新输出目录为 `training-output/drl-metric-critic/`（固定小场景为 `drl-metric-critic-small/`），旧完整检查点不兼容，旧产物保留。
 
 `lunar_pure_planner_ros` 是独立的普通 ROS 2 节点，不使用 Lifecycle manager，也不启动旧规划器。

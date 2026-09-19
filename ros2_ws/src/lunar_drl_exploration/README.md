@@ -4,6 +4,8 @@
 # DRL exploration contracts and offline terrain
 
 当前统一开发、构建、实验与历史版本边界见[强化学习开发入口](../../../docs/DRL开发入口.md)。
+基础节点现已采用净空优先B版；距离场仅使用观测导航地图。完整恢复语义包含 `clearance_desc_yx_v1`，
+旧行列顺序经验不自动续训。当前单线基线及证据见[采用记录](../../../docs/validation/2026-09-19-drl-clearance-baseline.md)。
 
 The deployed policy reads native policy-map exports. Offline terrain construction
 is explicitly separate: importing `contracts`, `config`, `geometry` or `sensor`

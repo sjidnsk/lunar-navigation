@@ -68,52 +68,7 @@ def experiment_config(seed, arm, output):
         curriculum_budgets=(512, 2048, 8192), output_dir=str(output))
 
 
-class GeometryMetrics:
-    """Fixed 0.5 m world cells, independent of changing graph node identities."""
-    def __init__(self, xy, tolerance_m=.05):
-        self.tolerance_m = tolerance_m
-        self.pose_history = [tuple(map(float, xy[:2]))]
-        self.two_point_steps = 0
-        self.previous = self.cell(xy)
-        self.seen = {self.previous}
-        self.last_edge = None
-        self.steps = self.revisits = self.reversals = self.stationary = 0
-        self.zero_run = self.max_zero_run = 0
-
-    @staticmethod
-    def cell(xy):
-        import math
-        return tuple(math.floor(float(v) / .5) for v in xy[:2])
-
-    def observe(self, xy, gain):
-        current = self.cell(xy)
-        self.steps += 1
-        if gain > 0:
-            self.pose_history.clear()
-        self.pose_history.append(tuple(map(float, xy[:2])))
-        del self.pose_history[:-5]
-        if len(self.pose_history) == 5:
-            import math
-            a, b, c, d, e = self.pose_history
-            if (math.dist(a, b) > self.tolerance_m and
-                    max(math.dist(a, c), math.dist(a, e), math.dist(b, d)) <= self.tolerance_m):
-                self.two_point_steps += 1
-        self.revisits += current in self.seen
-        self.stationary += current == self.previous
-        if current != self.previous:
-            edge = (self.previous, current)
-            self.reversals += self.last_edge == (current, self.previous)
-            self.last_edge = edge
-        self.seen.add(current)
-        self.previous = current
-        self.zero_run = self.zero_run + 1 if gain <= 0 else 0
-        self.max_zero_run = max(self.max_zero_run, self.zero_run)
-
-    def record(self):
-        return dict(geometric_cell_m=.5, two_point_tolerance_m=self.tolerance_m,
-            zero_gain_two_point_loop_steps=self.two_point_steps, reverse_edge_count=self.reversals,
-            stationary_decisions=self.stationary, max_zero_gain_run=self.max_zero_run,
-            revisit_ratio=self.revisits / self.steps if self.steps else 0.)
+from .evaluation import GeometryMetrics
 
 
 def evaluate_stage(config, actor, phase, domain_base):

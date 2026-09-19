@@ -11,9 +11,30 @@ def _cells(cells):
     return np.ascontiguousarray(cells, dtype=np.int64).reshape(-1, 2)
 
 
+def clearance_order(reachable, navigation_free):
+    """Reachable cells ordered by measured navigation clearance, then y/x.
+
+    Only the FREE bounding box needs an EDT: everything outside is non-FREE.
+    One padded non-FREE ring also represents the edge of the provided map.
+    Distances are to non-FREE cell centers, not physical body-to-wall gaps.
+    """
+    from scipy.ndimage import distance_transform_edt
+    cells = np.argwhere(reachable)[:, ::-1].copy()
+    if not len(cells):
+        return _cells(cells)
+    ys = np.flatnonzero(navigation_free.any(axis=1))
+    xs = np.flatnonzero(navigation_free.any(axis=0))
+    x0, x1 = xs[0], xs[-1] + 1
+    y0, y1 = ys[0], ys[-1] + 1
+    field = distance_transform_edt(np.pad(navigation_free[y0:y1, x0:x1], 1))[1:-1, 1:-1]
+    values = field[cells[:, 1] - y0, cells[:, 0] - x0]
+    return _cells(cells[np.lexsort((cells[:, 0], cells[:, 1], -values))])
+
+
 class MetricGrid:
-    def __init__(self, mask, resolution):
+    def __init__(self, mask, resolution, navigation_free=None):
         self.mask = np.ascontiguousarray(mask, dtype=bool)
+        self.navigation_free = self.mask if navigation_free is None else navigation_free
         self.resolution = float(resolution)
         if self.mask.ndim != 2 or not np.isfinite(resolution) or resolution <= 0:
             raise ValueError('finite positive resolution and 2D mask required')
@@ -21,7 +42,8 @@ class MetricGrid:
     def cover(self, retained_cells=(), radius=2.):
         if not np.isfinite(radius) or radius <= 0:
             raise ValueError('positive finite cover radius required')
-        return _cells(native.cover(self.mask, self.resolution, _cells(retained_cells), radius))
+        order = clearance_order(self.mask, self.navigation_free)
+        return _cells(native.cover(self.mask, self.resolution, _cells(retained_cells), radius, order))
 
     def distances(self, starts, start_costs, bound, target_cells):
         starts, targets = _cells(starts), _cells(target_cells)

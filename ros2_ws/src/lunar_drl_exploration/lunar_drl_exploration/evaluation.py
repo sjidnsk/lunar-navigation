@@ -4,6 +4,54 @@ import json
 from pathlib import Path
 
 
+class GeometryMetrics:
+    """Fixed 0.5 m world cells, independent of changing graph node identities."""
+    def __init__(self, xy, tolerance_m=.05):
+        self.tolerance_m = tolerance_m
+        self.pose_history = [tuple(map(float, xy[:2]))]
+        self.two_point_steps = 0
+        self.previous = self.cell(xy)
+        self.seen = {self.previous}
+        self.last_edge = None
+        self.steps = self.revisits = self.reversals = self.stationary = 0
+        self.zero_run = self.max_zero_run = 0
+
+    @staticmethod
+    def cell(xy):
+        import math
+        return tuple(math.floor(float(v) / .5) for v in xy[:2])
+
+    def observe(self, xy, gain):
+        current = self.cell(xy)
+        self.steps += 1
+        if gain > 0:
+            self.pose_history.clear()
+        self.pose_history.append(tuple(map(float, xy[:2])))
+        del self.pose_history[:-5]
+        if len(self.pose_history) == 5:
+            import math
+            a, b, c, d, e = self.pose_history
+            if (math.dist(a, b) > self.tolerance_m and
+                    max(math.dist(a, c), math.dist(a, e), math.dist(b, d)) <= self.tolerance_m):
+                self.two_point_steps += 1
+        self.revisits += current in self.seen
+        self.stationary += current == self.previous
+        if current != self.previous:
+            edge = (self.previous, current)
+            self.reversals += self.last_edge == (current, self.previous)
+            self.last_edge = edge
+        self.seen.add(current)
+        self.previous = current
+        self.zero_run = self.zero_run + 1 if gain <= 0 else 0
+        self.max_zero_run = max(self.max_zero_run, self.zero_run)
+
+    def record(self):
+        return dict(geometric_cell_m=.5, two_point_tolerance_m=self.tolerance_m,
+            zero_gain_two_point_loop_steps=self.two_point_steps, reverse_edge_count=self.reversals,
+            stationary_decisions=self.stationary, max_zero_gain_run=self.max_zero_run,
+            revisit_ratio=self.revisits / self.steps if self.steps else 0.)
+
+
 class EpisodeMetrics:
     def __init__(self, family, extent, seed):
         self.family, self.extent, self.seed = family, extent, seed
@@ -73,8 +121,10 @@ def evaluate(config, actor_path, *, seeds, families, extents, budget, output=Non
             for extent in extents:
                 for seed in seeds:
                     metric = EpisodeMetrics(family, extent, seed)
+                    geometry = None
                     try:
                         obs, state = env.reset(seed, family, extent, episode_budget=budget)
+                        geometry = GeometryMetrics(obs.positions[obs.current_index], config.goal_position_tolerance_m)
                         progress = env.progress()
                         metric.observe(env.reference.coverage_ratio(state.observed),
                             progress['distance_m'], 0., 'INITIAL', env.report.exhausted, False,
@@ -82,6 +132,8 @@ def evaluate(config, actor_path, *, seeds, families, extents, budget, output=Non
                             coverable_area_m2=env.reference.area_m2)
                         while not metric.exhausted and not metric.truncated and not metric.collisions:
                             transition = env.step(policy(obs))
+                            next_obs = transition.next_observation
+                            geometry.observe(next_obs.positions[next_obs.current_index], transition.parts.new_area_m2)
                             execution = env.last_execution
                             metric.observe(env.reference.coverage_ratio(transition.next_privileged.observed),
                                 env.progress()['distance_m'], transition.parts.new_area_m2,
@@ -92,7 +144,10 @@ def evaluate(config, actor_path, *, seeds, families, extents, budget, output=Non
                     except Exception as exc:
                         metric.error = f'{type(exc).__name__}: {exc}'
                     finally: env.close()
-                    rows.append(metric.record())
+                    row = metric.record()
+                    row.update(geometry.record() if geometry else dict(geometric_metrics_unavailable=True,
+                        max_zero_gain_run=0, zero_gain_two_point_loop_steps=0))
+                    rows.append(row)
                     print(json.dumps(rows[-1], ensure_ascii=False, allow_nan=False), flush=True)
     finally: env.close()
     result = dict(actor=str(Path(actor_path).resolve()), policy='frozen_joint_argmax',

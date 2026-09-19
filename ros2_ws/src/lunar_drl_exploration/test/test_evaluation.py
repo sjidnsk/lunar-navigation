@@ -74,6 +74,10 @@ def test_frozen_evaluation_json_keeps_reference_areas_and_failure_measurements(t
     assert rows[3]['exhausted'] and not rows[3]['reached_99']
     assert [row['error'] is not None for row in rows] == [False, False, True, False, True, True]
     assert [seed for seed, _ in actions] == [0, 1, 2, 2, 5]
+    assert rows[0]['max_zero_gain_run'] == 1
+    assert rows[0]['stationary_decisions'] == 1
+    assert rows[0]['zero_gain_two_point_loop_steps'] == 0
+    assert rows[4]['geometric_metrics_unavailable']
     assert saved['sensor'] == asdict(sensor)
     restored = torch.load(artifact, weights_only=False)
     for key, value in restored['state_dict'].items():

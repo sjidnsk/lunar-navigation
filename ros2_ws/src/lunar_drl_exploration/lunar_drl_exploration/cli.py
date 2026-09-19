@@ -45,8 +45,10 @@ def load_config(args):
     from .config import TrainingConfig, config_record, training_config_from_record
     config = TrainingConfig()
     if args.config:
+        import json
         import yaml
-        loaded = yaml.safe_load(args.config.read_text(encoding='utf-8'))
+        text = args.config.read_text(encoding='utf-8')
+        loaded = json.loads(text) if args.config.suffix == '.json' else yaml.safe_load(text)
         record = config_record(config)
         for key, value in loaded.items():
             if key not in record: raise ValueError('unknown training setting: ' + key)

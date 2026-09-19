@@ -8,7 +8,8 @@ def test_full_resume_identifies_new_geometry_and_privileged_contract():
     assert semantics['observation_schema']=='task_graph_v3'
     assert semantics['action_schema']=='local_metric_pose_v3'
     assert semantics['privileged_schema']=='candidate_truth_v1'
-    assert semantics['graph_geometry']=={'coverage_radius_m':2.,'connection_limit_m':8.,'stretch':1.2}
+    assert semantics['graph_geometry']=={'coverage_radius_m':2.,'connection_limit_m':8.,'stretch':1.2,
+        'base_order':'clearance_desc_yx_v1'}
 
 
 def test_actor_only_version_rejects_legacy_despite_unchanged_weight_shapes(tmp_path):
