@@ -90,6 +90,26 @@ class TaskReport:
     revision: int
     available: bool = True
     reason_code: str = "READY"
+    remaining_area_upper_m2: float | None = None
+    coverage_target: float = 1.0
+
+    @property
+    def coverage_lower_bound(self):
+        if not self.available or self.remaining_area_upper_m2 is None:
+            return None
+        total=self.known_area_m2+self.remaining_area_upper_m2
+        return self.known_area_m2/total if total>0 else None
+
+    @property
+    def completed(self):
+        """Normal task end by the target bound or proved exhaustion.
+
+        An empty observable task may be exhausted with an undefined percentage;
+        completed does not claim that such a task achieved a numeric target.
+        """
+        lower=self.coverage_lower_bound
+        return self.available and (self.exhausted or
+            (lower is not None and lower>=self.coverage_target))
 
     def __post_init__(self):
         object.__setattr__(self, "frontier_cells",

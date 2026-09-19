@@ -9,10 +9,10 @@ from .task_analysis import TaskAnalyzer
 
 
 class DecisionCore:
-    def __init__(self, task, sensor, config=None):
+    def __init__(self, task, sensor, config=None, *, coverage_target=1.0):
         self.config = config or GraphConfig()
         self.task, self.sensor = task, sensor
-        self.analyzer = TaskAnalyzer(task, sensor)
+        self.analyzer = TaskAnalyzer(task, sensor,coverage_target=coverage_target)
         self.builder = GraphBuilder(self.config)
         self.history = DirectionHistory(self.config.history_tolerance_m)
         self._epoch = None
@@ -39,7 +39,7 @@ class DecisionCore:
         observation = self.builder.build(
             snapshot, report, self.history, self.task, self.sensor, velocity
         )
-        if len(self.builder.unrepresented_interfaces):
+        if len(self.builder.unrepresented_interfaces) and not report.completed:
             report = replace(report, available=False, exhausted=False,
                              reason_code="UNREPRESENTED_TASK_INTERFACES")
         return observation, report

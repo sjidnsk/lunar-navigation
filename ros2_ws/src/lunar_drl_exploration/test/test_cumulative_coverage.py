@@ -82,7 +82,7 @@ def test_training_projection_inference_pause_epoch_and_new_task_agree():
             initial_observation=observation;initial_privileged=env._privileged()
             initial_area=env._known_area
     transition=make_transition(initial_observation,0,observation,initial_privileged,env._privileged(),
-        initial=(initial_area,0.,0.),final=(env._known_area,2.,.5),exhausted=False,
+        initial=(initial_area,0.,0.),final=(env._known_area,2.,.5),completed=False,
         budget_hit=False,episode_id="coverage_fixture",actor_version=7)
     assert transition.parts.new_area_m2==0
     assert transition.reward==pytest.approx(-.02*2/10-.005*.5/np.pi-.001)

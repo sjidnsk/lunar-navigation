@@ -42,14 +42,14 @@ class ExecutionMetadata:
 
 
 def make_transition(observation,action,next_observation,privileged,next_privileged,*,
-                    initial,final,exhausted,budget_hit,episode_id,actor_version):
+                    initial,final,completed,budget_hit,episode_id,actor_version):
     area,distance,turn=(float(b-a) for a,b in zip(initial,final))
     if area < -1e-8 or distance < -1e-8 or turn < -1e-8:
         raise InfrastructureError('nonmonotonic whole-action accounting')
     parts=RewardParts(area,distance,turn)
     reward=area/100.-.02*distance/10.-.005*turn/math.pi-.001
     return Transition(observation,action,reward,next_observation,privileged,next_privileged,
-        parts,bool(exhausted),bool(budget_hit and not exhausted),episode_id,int(actor_version))
+        parts,bool(completed),bool(budget_hit and not completed),episode_id,int(actor_version))
 
 
 class RosExplorationEnv:
@@ -90,10 +90,12 @@ class RosExplorationEnv:
         self.privileged_builder=PrivilegedBuilder(terrain,static,task,self.config.sensor,
             GraphConfig(platform=self.config.platform))
         self.static_scenes={static.scene_id:static}
-        self.core=DecisionCore(task,self.config.sensor,GraphConfig(platform=self.config.platform))
+        self.core=DecisionCore(task,self.config.sensor,GraphConfig(platform=self.config.platform),
+                               coverage_target=self.config.coverage_target)
         self.core.history.tolerance_m=self.config.goal_position_tolerance_m
         self.buffer=MeasurementBuffer(terrain.origin,terrain.resolution_m)
         self._cancel.clear();self._closed=False;self.steps=0;self.last_execution=None
+        self.report=None
         self.episode_id=uuid.uuid4().hex
         self._sim_ns=1_000_000_000;self._last_sensor_ns=0;self._latest_sensor_ns=0
         self._command=(0.,0.);self._next_tick=time.monotonic()
@@ -281,7 +283,7 @@ class RosExplorationEnv:
 
     def step(self,action_index,*,actor_version=None):
         if self._closed or self._step_active:raise RuntimeError('environment is closed or already stepping')
-        if self.report.exhausted or self.steps>=self.episode_budget:raise RuntimeError('episode requires reset')
+        if self.report.completed or self.steps>=self.episode_budget:raise RuntimeError('episode requires reset')
         if self.plant.collision:raise GeometryFailure('collision episode requires reset')
         if not 0<=int(action_index)<len(self.observation.goals):raise ValueError('action outside frozen observation')
         action_index=int(action_index);goal=tuple(self.observation.goals[action_index])
@@ -298,7 +300,7 @@ class RosExplorationEnv:
             next_privileged=self._privileged(next_observation);self.steps+=1
             final=(self._known_area,self.plant.distance_m,self.plant.turn_rad)
             transition=make_transition(observation,action_index,next_observation,privileged,next_privileged,
-                initial=before,final=final,exhausted=report.exhausted,budget_hit=self.steps>=self.episode_budget,
+                initial=before,final=final,completed=report.completed,budget_hit=self.steps>=self.episode_budget,
                 episode_id=self.episode_id,actor_version=version)
             p=self.plant.pose
             self.last_execution=ExecutionMetadata(goal,result.outcome,result.reason_code,result.last_segment_revision,
@@ -312,11 +314,16 @@ class RosExplorationEnv:
     def progress(self):
         """Cheap snapshot only: never advances TaskAnalyzer's reward baseline."""
         if self._closed:return {'state':'CLOSED','owned_pids':self.owned_pids}
+        report=getattr(self,'report',None)
         return {'state':'EXECUTING' if self._step_active else 'READY','episode_id':self.episode_id,
             'steps':self.steps,'known_area_m2':self._known_area,'distance_m':self.plant.distance_m,
             'turn_rad':self.plant.turn_rad,'simulation_s':self.plant.simulation_s,
             'wall_s':time.monotonic()-self._start_wall,'sensor_frames':self._sensor_count,
-            'max_command_speed_mps':self._max_command_speed,'owned_pids':self.owned_pids}
+            'max_command_speed_mps':self._max_command_speed,'owned_pids':self.owned_pids,
+            'completed':None if report is None else report.completed,
+            'exhausted':None if report is None else report.exhausted,
+            'remaining_area_upper_m2':None if report is None else report.remaining_area_upper_m2,
+            'coverage_lower_bound':None if report is None else report.coverage_lower_bound}
 
     def cancel(self):
         """Thread-safe request; active step owns ROS cancel-and-stop pumping."""

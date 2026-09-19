@@ -93,3 +93,6 @@ scripts/drl/baseline.sh --resume
 ## 验证记录
 
 本次重新执行的构建和测试见[整合验证](validation/2026-09-19-drl-development-consolidation.md)。算法单元测试和本机 Jazzy 闭环不能证明长期收敛、两节点循环已消除、Humble/Orin 或实车可用。
+
+2026-09-20 的[覆盖完成判据试验](validation/2026-09-20-coverage-completion.md)位于
+`test/drl-coverage-completion`，尚未合入或采用。它实现测量侧覆盖下界，但固定月表/洞穴的剩余需求估计仍偏保守；正式开发和训练入口继续使用本文件上方的开发线。

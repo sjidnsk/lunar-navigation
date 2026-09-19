@@ -5,7 +5,7 @@ storage exterior is a single unbounded UNKNOWN component. Component membership
 is not a claim that an unknown viewpoint is executable.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 import numpy as np
 from scipy.ndimage import binary_dilation, label, maximum_filter
@@ -13,6 +13,7 @@ from .contracts import TaskReport
 from .coverage import CoverageHistory
 from .geometry import polygon_mask, world_to_cell
 from .maps import FREE, BLOCKED, UNKNOWN
+from .remaining import remaining_demands
 from .sensor import (
     direct_witnesses,
     first_pending_cells,
@@ -111,18 +112,23 @@ def _xy(mask):
 
 
 class TaskAnalyzer:
-    def __init__(self, task, sensor):
+    def __init__(self, task, sensor, *, coverage_target=1.0):
         validate_sensor(sensor)
+        if not math.isfinite(coverage_target) or not 0<coverage_target<=1:
+            raise ValueError('coverage target must be in (0,1]')
+        self.coverage_target=float(coverage_target)
         self.task, self.sensor = task, sensor
         self._epoch = None
         self._known_area = 0.0
         self.workspace = None
+        self.remaining_mask = None
         self.coverage = CoverageHistory(task)
 
     def update(self, snapshot):
         self.coverage.consume(snapshot)
         w = measured_workspace(snapshot, self.task, self.sensor, self.coverage)
         self.workspace = w
+        self.remaining_mask = None
         area = self.coverage.known_area_m2
         previous = self._known_area if self._epoch == self.coverage.identity else 0.0
         self._epoch, self._known_area = self.coverage.identity, area
@@ -137,11 +143,14 @@ class TaskAnalyzer:
                 snapshot.revision,
                 False,
                 "INPUT_UNAVAILABLE",
+                coverage_target=self.coverage_target,
             )
         pending = w.task_mask & ~w.known
         if not pending.any():
+            self.remaining_mask = pending
             return TaskReport(
-                area, max(0.0, area - previous), empty, empty, True, snapshot.revision
+                area, max(0.0, area - previous), empty, empty, True, snapshot.revision,
+                remaining_area_upper_m2=0.0,coverage_target=self.coverage_target,
             )
         potential = (w.navigation != BLOCKED) & ~w.reachable
         components, count = label(potential, CROSS)
@@ -156,9 +165,6 @@ class TaskAnalyzer:
         if len(exterior):
             remap[exterior] = exterior[0]
         components = remap[components]
-        relevant = np.zeros(count + 1, bool)
-        relevant[np.unique(components[pending])] = True
-        relevant[0] = False
         radius = self.sensor.range_m / snapshot.resolution_m
         d = math.ceil(radius)
         # Most demands seed their movement component. Extra potential stances
@@ -170,6 +176,18 @@ class TaskAnalyzer:
         has_entry = np.zeros(count + 1, bool)
         has_entry[np.unique(components[entry])] = True
         has_entry[0] = False
+        possible_stances = w.reachable | (potential & has_entry[components])
+        pending = remaining_demands(w.intrinsic,pending,possible_stances,radius)
+        self.remaining_mask = pending
+        remaining_area = int(np.count_nonzero(pending))*snapshot.resolution_m**2
+        if not pending.any():
+            return TaskReport(
+                area,max(0.0,area-previous),empty,empty,True,snapshot.revision,
+                remaining_area_upper_m2=0.0,coverage_target=self.coverage_target,
+            )
+        relevant = np.zeros(count + 1, bool)
+        relevant[np.unique(components[pending])] = True
+        relevant[0] = False
         other = potential & has_entry[components] & ~relevant[components]
         near_other = maximum_filter(other, size=2 * d + 1, mode="constant", cval=0)
         near_r = maximum_filter(w.reachable, size=2 * d + 1, mode="constant", cval=0)
@@ -274,14 +292,16 @@ class TaskAnalyzer:
         # Opportunity may be real even if there is insufficient measured support
         # to expose its next interface. This is unavailable, never false exhausted.
         opportunity = bool(np.any(relevant[components] & entry)) or bool(direct)
-        available = bool(len(fronts)) or not opportunity
-        return TaskReport(
+        report = TaskReport(
             area,
             max(0.0, area - previous),
             fronts,
             sources,
-            not opportunity and not len(fronts),
+            False,  # U is nonempty; absent sparse witnesses cannot prove exhaustion.
             snapshot.revision,
-            available,
-            "READY" if available else "INPUT_UNAVAILABLE",
+            remaining_area_upper_m2=remaining_area,
+            coverage_target=self.coverage_target,
         )
+        if not report.completed and opportunity and not len(fronts):
+            return replace(report,available=False,reason_code="INPUT_UNAVAILABLE")
+        return report

@@ -52,7 +52,8 @@ def format_status(record, *, environments, warmup, target=None, phase=None):
         coverage = f'{ratio:5.1%}' if valid else '    —'
         family = {'moon': '月表', 'cave': '洞穴'}.get(status.get('family'), '待定')
         state = states.get(status.get('state'), status.get('state', '等待启动'))
-        if status.get('terminated'): state = '探索耗尽'
+        if status.get('reason_code')=='COLLISION':state='碰撞终止'
+        elif status.get('terminated'): state = '探索耗尽' if status.get('exhausted') else '覆盖达标'
         elif status.get('truncated'): state = '预算截断'
         reason = status.get('reason_code')
         reason = reasons.get(reason, reason or '—')

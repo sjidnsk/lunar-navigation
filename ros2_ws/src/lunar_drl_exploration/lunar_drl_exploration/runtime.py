@@ -27,16 +27,17 @@ class ActorPolicy:
 
 
 class InferenceRuntime:
-    def __init__(self,adapter,policy,sensor=None,graph_config=None):
+    def __init__(self,adapter,policy,sensor=None,graph_config=None,*,coverage_target=1.0):
         self.adapter=adapter;self.policy=policy;self.sensor=sensor or SensorSpec()
         self.graph_config=graph_config;self.core=None;self.state='IDLE';self.report=None
         self.last_result=None;self._after_stop=None;self._pending_task=None;self._stamp=-1
         self.last_error=None
+        self.coverage_target=coverage_target
 
     def start(self,task):
         if self.adapter.inflight:
             self._pending_task=task;self._stop('RESTARTING');return
-        self.core=DecisionCore(task,self.sensor,self.graph_config)
+        self.core=DecisionCore(task,self.sensor,self.graph_config,coverage_target=self.coverage_target)
         self.report=None;self._stamp=-1;self.state='RUNNING';self.last_error=None
         self.adapter.require_fresh_snapshot()
 
@@ -89,7 +90,9 @@ class InferenceRuntime:
         if snap is None:self.state='WAITING_FOR_INPUT';return
         observation,self.report=self.core.observe(snap,self.adapter.velocity)
         if not self.report.available:self.state='WAITING_FOR_INPUT';return
-        if self.report.exhausted:self.state='EXHAUSTED';return
+        if self.report.completed:
+            self.state='EXHAUSTED' if self.report.exhausted else 'COVERAGE_REACHED'
+            return
         if not len(observation.goals):raise InfrastructureError('available nonexhausted state has no actions')
         action=int(self.policy(observation))
         if not 0<=action<len(observation.goals):raise ValueError('Actor action outside frozen observation')
@@ -99,12 +102,16 @@ class InferenceRuntime:
         return {'state':self.state,'task_id':None if self.core is None else self.core.task.task_id,
             'known_area_m2':None if self.core is None else self.core.coverage.known_area_m2,
             'exhausted':None if self.report is None or not self.report.available else self.report.exhausted,
+            'completed':None if self.report is None or not self.report.available else self.report.completed,
+            'coverage_lower_bound':None if self.report is None else self.report.coverage_lower_bound,
+            'remaining_area_upper_m2':None if self.report is None else self.report.remaining_area_upper_m2,
+            'coverage_target':self.coverage_target,
             'reference_area_m2':None,'reference_available':False,
             'reason_code':self.last_error or (self.report.reason_code if self.report else 'INPUT_UNAVAILABLE'),
             'navigation_reason':None if self.last_result is None else self.last_result.reason_code}
 
     @classmethod
-    def attach(cls,node,policy,*,sensor=None,graph_config=None,task_topic='/Car/T4/exploration/task',
+    def attach(cls,node,policy,*,sensor=None,graph_config=None,coverage_target=1.0,task_topic='/Car/T4/exploration/task',
                status_topic='/Car/T4/exploration/drl_status',
                action_name='/Car/T4/navigation/navigate_to_pose',
                policy_map_service='/Car/T4/mapping/get_policy_map',
@@ -116,7 +123,7 @@ class InferenceRuntime:
         from diagnostic_msgs.msg import DiagnosticArray,DiagnosticStatus,KeyValue
         adapter=RosNavigationAdapter(node,action_name=action_name,policy_map_service=policy_map_service,
             odometry_topic=odometry_topic,diagnostics_topic=diagnostics_topic,path_reference_topic=path_reference_topic,tf_topic=tf_topic)
-        runtime=cls(adapter,policy,sensor,graph_config)
+        runtime=cls(adapter,policy,sensor,graph_config,coverage_target=coverage_target)
         runtime._task_subscription=node.create_subscription(PureExplorationTask,task_topic,runtime.handle_task,10)
         runtime._status_publisher=node.create_publisher(DiagnosticArray,status_topic,10)
         def tick():

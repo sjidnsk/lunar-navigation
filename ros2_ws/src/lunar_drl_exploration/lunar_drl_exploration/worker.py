@@ -45,7 +45,7 @@ def worker_main(pipe, config_record, env_id, *, domain_base=210,
                 result = dict(kind='RESET_DONE', observation=obs,
                     scenes=env.static_scenes, metadata=dict(env.episode_metadata,
                         initial_reference_coverage=env.reference.coverage_ratio(initial_state.observed)),
-                    exhausted=bool(env.report.exhausted))
+                    completed=bool(env.report.completed),exhausted=bool(env.report.exhausted))
             else:
                 transition = env.step(command['action'], actor_version=command['actor_version'])
                 execution = env.last_execution
@@ -107,8 +107,8 @@ def worker_main(pipe, config_record, env_id, *, domain_base=210,
                 active = False
                 if result['kind'] == 'RESET_DONE':
                     send(dict(kind='SCENE', payload=dumps_transport(result['scenes']), metadata=result['metadata']))
-                    if result['exhausted']:
-                        send(dict(kind='EPISODE_END', reason='EXHAUSTED', zero_decisions=True))
+                    if result['completed']:
+                        send(dict(kind='EPISODE_END', reason='EXHAUSTED' if result['exhausted'] else 'COVERAGE_REACHED', zero_decisions=True))
                         if not stopping: send(dict(kind='NEED_RESET'))
                     elif not stopping:
                         send(dict(kind='READY', payload=dumps_transport(result['observation'])))

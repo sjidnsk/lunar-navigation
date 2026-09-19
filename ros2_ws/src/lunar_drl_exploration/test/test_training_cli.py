@@ -88,13 +88,35 @@ def test_frozen_evaluation_metrics_keep_failed_cases_and_late_path():
     a.observe(.8, 10., 1., 'GOAL_REACHED', False, False)
     a.observe(.99, 25., 2., 'GOAL_REACHED', False, True)
     b = EpisodeMetrics('moon', 40, -2)
-    b.observe(.5, 5., 0., 'NO_PATH', True, False)
+    b.observe(.5, 5., 0., 'NO_PATH', True, False, exhausted=True)
     rows = [a.record(), b.record()]
     assert rows[0]['path_80_to_99_m'] == 15.
     assert rows[1]['path_to_99_m'] is None
     summary = summarize(rows)[0]
     assert summary['rate_99'] == .5 and summary['mean_final_coverage'] == .745
     assert summary['exhaustion_rate'] == .5 and summary['cases'] == 2
+
+
+def test_fraction_completion_is_not_reported_as_strict_exhaustion():
+    from lunar_drl_exploration.evaluation import EpisodeMetrics,summarize
+    metric=EpisodeMetrics('moon',40,1)
+    metric.observe(.995,10.,1.,'GOAL_REACHED',True,False,exhausted=False,
+                   coverage_lower_bound=.991,remaining_area_upper_m2=.9)
+    row=metric.record()
+    assert row['completed'] and not row['exhausted']
+    assert row['coverage_lower_bound']==.991 and row['exhaustion_coverage'] is None
+    summary=summarize([row])[0]
+    assert summary['completion_rate']==1 and summary['exhaustion_rate']==0
+
+
+def test_collision_with_new_coverage_is_not_a_successful_completion():
+    from lunar_drl_exploration.evaluation import EpisodeMetrics,summarize
+    metric=EpisodeMetrics('moon',40,1)
+    metric.observe(.995,10.,1.,'COLLISION',True,False,exhausted=False,
+                   coverage_lower_bound=.991,remaining_area_upper_m2=.9)
+    row=metric.record()
+    assert row['reached_99'] and row['collisions']==1
+    assert not row['completed'] and summarize([row])[0]['completion_rate']==0
 
 
 def test_export_actor_uses_existing_schema_and_infer_import_is_observed_only(tmp_path):

@@ -38,6 +38,7 @@ def test_incomplete_graph_reports_unavailable_not_exhausted(monkeypatch):
         core.builder.unrepresented_interfaces=np.array([[4,4]])
         return result
     monkeypatch.setattr(core.builder,'build',build)
-    _,report=core.observe(snapshot(np.ones((8,8),np.uint8)))
+    measured=np.ones((8,8),np.uint8);measured[4,4]=0
+    _,report=core.observe(snapshot(measured))
     assert not report.available and not report.exhausted
     assert report.reason_code=='UNREPRESENTED_TASK_INTERFACES'

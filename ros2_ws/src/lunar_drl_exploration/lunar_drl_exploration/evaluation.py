@@ -58,17 +58,21 @@ class EpisodeMetrics:
         self.coverage = self.distance = 0.
         self.covered_area_m2 = self.coverable_area_m2 = None
         self.path80 = self.path99 = None
-        self.exhausted = self.truncated = False
+        self.completed = self.exhausted = self.terminated = self.truncated = False
+        self.coverage_lower_bound=self.remaining_area_upper_m2=None
         self.steps = self.zero_gain = self.failures = self.collisions = 0
         self.reasons = {}
         self.error = None
 
     def observe(self, coverage, distance, new_area, reason, terminated, truncated,
-                *, covered_area_m2=None, coverable_area_m2=None):
+                *, covered_area_m2=None, coverable_area_m2=None, exhausted=False,
+                coverage_lower_bound=None,remaining_area_upper_m2=None):
         self.coverage, self.distance = float(coverage), float(distance)
         self.covered_area_m2 = None if covered_area_m2 is None else float(covered_area_m2)
         self.coverable_area_m2 = None if coverable_area_m2 is None else float(coverable_area_m2)
-        self.exhausted, self.truncated = bool(terminated), bool(truncated)
+        self.terminated,self.exhausted,self.truncated=bool(terminated),bool(exhausted),bool(truncated)
+        self.coverage_lower_bound=coverage_lower_bound
+        self.remaining_area_upper_m2=remaining_area_upper_m2
         if coverage >= .8 and self.path80 is None: self.path80 = float(distance)
         if coverage >= .99 and self.path99 is None: self.path99 = float(distance)
         if reason != 'INITIAL':
@@ -76,12 +80,17 @@ class EpisodeMetrics:
             self.failures += reason != 'GOAL_REACHED'
             self.collisions += reason == 'COLLISION'
             self.reasons[reason] = self.reasons.get(reason, 0) + 1
+        # A space-completion terminal can coincide with a physical failure.
+        # Preserve its coverage and RL terminal flag without calling it success.
+        self.completed=self.terminated and not self.collisions
 
     def record(self):
         return dict(family=self.family, extent_m=self.extent, seed=self.seed,
             covered_area_m2=self.covered_area_m2, coverable_area_m2=self.coverable_area_m2,
             final_coverage=self.coverage, reached_80=self.path80 is not None,
-            reached_99=self.path99 is not None, exhausted=self.exhausted,
+            reached_99=self.path99 is not None, completed=self.completed,exhausted=self.exhausted,
+            terminated=self.terminated,
+            coverage_lower_bound=self.coverage_lower_bound,remaining_area_upper_m2=self.remaining_area_upper_m2,
             exhaustion_coverage=self.coverage if self.exhausted else None,
             path_to_80_m=self.path80, path_to_99_m=self.path99,
             path_80_to_99_m=self.path99-self.path80 if self.path99 is not None else None,
@@ -100,6 +109,7 @@ def summarize(rows):
             rate_80=sum(row['reached_80'] for row in cases)/count,
             rate_99=sum(row['reached_99'] for row in cases)/count,
             exhaustion_rate=sum(row['exhausted'] for row in cases)/count,
+            completion_rate=sum(row['completed'] for row in cases)/count,
             mean_final_coverage=sum(row['final_coverage'] for row in cases)/count,
             infrastructure_failures=sum(row['error'] is not None for row in cases)))
     return result
@@ -127,10 +137,12 @@ def evaluate(config, actor_path, *, seeds, families, extents, budget, output=Non
                         geometry = GeometryMetrics(obs.positions[obs.current_index], config.goal_position_tolerance_m)
                         progress = env.progress()
                         metric.observe(env.reference.coverage_ratio(state.observed),
-                            progress['distance_m'], 0., 'INITIAL', env.report.exhausted, False,
+                            progress['distance_m'], 0., 'INITIAL', env.report.completed, False,
+                            exhausted=env.report.exhausted,coverage_lower_bound=env.report.coverage_lower_bound,
+                            remaining_area_upper_m2=env.report.remaining_area_upper_m2,
                             covered_area_m2=env.reference.covered_area(state.observed),
                             coverable_area_m2=env.reference.area_m2)
-                        while not metric.exhausted and not metric.truncated and not metric.collisions:
+                        while not metric.completed and not metric.truncated and not metric.collisions:
                             transition = env.step(policy(obs))
                             next_obs = transition.next_observation
                             geometry.observe(next_obs.positions[next_obs.current_index], transition.parts.new_area_m2)
@@ -138,6 +150,8 @@ def evaluate(config, actor_path, *, seeds, families, extents, budget, output=Non
                             metric.observe(env.reference.coverage_ratio(transition.next_privileged.observed),
                                 env.progress()['distance_m'], transition.parts.new_area_m2,
                                 execution.reason_code, transition.terminated, transition.truncated,
+                                exhausted=env.report.exhausted,coverage_lower_bound=env.report.coverage_lower_bound,
+                                remaining_area_upper_m2=env.report.remaining_area_upper_m2,
                                 covered_area_m2=env.reference.covered_area(transition.next_privileged.observed),
                                 coverable_area_m2=env.reference.area_m2)
                             obs = transition.next_observation
@@ -151,7 +165,7 @@ def evaluate(config, actor_path, *, seeds, families, extents, budget, output=Non
                     print(json.dumps(rows[-1], ensure_ascii=False, allow_nan=False), flush=True)
     finally: env.close()
     result = dict(actor=str(Path(actor_path).resolve()), policy='frozen_joint_argmax',
-        sensor=asdict(config.sensor),
+        sensor=asdict(config.sensor),coverage_target=config.coverage_target,
         budget=budget, groups=summarize(rows), cases=rows)
     if output is not None:
         payload = (json.dumps(result, ensure_ascii=False, allow_nan=False, indent=2)+'\n').encode()
@@ -206,7 +220,8 @@ def infer(config, actor_path, *, task_topic='/Car/T4/exploration/task'):
     from rclpy.signals import SignalHandlerOptions
     rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
     node = rclpy.create_node('drl_exploration_inference')
-    runtime = InferenceRuntime.attach(node, policy, sensor=config.sensor, task_topic=task_topic)
+    runtime = InferenceRuntime.attach(node, policy, sensor=config.sensor, task_topic=task_topic,
+                                     coverage_target=config.coverage_target)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt: pass

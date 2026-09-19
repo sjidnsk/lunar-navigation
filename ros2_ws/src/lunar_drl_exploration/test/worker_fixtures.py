@@ -45,7 +45,7 @@ class ControlledEnv:
         self.episode_metadata = dict(episode_id=self.episode_id, scene_id=scene.scene_id,
             reference_area_m2=2., initial_known_area_m2=0., family=family,
             extent_m=extent, budget=episode_budget, seed=seed)
-        self.report = SimpleNamespace(exhausted=extent == 1)
+        self.report = SimpleNamespace(completed=extent == 1,exhausted=extent == 1)
         return self.obs, self.state
 
     def step(self, action_index, *, actor_version=None):

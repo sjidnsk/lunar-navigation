@@ -48,3 +48,10 @@ def test_new_scene_does_not_invent_coverage():
     text = '\n'.join(format_status(r, environments=1, warmup=1024))
     assert '经验预热' in text and '初始化新场景' in text
     assert '50.0%' not in text and '[????????????]' in text
+
+
+def test_collision_takes_precedence_over_coverage_termination():
+    r=record()
+    r['environments'][0].update(terminated=True,exhausted=False,reason_code='COLLISION')
+    text='\n'.join(format_status(r,environments=1,warmup=1024))
+    assert '碰撞终止' in text and '覆盖达标' not in text

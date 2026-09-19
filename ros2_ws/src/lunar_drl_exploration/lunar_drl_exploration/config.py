@@ -157,6 +157,7 @@ class TrainingConfig:
     integration_step_s: float = .05
     observation_hz: float = 2.0
     goal_position_tolerance_m: float = .05
+    coverage_target: float = 1.0
     warmup: int = 1024
     update_ratio: float = .25
     max_update_credit: int = 32
@@ -180,6 +181,8 @@ class TrainingConfig:
 
     def __post_init__(self):
         boundaries = self.curriculum_transition_boundaries
+        if not np.isfinite(self.coverage_target) or not 0<self.coverage_target<=1:
+            raise ValueError('coverage target must be in (0,1]')
         if (not isinstance(boundaries, (tuple, list)) or len(boundaries) != 2 or
                 any(type(value) is not int or value < 0 for value in boundaries) or
                 boundaries[0] >= boundaries[1]):
@@ -238,7 +241,7 @@ def resume_semantics(config):
         observation_origin='actual_pose_optical_offset',
         effective_measurement='classified_center_native_3x3_no_hidden_neighbors_v1',
         reward='delta_area/100-.02*distance/10-.005*absolute_turn/pi-.001_v1',
-        termination='exhausted_terminal_budget_truncated_bootstrap_v1',
+        termination='measured_remaining_upper_bound_v1',coverage_target=config.coverage_target,
         graph_normalization=dict(position_m=10., frontier_cells=100.),
         sensor=record['sensor'], platform=platform,
         integration_step_s=config.integration_step_s, observation_hz=config.observation_hz,

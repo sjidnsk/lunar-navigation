@@ -50,7 +50,7 @@ def test_transition_whole_action_baseline_and_final_budget_state():
     obs,report=DecisionCore(task,SensorSpec()).observe(snap)
     priv=PrivilegedState('scene',np.array([3],np.uint8))
     t=make_transition(obs,0,obs,priv,priv,initial=(1.,2.,3.),final=(5.,12.,3.+math.pi),
-        exhausted=False,budget_hit=True,episode_id='e',actor_version=7)
+        completed=False,budget_hit=True,episode_id='e',actor_version=7)
     assert t.reward == .04-.02-.005-.001
     assert t.parts.distance_m==10
     assert t.truncated and not t.terminated
