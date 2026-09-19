@@ -1,14 +1,18 @@
 # Pure Planner 操作手册
 
+强化学习统一开发整合线为 `dev/drl-exploration`，下设功能、修复、测试和文档专项分支；分支层级、当前算法及运行命令见[强化学习开发入口](docs/DRL开发入口.md)。
+
 本次主线导入及 30 秒默认等待超时的验证见[集成记录](docs/集成地图探索规划控制修改.md)。下文历史 demo 数据保留其当时参数。
 
 新增独立 Jazzy [复杂地形完整探索 demo](docs/复杂地形完整探索demo.md)：300 m 复杂地形、全局 1 m / 局部 0.2 m、正式探索规划控制、默认 30 倍可调仿真时钟。[简单控制闭环 demo](docs/增量规划控制闭环demo.md)及旧演示保留。
 
 新增独立 [DRL 稀疏图探索实现与验证](docs/validation/2026-09-15-drl-exploration-redesign-implementation.md)：
 8 个原生导航/公共控制器/轻量运动学环境、CPU 图 Actor、单 GPU SAC、有限回放与断点恢复。
-在 `feat/drl-exploration-redesign` 工作树使用 `scripts/drl/build.sh`，再按
+在 `dev/drl-exploration` 的 `drl-exploration-redesign` 工作树使用 `scripts/drl/build.sh`，再按
 [操作指令的 DRL 章节](docs/操作指令.md#drl-稀疏图探索独立-redesign-分支)开训、恢复、评估、导出和挂接推理。
 默认预热 1024、有效 batch 64、30 倍目标、0.2 m/s；已测短程 GPU 闭环不代表训练收敛或 Orin/实车就绪。
+2026-09-19 已接入[路径尺度决策图与候选对应 Critic](docs/validation/2026-09-19-drl-graph-critic-implementation.md)。
+新输出目录为 `training-output/drl-metric-critic/`（固定小场景为 `drl-metric-critic-small/`），旧完整检查点不兼容，旧产物保留。
 
 `lunar_pure_planner_ros` 是独立的普通 ROS 2 节点，不使用 Lifecycle manager，也不启动旧规划器。
 

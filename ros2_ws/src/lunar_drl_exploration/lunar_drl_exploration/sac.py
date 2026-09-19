@@ -5,7 +5,7 @@ import math
 import numpy as np
 import torch
 from .batch import pack_observations, pack_privileged
-from .config import ModelConfig, LearningConfig
+from .config import ModelConfig, LearningConfig, canonical_model_config
 from .model import Actor, Critic, segment_sum
 
 
@@ -21,6 +21,37 @@ def policy_loss(probs, log_probs, q1, q2, alpha, groups, count):
 def temperature_loss(log_alpha, entropy, target_entropy):
     # Gradient descent reduces alpha when entropy exceeds its target.
     return (log_alpha * (entropy - target_entropy).detach()).mean()
+
+
+@torch.no_grad()
+def policy_diagnostics(policy, batch, bound):
+    """State-averaged diagnostics; raw gradients include effective-batch scaling.
+
+    Saturation means |tanh(centered_score / C)| >= .95 (zero for C=0).
+    Position probabilities sum valid headings at each packed graph node.
+    Only the final update metrics transfer synchronizes with the host.
+    """
+    probs, raw = policy.probs, policy.raw_logits
+    groups, size = batch.action_groups, batch.size
+    counts = raw.new_tensor(batch.action_counts).clamp_min(1)
+    position_probs = segment_sum(probs, batch.action_nodes, len(batch.graph.features))
+    position_entropy = -segment_sum(position_probs * position_probs.clamp_min(1e-30).log(),
+                                    batch.graph.groups, size)
+    joint_entropy = -segment_sum(probs * policy.log_probs, groups, size)
+    position_max = raw.new_zeros(size).scatter_reduce_(
+        0, batch.graph.groups, position_probs, reduce='amax', include_self=True)
+    maxima = raw.new_full((size,), -torch.inf).scatter_reduce_(
+        0, groups, raw, reduce='amax', include_self=True)
+    minima = raw.new_full((size,), torch.inf).scatter_reduce_(
+        0, groups, raw, reduce='amin', include_self=True)
+    spans = torch.where(torch.isfinite(maxima), maxima - minima, 0.)
+    saturated = (policy.logits.abs() >= .95 * bound).to(raw.dtype) if bound else torch.zeros_like(raw)
+    saturation = segment_sum(saturated, groups, size) / counts
+    gradient = raw.grad.abs()
+    gradient_mean = (segment_sum(gradient, groups, size) / counts).mean()
+    gradient_max = gradient.amax() if gradient.numel() else raw.new_zeros(())
+    return torch.stack((position_entropy.mean(), (joint_entropy-position_entropy).mean(),
+        position_max.mean(), spans.mean(), saturation.mean(), gradient_mean, gradient_max))
 
 
 class SACLearner:
@@ -78,8 +109,8 @@ class SACLearner:
             raise ValueError("replay action must index the frozen valid action list")
         chunks = [transitions[i:i+config.microbatch_size]
                   for i in range(0,len(transitions),config.microbatch_size)]
-        # Six scalar metrics stay on-device until the single final transfer.
-        metrics = torch.zeros(6, device=self.device)
+        # Scalar diagnostics stay on-device until the single final transfer.
+        metrics = torch.zeros(13, device=self.device)
         self.q1_optimizer.zero_grad(set_to_none=True)
         self.q2_optimizer.zero_grad(set_to_none=True)
         for chunk in chunks:
@@ -113,6 +144,7 @@ class SACLearner:
             with torch.no_grad():
                 q1, q2 = self.q1.forward_packed(batch, truth), self.q2.forward_packed(batch, truth)
             policy = self.actor.forward_packed(batch)
+            policy.raw_logits.retain_grad()
             loss = policy_loss(policy.probs, policy.log_probs, q1, q2, self.alpha,
                                batch.action_groups, batch.size)
             (loss * weight).backward()
@@ -122,6 +154,9 @@ class SACLearner:
             entropy_gap += (entropy-target_entropy).mean() * weight
             metrics[2] += loss.detach() * weight
             metrics[4] += entropy.mean() * weight
+            diagnostics = policy_diagnostics(policy, batch, self.model_config.actor_score_bound)
+            metrics[6:12] += diagnostics[:6] * weight
+            metrics[12] = torch.maximum(metrics[12], diagnostics[6])
         self.actor_optimizer.step()
         alpha_loss = temperature_loss(self.log_alpha, entropy_gap, 0.0)
         alpha_loss.backward()
@@ -134,16 +169,19 @@ class SACLearner:
                     target_p.lerp_(source_p, config.polyak)
         self.updates += 1
         values = torch.cat((metrics, self.alpha.reshape(1))).detach().cpu().tolist()
-        return dict(zip(('critic1_loss','critic2_loss','actor_loss','alpha_loss','entropy','target_mean','alpha'),values),
+        return dict(zip(('critic1_loss','critic2_loss','actor_loss','alpha_loss','entropy','target_mean',
+                        'position_entropy','heading_conditional_entropy','position_max_probability',
+                        'raw_score_span','score_saturation_fraction','raw_score_gradient_abs_mean',
+                        'raw_score_gradient_abs_max','alpha'), values),
                     updates=self.updates, batch_size=len(transitions))
 
     def actor_state(self):
-        return {'schema':'task_graph_v1', 'model_config':asdict(self.model_config),
+        return {'schema':'task_graph_v3', 'model_config':asdict(self.model_config),
                 'version':self.updates,
                 'state_dict':{k:v.detach().cpu().clone() for k,v in self.actor.state_dict().items()}}
 
     def state_dict(self):
-        result = {'schema':'sparse_graph_sac_v1', 'model_config':asdict(self.model_config),
+        result = {'schema':'candidate_graph_sac_v2', 'model_config':asdict(self.model_config),
                   'learning_config':asdict(self.learning_config), 'updates':self.updates,
                   'log_alpha':self.log_alpha.detach().clone()}
         for name in ('actor','q1','q2','target1','target2','actor_optimizer',
@@ -152,7 +190,8 @@ class SACLearner:
         return copy.deepcopy(result)
 
     def load_state_dict(self, state):
-        if state['schema'] != 'sparse_graph_sac_v1' or state['model_config'] != asdict(self.model_config):
+        if (state['schema'] != 'candidate_graph_sac_v2' or
+                canonical_model_config(state['model_config']) != asdict(self.model_config)):
             raise ValueError("incompatible learner model schema")
         saved, current = dict(state['learning_config']), asdict(self.learning_config)
         for name in ('microbatch_size', 'learning_rate', 'polyak', 'initial_alpha'):

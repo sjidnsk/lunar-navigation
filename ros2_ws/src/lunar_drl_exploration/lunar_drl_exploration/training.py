@@ -40,10 +40,29 @@ class Curriculum:
     """
     def __init__(self, config, rng, state=None, *, probe_extent=None, probe_budget=None):
         self.config, self.rng = config, rng
-        self.state = dict(state or {'episodes_issued': 0})
+        import copy
+        self.state = copy.deepcopy(state or {'episodes_issued': 0})
         self.probe_extent, self.probe_budget = probe_extent, probe_budget
 
     def next(self, env_id, transitions):
+        if self.config.paired_scene_sequence:
+            import numpy as np
+            if not 0 <= env_id < self.config.environments:
+                raise ValueError('paired curriculum requires a valid environment slot')
+            counts = self.state.setdefault('slot_episodes', {})
+            episode = counts.get(str(env_id), 0)
+            # 24 bits per episode and 8 bits per slot keep training namespaces
+            # disjoint from evaluation and independent of reset arrival order.
+            if episode >= 2**24 or env_id >= 256:
+                raise ValueError('paired scene identity exhausted')
+            seed = ((int(self.config.seed) + 1) << 32) + (env_id << 24) + episode
+            rng = np.random.default_rng(np.random.SeedSequence([self.config.seed, env_id, episode]))
+            low, high = self.config.curriculum_extents_m[0]
+            extent = self.probe_extent if self.probe_extent is not None else float(rng.uniform(low, high))
+            counts[str(env_id)] = episode + 1
+            self.state['episodes_issued'] += 1
+            return dict(seed=seed, family='moon' if env_id % 2 == 0 else 'cave', extent=extent,
+                episode_budget=self.probe_budget or self.config.curriculum_budgets[0])
         stage = sum(transitions >= boundary for boundary in self.config.curriculum_transition_boundaries)
         probabilities = self.config.curriculum_mixtures[stage]
         size = int(self.rng.choice(3, p=probabilities))
@@ -56,6 +75,18 @@ class Curriculum:
         seed = ((int(self.config.seed) + 1) << 32) + serial
         return dict(seed=seed, family='moon' if env_id % 2 == 0 else 'cave', extent=extent,
             episode_budget=self.probe_budget or self.config.curriculum_budgets[size])
+
+
+def initial_model_checksum(learner):
+    """Compare identical Actor/twin-Q initial tensor values across paired arms."""
+    import hashlib
+    digest = hashlib.sha256()
+    for group in ('actor', 'q1', 'q2'):
+        for name, value in sorted(getattr(learner, group).state_dict().items()):
+            value = value.detach().cpu().contiguous()
+            digest.update(f'{group}.{name}:{value.dtype}:{tuple(value.shape)}:'.encode())
+            digest.update(value.numpy().tobytes())
+    return digest.hexdigest()
 
 
 def run_training(config, *, resume=False, device='cuda', max_transitions=None,
@@ -102,6 +133,7 @@ def run_training(config, *, resume=False, device='cuda', max_transitions=None,
     if not resume and (Path(config.output_dir) / 'resume.pt').exists():
         raise ValueError('resume.pt already exists; use --resume or a new output directory')
     learner = SACLearner(config.model, config.learning, device=device)
+    initial_checksum = initial_model_checksum(learner) if config.paired_scene_sequence else None
     replay = ReplayBuffer(config.replay_max_bytes)
     schedule = UpdateSchedule(config.warmup, config.update_ratio, config.max_update_credit)
     replay_rng, curriculum_rng = np.random.default_rng(config.seed), np.random.default_rng(config.seed + 1)
@@ -139,7 +171,7 @@ def run_training(config, *, resume=False, device='cuda', max_transitions=None,
         numeric_threads=torch.get_num_threads(), package_path=__file__,
         torch_path=torch.__file__, cuda_initialized=torch.cuda.is_initialized()), workers={},
         probe=dict(extent_m=probe_extent, budget=probe_budget, max_new_transitions=max_transitions),
-        resume=resume)
+        resume=resume, initial_model_checksum=initial_checksum)
     # Bounded recent episode identities suffice for run auditing; counters remain cumulative.
     episode_ids = []
     barrier_pending = False
@@ -196,6 +228,8 @@ def run_training(config, *, resume=False, device='cuda', max_transitions=None,
                 peak_allocated_bytes=torch.cuda.max_memory_allocated(learner.device))
                 if learner.device.type == 'cuda' else None))
 
+    from .terminal import TrainingTerminal
+    terminal = TrainingTerminal(environments=config.environments, warmup=config.warmup, target=max_transitions)
     start_updates = schedule.updates
     try:
         # An initial good checkpoint also protects a first-update infrastructure failure.
@@ -280,11 +314,12 @@ def run_training(config, *, resume=False, device='cuda', max_transitions=None,
                 elif kind == 'PUBLISHED': observed_publication = message['version']
                 elif kind == 'FATAL':
                     failure = message['reason']
+                    terminal.clear()
                     print(f'Collector fatal: {failure}', file=sys.stderr, flush=True)
                     stop(failure)
                 elif kind == 'RECOVERY':
                     counters['recoveries'] = counters.get('recoveries', 0) + 1
-                    print(f"E{env_id} infrastructure recovery attempt={message['attempt']}: {message['reason']}", flush=True)
+                    terminal.event(f"E{env_id} 基础设施恢复，第 {message['attempt']} 次：{message['reason']}")
                     metrics.append(dict(message, event='recovery'))
                 elif kind == 'OWNERSHIP':
                     env_owners[env_id] = ([message['worker_pid']] if message['worker_pid'] else []) + message['child_pids']
@@ -341,20 +376,7 @@ def run_training(config, *, resume=False, device='cuda', max_transitions=None,
                     record['resource_unavailable'] = str(exc)
                 except ResourceLimitError as exc: stop(str(exc))
                 metrics.append(record)
-                target = '' if max_transitions is None else f'/{max_transitions}'
-                bar = '' if max_transitions is None else '[' + '=' * min(20, int(20 * (schedule.transitions-baseline) / max_transitions)) + ' ' * max(0, 20-int(20 * (schedule.transitions-baseline) / max_transitions)) + '] '
-                print(f"DRL {bar}transitions={record['new_transitions']}{target} total={schedule.transitions} "
-                    f"updates={schedule.updates} credit={float(schedule.credit):.2f} actor={observed_publication} "
-                    f"sample/s={record['transitions_per_s']:.2f} update/s={record['updates_per_s']:.2f} "
-                    f"replay={replay.bytes_used/1024**2:.1f}MiB save={record['save_in_s']:.0f}s", flush=True)
-                for env_id, status in sorted(env_status.items()):
-                    area, reference = status.get('known_area_m2'), status.get('reference_area_m2')
-                    ratio = status.get('reference_coverage', status.get('initial_reference_coverage'))
-                    coverage = f'{ratio:.1%}' if ratio is not None else 'unavailable'
-                    print(f"  E{env_id} {status.get('family','?')} {status.get('extent_m',0):.0f}m "
-                        f"decisions={status.get('steps',0)}/{status.get('budget','?')} coverage={coverage} "
-                        f"area={area} gain={status.get('new_area_m2')} distance={status.get('distance_m',0):.2f} "
-                        f"RTF={status.get('actual_rtf')} reason={status.get('reason_code',status.get('state','?'))}", flush=True)
+                terminal.render(record, phase='保存并停止' if stopping else ('保存检查点' if barrier_pending else None))
                 last_metrics = time.monotonic()
         process.join(10)
         observations['final'] = status_record()
@@ -362,6 +384,7 @@ def run_training(config, *, resume=False, device='cuda', max_transitions=None,
         observations['final']['stop_reason'] = failure or stop_reason or 'orderly stop'
         observations['final']['owned_children_closed'] = not process.is_alive()
         record_run()
+        terminal.render(status_record(), phase='已停止（异常）' if failure else '已保存并停止', force=True)
         if failure: raise RuntimeError(failure)
         return dict(transitions=schedule.transitions, new_transitions=schedule.transitions-baseline,
             updates=schedule.updates, episode_ids=episode_ids, episodes_issued=curriculum.state['episodes_issued'],
@@ -369,6 +392,7 @@ def run_training(config, *, resume=False, device='cuda', max_transitions=None,
     except BaseException as exc:
         # Never overwrite the last good checkpoint after a partly applied update
         # or an unadmitted resource-damaged completion. The reason is explicit.
+        terminal.clear()
         print(f'DRL stopped with error; last completed checkpoint preserved: {type(exc).__name__}: {exc}', file=sys.stderr, flush=True)
         # A poisoned optimizer boundary forbids saving, but not receiving/ACKing
         # already finished valid work. Drain before joining the collector so it

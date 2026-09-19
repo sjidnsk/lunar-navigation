@@ -82,11 +82,13 @@ class RosExplorationEnv:
         """Explicit deterministic fixture entry; identical sensor/navigation path."""
         self.close()
         from .reference import CoverageReference
-        from .graph import GraphBuilder
+        from .privileged import build_truth, PrivilegedBuilder
         self.terrain=terrain;self.task=task
         self.plant=KinematicPlant(terrain,pose,self.config.platform)
         self.reference=CoverageReference.build(terrain,pose,task,self.config.sensor)
-        static=GraphBuilder(GraphConfig(platform=self.config.platform)).build_truth(terrain,self.reference)
+        static=build_truth(terrain,self.reference,GraphConfig(platform=self.config.platform))
+        self.privileged_builder=PrivilegedBuilder(terrain,static,task,self.config.sensor,
+            GraphConfig(platform=self.config.platform))
         self.static_scenes={static.scene_id:static}
         self.core=DecisionCore(task,self.config.sensor,GraphConfig(platform=self.config.platform))
         self.core.history.tolerance_m=self.config.goal_position_tolerance_m
@@ -263,7 +265,7 @@ class RosExplorationEnv:
         if self.plant.collision:return NavigationResult(6,'COLLISION',result.last_segment_revision)
         return result
 
-    def _privileged(self):
+    def _privileged(self, observation=None):
         identity=self.core.coverage.identity
         if identity is None:raise InfrastructureError('coverage is unavailable')
         resolution,origin=identity[1:]
@@ -274,7 +276,8 @@ class RosExplorationEnv:
         if np.any(np.abs(offset-rounded)>1e-6):raise InfrastructureError('native/reference lattice mismatch')
         x,y=map(int,rounded);h,w=self.terrain.shape
         mask=self.core.coverage.mask((x,y,x+w,y+h))
-        return PrivilegedState(self.reference.reference_id,self.reference.pack(mask))
+        return self.privileged_builder.build(self.observation if observation is None else observation,
+                                             self.reference.pack(mask))
 
     def step(self,action_index,*,actor_version=None):
         if self._closed or self._step_active:raise RuntimeError('environment is closed or already stepping')
@@ -292,7 +295,7 @@ class RosExplorationEnv:
             snap=self._snapshot()
             next_observation,report=self.core.observe(snap,self.adapter.velocity)
             if not report.available:raise InfrastructureError('unconstructable final state: '+report.reason_code)
-            next_privileged=self._privileged();self.steps+=1
+            next_privileged=self._privileged(next_observation);self.steps+=1
             final=(self._known_area,self.plant.distance_m,self.plant.turn_rad)
             transition=make_transition(observation,action_index,next_observation,privileged,next_privileged,
                 initial=before,final=final,exhausted=report.exhausted,budget_hit=self.steps>=self.episode_budget,
@@ -322,7 +325,7 @@ class RosExplorationEnv:
     def _release_scene(self):
         # Replay/collector own their explicit immutable static-scene references.
         # A closed worker must not retain terrain or an old native/map graph.
-        for name in ('terrain','plant','reference','core','buffer','observation','privileged'):
+        for name in ('terrain','plant','reference','core','buffer','observation','privileged','privileged_builder'):
             if hasattr(self,name):setattr(self,name,None)
         self.static_scenes={}
 

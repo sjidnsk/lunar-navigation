@@ -112,7 +112,7 @@ class DecisionObservation:
     goals: np.ndarray
     epoch: str
     revision: int
-    schema: str = "task_graph_v1"
+    schema: str = "task_graph_v3"
 
     def __post_init__(self):
         for name, dtype in (("node_ids", np.int64), ("positions", np.float32),
@@ -140,9 +140,46 @@ class DecisionObservation:
 
 
 @dataclass(frozen=True)
+class PrivilegedActionContext:
+    positions: np.ndarray
+    action_positions: np.ndarray
+    action_yaws: np.ndarray
+    support_offsets: np.ndarray
+    support_indices: np.ndarray
+    support_distances: np.ndarray
+    gains: np.ndarray
+
+    def __post_init__(self):
+        for name, dtype in (("positions", np.float64), ("action_positions", np.int64),
+                            ("action_yaws", np.float64),
+                            ("support_offsets", np.int64), ("support_indices", np.int64),
+                            ("support_distances", np.float32), ("gains", np.float32)):
+            object.__setattr__(self, name, freeze_array(getattr(self, name), dtype=dtype))
+        n = len(self.positions)
+        if self.positions.shape != (n, 2) or not np.isfinite(self.positions).all():
+            raise ValueError("candidate positions must be finite N x 2 coordinates")
+        if n and len(np.unique(self.positions, axis=0)) != n:
+            raise ValueError("candidate positions must be unique")
+        if (self.action_positions.ndim != 1 or self.action_yaws.shape != self.action_positions.shape or
+                self.gains.shape != self.action_positions.shape or not np.isfinite(self.action_yaws).all()):
+            raise ValueError("candidate action mapping, yaws and gains must align")
+        if (np.any(self.action_positions < 0) or np.any(self.action_positions >= n) or
+                not np.isfinite(self.gains).all() or np.any(self.gains < 0)):
+            raise ValueError("invalid candidate action mapping or gain")
+        if (self.support_offsets.shape != (n + 1,) or self.support_offsets[0] != 0 or
+                np.any(np.diff(self.support_offsets) <= 0) or
+                self.support_offsets[-1] != len(self.support_indices) or
+                self.support_distances.shape != self.support_indices.shape or
+                np.any(self.support_indices < 0) or not np.isfinite(self.support_distances).all() or
+                np.any(self.support_distances < 0)):
+            raise ValueError("invalid candidate support CSR")
+
+
+@dataclass(frozen=True)
 class PrivilegedState:
     scene_id: str
     observed: np.ndarray
+    actions: PrivilegedActionContext | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "observed", freeze_array(self.observed, dtype=np.uint8))

@@ -21,7 +21,7 @@ def transitions():
             next_obs=replace(next_obs, action_nodes=np.empty(0,int),
                 action_yaws=np.empty(0),goals=np.empty((0,3)))
         result.append(Transition(obs, i%len(obs.goals), (i-30)/100., next_obs,
-            state(),state(full=i%2==0),RewardParts(0,0,0),terminal,i%7==0 and not terminal,'e',0))
+            state(obs=obs),state(full=i%2==0,obs=next_obs),RewardParts(0,0,0),terminal,i%7==0 and not terminal,'e',0))
     return result
 
 
@@ -59,7 +59,7 @@ def test_terminal_skips_empty_actions_truncated_bootstraps_and_target_detaches()
         q1=learner.target1(obs,states,{'s':scene()}); q2=learner.target2(obs,states,{'s':scene()})
         expected=[torch.tensor(samples[0].reward)]
         for t,p,a,b in zip(samples[1:],policies,q1,q2):
-            expected.append(t.reward+(p.probs*(torch.minimum(a,b)-learner.alpha*p.log_probs)).sum())
+            expected.append(t.reward+learner.learning_config.gamma*(p.probs*(torch.minimum(a,b)-learner.alpha*p.log_probs)).sum())
     torch.testing.assert_close(actual,torch.stack(expected))
 
 

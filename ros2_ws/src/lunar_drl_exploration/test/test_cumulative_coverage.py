@@ -65,11 +65,14 @@ def test_training_projection_inference_pause_epoch_and_new_task_agree():
     env=RosExplorationEnv(TrainingConfig(),0)
     env.terrain=TerrainGrid.from_heights(np.zeros((12,12),np.float32),1.,(0.,0.),env.config.platform)
     env.reference=CoverageReference.build(env.terrain,first.pose,t,sensor)
+    from lunar_drl_exploration.privileged import build_truth, PrivilegedBuilder
+    env.privileged_builder=PrivilegedBuilder(env.terrain,build_truth(env.terrain,env.reference),t,sensor)
     env.core=DecisionCore(t,sensor)
     adapter=Adapter();runtime=InferenceRuntime(adapter,lambda obs:0,sensor)
     runtime.start(t);runtime.pause()
     for snap in (first,second,third,third):
         env._apply_known(snap);adapter.snapshot=snap;runtime.tick()
+        env.observation,report=env.core.observe(snap)
         assert runtime.state=='PAUSED'
         assert runtime.status()['known_area_m2']==env._known_area==36
         assert np.unpackbits(env._privileged().observed,bitorder='little').sum()==36

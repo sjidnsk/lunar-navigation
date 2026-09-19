@@ -71,6 +71,8 @@ def test_native_no_path_and_timeout_with_final_state_remain_transitions(monkeypa
     pose=Pose(3.5,3.5,0);s=snapshot(np.pad(np.ones((6,6),np.uint8),3),pose=pose)
     env.terrain=t;env.task=task(0,0,12,12);env.core=DecisionCore(env.task,SensorSpec(range_m=3))
     env.reference=CoverageReference.build(t,pose,env.task,SensorSpec(range_m=3))
+    from lunar_drl_exploration.privileged import build_truth, PrivilegedBuilder
+    env.privileged_builder=PrivilegedBuilder(t,build_truth(t,env.reference),env.task,env.config.sensor)
     env.plant=KinematicPlant(t,pose,cfg.platform);env._apply_known(s)
     env.observation,env.report=env.core.observe(s);env.privileged=env._privileged()
     env._closed=False;env.steps=0;env.episode_id='failure-fixture'
@@ -134,7 +136,7 @@ def test_initialization_requires_measured_report_within_existing_four_scans(monk
     from test_task_analysis import snapshot, task
     config=TrainingConfig(); env=RosExplorationEnv(config,0)
     terrain=TerrainGrid.from_heights(np.zeros((12,12),np.float32),1.,(0.,0.),config.platform)
-    pose=Pose(3.5,3.5,0.); snap=snapshot(np.ones((12,12),np.uint8),pose=pose)
+    pose=Pose(3.5,3.5,0.); snap=snapshot(terrain.navigation,pose=pose)
     assert len(snap.start_connections)>0
     goals=[]; real_observe=DecisionCore.observe
     def observe(core,*args):

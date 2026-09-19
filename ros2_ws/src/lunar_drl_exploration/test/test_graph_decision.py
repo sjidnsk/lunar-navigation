@@ -10,7 +10,7 @@ from lunar_drl_exploration.history import DirectionHistory
 from test_task_analysis import snapshot, task
 
 
-def test_actual_fractional_anchor_all_headings_frozen_and_zero_gain_transit():
+def test_actual_fractional_anchor_frozen_and_zero_gain_transit():
     origin = (100000.123, -200000.456, 0.0)
     actual = Pose(origin[0] + 3.5123456789, origin[1] + 4.5987654321, 0.234)
     m = np.ones((9, 9), np.uint8)
@@ -18,13 +18,13 @@ def test_actual_fractional_anchor_all_headings_frozen_and_zero_gain_transit():
     t = task(origin[0], origin[1], origin[0] + 9, origin[1] + 9)
     obs, report = DecisionCore(t, SensorSpec(range_m=3)).observe(s, (0.0, 0.0))
     assert obs.features.shape[1] == 19 and obs.context.shape == (8,)
-    assert len(obs.goals) <= 160
+    assert len(obs.goals) == 8 * len(np.unique(obs.action_nodes))
     anchors = obs.goals[obs.action_nodes == obs.current_index]
-    assert len(anchors) == 8 and anchors.dtype == np.float64
+    assert len(anchors) == 0 and anchors.dtype == np.float64
     assert np.all(anchors[:, :2] == [actual.x, actual.y])
     assert not obs.goals.flags.writeable
     assert report.exhausted and np.all(obs.features[:, 3:11] == 0)
-    assert len(np.unique(obs.action_nodes)) > 1
+    assert len(np.unique(obs.action_nodes)) >= 1
 
 
 def test_native_one_cell_corridor_and_obstacle_loop_survive():
@@ -39,7 +39,7 @@ def test_native_one_cell_corridor_and_obstacle_loop_survive():
     )
     assert len(o.edges) >= len(o.node_ids)  # physical obstacle creates a cycle
     degree = np.bincount(o.edges.ravel(), minlength=len(o.node_ids))
-    assert degree.max() <= 19
+    assert np.all(o.edge_lengths <= 8 + 1e-9)
     # A native M FREE corridor only 1m wide, with no coarse 2m lattice point.
     corridor = np.zeros((12, 21), np.uint8)
     corridor[1:5, 1:6] = 1
@@ -103,7 +103,8 @@ def test_directional_utilities_match_sensor_hits_and_disappear_after_measurement
     filled = snapshot(np.ones((19, 23), np.uint8), pose=s.pose)
     after, done = core.observe(replace(filled, revision=2), (0, 0))
     assert done.exhausted and np.all(after.features[:, 3:11] == 0)
-    assert len(after.action_nodes) > 8
+    assert len(after.action_nodes) > 0
+    assert np.all(after.action_nodes != after.current_index)
 
 
 def test_sole_outside_viewpoint_is_a_mandatory_graph_node():
@@ -264,7 +265,7 @@ def test_more_than_nineteen_local_ports_remain_action_reachable_after_rebuild():
             largest_degree,
             int(np.bincount(obs.edges.ravel(), minlength=len(obs.node_ids)).max()),
         )
-        assert len(obs.goals) <= 160
+        assert len(obs.goals) == 8 * len(np.unique(obs.action_nodes))
         for n in np.unique(obs.action_nodes):
             if n == obs.current_index:
                 continue
@@ -274,7 +275,7 @@ def test_more_than_nineteen_local_ports_remain_action_reachable_after_rebuild():
             todo.append(Pose(goal[0] + 0.03, goal[1] + 0.03, goal[2]))
     assert len({round(x, 5) for x, y in seen if y < 6.4}) == 30
     assert len({round(x, 5) for x, y in seen if y > 9.6}) == 30
-    assert largest_degree <= 19
+    assert largest_degree > 19
 
 
 def test_first_executed_observation_survives_first_snapshot_and_epoch_clears_history():
@@ -310,23 +311,21 @@ def test_scene_generator_descriptor_survives_terrain_to_privileged_handoff():
     assert json.loads(descriptor["capability_json"])["maximum_forward_speed_mps"] == 0.2
 
 
-def test_known_empty_interior_growth_is_perimeter_not_area_and_has_no_node_crop():
-    results = []
+def test_known_empty_interior_has_complete_metric_cover_without_witness_crop():
+    from lunar_drl_exploration.metric_graph import MetricGrid
     for n in (50, 100, 200):
-        s = snapshot(
-            np.ones((n, n), np.uint8),
-            resolution=0.2,
-            pose=Pose(n * 0.1 + 0.013, n * 0.1 + 0.017, 0),
-        )
-        obs, report = DecisionCore(
-            task(-1, -1, n * 0.2 + 1, n * 0.2 + 1), SensorSpec(range_m=2)
-        ).observe(s, (0, 0))
-        results.append(len(obs.node_ids))
-        assert len(report.frontier_cells) == 4 * n
-        assert len(obs.node_ids) >= 4 * n - 4  # mandatory witnesses were not cropped
-        assert len(obs.node_ids) < 5 * n
-        assert len(obs.edges) < 6 * n
-    assert results[2] < 2.1 * results[1]
+        s = snapshot(np.ones((n,n),np.uint8),resolution=.2,
+                     pose=Pose(n*.1+.013,n*.1+.017,0))
+        core=DecisionCore(task(-1,-1,n*.2+1,n*.2+1),SensorSpec(range_m=2))
+        obs,report=core.observe(s,(0,0))
+        assert len(report.frontier_cells)==4*n
+        assert len(core.builder.unrepresented_interfaces)==0
+        bases=np.rint(core.builder._base_points/.2-.5).astype(np.int64)
+        targets=np.argwhere(np.ones((n,n),bool))[:,::-1].copy()
+        d=MetricGrid(np.ones((n,n),bool),.2).distances(bases,np.zeros(len(bases)),2,targets)
+        assert np.all(np.isfinite(d))
+        assert np.all(obs.edge_lengths<=8+1e-9)
+        assert len(bases)<n*n/20
 
 
 def test_core_unavailable_input_still_freezes_actual_anchor_without_navigation_support():
@@ -338,7 +337,7 @@ def test_core_unavailable_input_still_freezes_actual_anchor_without_navigation_s
     )
     obs, report = DecisionCore(task(0, 0, 8, 8), SensorSpec()).observe(s, (0, 0))
     assert not report.available and not report.exhausted
-    assert len(obs.node_ids) == 1 and len(obs.goals) == 8
+    assert len(obs.node_ids) == 1 and len(obs.goals) == 0
     assert np.all(obs.goals[:, :2] == [s.pose.x, s.pose.y])
 
 
@@ -354,9 +353,80 @@ def test_adjacent_point_two_metre_stances_retain_unique_optical_opportunity():
     assert len(np.unique(np.round(o.goals,12),axis=0))==len(o.goals)
 
 
-def test_isolated_current_cell_has_exactly_eight_anchor_actions():
+def test_isolated_current_cell_retains_pending_turns_without_noop():
     m=np.zeros((9,9),np.uint8);m[3,3]=1
     s=replace(snapshot(m,pose=Pose(.7,.7,0.),resolution=.2),goal_position_tolerance_m=.05)
     o,_=DecisionCore(task(0,0,1.8,1.8),SensorSpec()).observe(s)
-    assert len(o.goals)==8
+    assert len(o.goals)==7
+    assert np.all(o.action_yaws > s.goal_yaw_tolerance_rad)
     assert np.all(o.goals[:,:2]==[.7,.7])
+
+
+def test_base_world_identity_survives_map_origin_resize_and_movement():
+    m=np.ones((14,17),np.uint8)
+    core=DecisionCore(task(0,0,17,14),SensorSpec(range_m=2))
+    s=snapshot(m,pose=Pose(4.31,5.72,0))
+    a,_=core.observe(s)
+    base=core.builder._base_points.copy()
+    expanded=np.zeros((18,23),np.uint8);expanded[2:16,3:20]=m
+    shifted=snapshot(expanded,origin=(-3.,-2.,0),pose=Pose(7.31,5.72,0))
+    b,_=core.observe(replace(shifted,revision=2))
+    assert np.array_equal(base,core.builder._base_points)
+    aid={tuple(p):i for p,i in zip(a.positions[:-1],a.node_ids[:-1])}
+    bid={tuple(p):i for p,i in zip(b.positions[:-1],b.node_ids[:-1])}
+    assert all(aid[p]==bid[p] for p in aid.keys()&bid.keys())
+
+
+def test_invalidated_base_replaced_and_new_reachable_area_covered():
+    from lunar_drl_exploration.metric_graph import MetricGrid
+    core=DecisionCore(task(0,0,20,20),SensorSpec(range_m=2))
+    m=np.ones((20,20),np.uint8)
+    core.observe(snapshot(m,pose=Pose(10.5,10.5,0)))
+    old=core.builder._base_points.copy()
+    x,y=np.floor(old[0]).astype(int);m[y,x]=2
+    core.observe(replace(snapshot(m,pose=Pose(10.5,10.5,0)),revision=2))
+    base=core.builder._base_points
+    assert not np.any(np.all(base==old[0],axis=1))
+    cells=np.floor(base).astype(int); targets=np.argwhere(m==1)[:,::-1].copy()
+    assert np.all(np.isfinite(MetricGrid(m==1,1.).distances(cells,np.zeros(len(cells)),2.,targets)))
+
+
+def test_contracted_unique_witness_does_not_lend_visibility_to_actual_anchor():
+    m=np.zeros((9,9),np.uint8);m[3,3]=m[3,4]=1
+    b=np.ones((9,9),np.uint8);b[4,3]=2;b[5,4]=0
+    s=replace(snapshot(m,b,pose=Pose(.7,.7,0.),resolution=.2),goal_position_tolerance_m=.3)
+    core=DecisionCore(task(.8,1.,1.,1.2),SensorSpec())
+    obs,report=core.observe(s)
+    assert len(core.builder.unrepresented_interfaces)>0
+    assert not report.exhausted and not report.available
+    from lunar_drl_exploration.sensor import directional_visibility
+    from lunar_drl_exploration.history import HEADINGS
+    w=core.analyzer.workspace
+    source=np.floor((np.array([s.pose.x,s.pose.y])-w.origin)/s.resolution_m).astype(int)
+    targets=core.builder.unrepresented_interfaces-np.array(w.bounds[:2])
+    assert not directional_visibility(w.intrinsic,source,targets,
+        core.sensor.range_m/s.resolution_m,HEADINGS,np.pi/2).any()
+    assert np.all(obs.action_nodes==obs.current_index)
+
+
+def test_changed_lattice_phase_reseeds_instead_of_rounding_old_base_positions():
+    m=np.ones((12,15),np.uint8)
+    t=task(0,0,16,13);sensor=SensorSpec(range_m=2)
+    core=DecisionCore(t,sensor)
+    core.observe(snapshot(m,pose=Pose(5.5,5.5,0)))
+    shifted=replace(snapshot(m,origin=(.49,.37,0),pose=Pose(5.5,5.5,0)),revision=2)
+    core.observe(shifted)
+    fresh=DecisionCore(t,sensor);fresh.observe(shifted)
+    assert np.array_equal(core.builder._base_points,fresh.builder._base_points)
+    assert np.array_equal(core.builder._lattice_origin,[.49,.37])
+
+
+def test_alternative_executable_witness_replaces_contracted_near_witness():
+    m=np.zeros((12,12),np.uint8);m[3,3:6]=1
+    b=np.ones((12,12),np.uint8);b[4,3]=2;b[5,4]=0
+    s=replace(snapshot(m,b,pose=Pose(.7,.7,0.),resolution=.2),goal_position_tolerance_m=.3)
+    core=DecisionCore(task(.8,1.,1.,1.2),SensorSpec())
+    obs,report=core.observe(s)
+    assert report.available and not report.exhausted
+    assert len(core.builder.unrepresented_interfaces)==0
+    assert np.any(np.all(np.isclose(obs.goals[:,:2],[1.1,.7]),axis=1))

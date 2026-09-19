@@ -100,22 +100,25 @@ class TrainingState:
             counters=dumps_transport(counters)))
 
     def validate(self, config=None):
+        from .config import canonical_model_config
         record=self.record
         if record.get('schema') != SCHEMA: raise ValueError('training checkpoint schema mismatch')
         for key in ('semantics','config','learner','schedule','rng','replay',
                     'curriculum','collector_state','counters'):
             if key not in record: raise ValueError(f'checkpoint missing {key}')
+        semantics = dict(record['semantics'])
+        semantics['model'] = canonical_model_config(semantics['model'])
         if config is not None:
             expected=resume_semantics(config)
-            different=sorted(key for key in set(expected)|set(record['semantics'])
-                if expected.get(key)!=record['semantics'].get(key))
+            different=sorted(key for key in set(expected)|set(semantics)
+                if expected.get(key)!=semantics.get(key))
             if different: raise ValueError('incompatible full resume semantics: '+', '.join(different))
         schedule=UpdateSchedule.from_state_dict(record['schedule'])
         schedule_config=record['semantics']['schedule']
         if (schedule.warmup != schedule_config['warmup'] or
                 schedule.ratio != type(schedule.ratio)(str(schedule_config['ratio']))):
             raise ValueError('checkpoint schedule config disagrees with semantics')
-        if record['learner']['model_config'] != record['semantics']['model']:
+        if canonical_model_config(record['learner']['model_config']) != semantics['model']:
             raise ValueError('checkpoint model config disagrees with semantics')
         for key, value in record['semantics']['learning'].items():
             if record['learner']['learning_config'].get(key) != value:

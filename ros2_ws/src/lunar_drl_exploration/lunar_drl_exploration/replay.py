@@ -9,11 +9,11 @@ from types import MappingProxyType
 
 import numpy as np
 from .metrics import ResourceLimitError
-from .contracts import (DecisionObservation, PrivilegedScene, PrivilegedState,
+from .contracts import (DecisionObservation, PrivilegedScene, PrivilegedState, PrivilegedActionContext,
                         Transition, RewardParts, Pose, TaskSpec, SensorSpec)
 
 _TYPES = {cls.__name__: cls for cls in (DecisionObservation, PrivilegedScene,
-          PrivilegedState, Transition, RewardParts, Pose, TaskSpec, SensorSpec)}
+          PrivilegedState, PrivilegedActionContext, Transition, RewardParts, Pose, TaskSpec, SensorSpec)}
 
 
 _SNAPSHOT_MAGIC = b'LDRLRP2\0'
@@ -259,6 +259,20 @@ class ReplayBuffer:
             truth = selected[state.scene_id]
             if state.observed.shape != ((math.prod(truth.reference_shape)+7)//8,):
                 raise ValueError('observed bits do not match scene reference')
+        for observation, state in ((transition.observation, transition.privileged),
+                                   (transition.next_observation, transition.next_privileged)):
+            context = state.actions
+            if context is None:
+                raise ValueError('candidate action context required for replay admission')
+            if len(context.action_positions) != len(observation.goals):
+                raise ValueError('candidate action context must align with observation actions')
+            if (len(observation.goals) and not np.array_equal(
+                    context.positions[context.action_positions], observation.goals[:, :2])):
+                raise ValueError('candidate positions must exactly match frozen action goals')
+            if not np.array_equal(context.action_yaws, observation.goals[:, 2]):
+                raise ValueError('candidate action yaws must exactly match frozen action goals')
+            if np.any(context.support_indices >= len(selected[state.scene_id].positions)):
+                raise ValueError('candidate support index is outside truth graph')
         # Validate one whole admission before evicting anything. Oversized complete
         # messages stay with the collector until the caller handles this failure.
         single = ReplayBuffer(self.max_bytes)

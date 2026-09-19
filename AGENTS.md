@@ -12,8 +12,11 @@
   force-push 或移动分支指针。
 - `integration/pure-planner-orin` 是 pure-planner 的集成主线，不是
   `import/pure-planner-orin-main` 的待回合分支。任何开发结果都不得反向合入 import 分支。
-- 新功能和缺陷修复应从 `integration/pure-planner-orin` 创建命名清楚的 `feat/*` 或 `fix/*`
-  分支，并使用独立 worktree。验证通过后再合入 integration。
+- `integration/pure-planner-orin` 整合跨模块、跨场景的公共能力；`dev/*` 是从集成主线
+  派生的模块或场景开发整合线。当前强化学习开发线为 `dev/drl-exploration`。
+- 专项功能、修复、测试、文档分支分别使用 `feat/*`、`fix/*`、`test/*`、`docs/*`，
+  从所属开发线派生并使用独立 worktree，验证后合回所属开发线。公共能力修改从 integration
+  派生，验证后回到 integration，再由各开发线同步；不得把 DRL 专用模型/训练代码当成公共修复合入主线。
 - 不把本历史合入 `lunar-runtime` 的其他主线、开发分支或远程默认分支，除非用户明确批准仓库级
   整合方案。
 - Humble/Orin 稳定或发布分支只能在用户明确要求时从 integration 创建；发布修复中的通用修改
@@ -21,6 +24,12 @@
 - 未经用户明确要求，不合并、不推送、不创建 PR、不设置 upstream，也不删除分支或 worktree。
 
 ## 多会话与工作树安全
+
+- 用户于 2026-09-19 明确要求“集成主线 → 模块/场景开发线 → 专项分支”。当前 DRL 的
+  唯一活动开发整合线是 `dev/drl-exploration`，复用 `drl-exploration-redesign` 工作树；
+  以 `docs/DRL开发入口.md` 为索引。后续代码专项从该开发线派生，验证后合回；纯参数实验
+  使用相同已提交代码、不同配置和输出目录，不必另建代码分支。开发线用于整合和验证，
+  不让多个会话同时在此实现。旧训练/覆盖工作树保留作历史来源，不自动清理。
 
 - 每次开始工作先运行 `git branch --show-current`、`git status --short` 和
   `git worktree list`，确认自己位于预期分支和 worktree。

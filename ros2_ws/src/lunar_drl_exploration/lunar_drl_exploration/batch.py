@@ -34,6 +34,18 @@ class ObservationBatch:
         return len(self.action_counts)
 
 
+@dataclass
+class PrivilegedBatch:
+    graph: GraphBatch
+    query_positions: torch.Tensor
+    query_groups: torch.Tensor
+    support_query: torch.Tensor
+    support_nodes: torch.Tensor
+    support_geometry: torch.Tensor
+    action_queries: torch.Tensor
+    gains: torch.Tensor
+
+
 def _tensor(arrays, device, dtype=torch.float32):
     return torch.as_tensor(np.concatenate(arrays), dtype=dtype, device=device)
 
@@ -88,8 +100,24 @@ def pack_privileged(observations, states, scene_registry, device):
     if len(observations) != len(states):
         raise ValueError("one privileged state per observation required")
     features, edges, lengths = [], [], []
-    for observation, state in zip(observations, states):
+    query_positions, query_groups = [], []
+    support_query, support_nodes, support_geometry = [], [], []
+    action_queries, gains = [], []
+    node_offset = query_offset = 0
+    for group, (observation, state) in enumerate(zip(observations, states)):
         scene = scene_registry[state.scene_id]
+        context = state.actions
+        if context is None:
+            raise ValueError("candidate action context required for critic packing")
+        if len(context.action_positions) != len(observation.action_nodes):
+            raise ValueError("candidate actions must align with measured actions")
+        if (len(observation.goals) and not np.array_equal(
+                context.positions[context.action_positions], observation.goals[:, :2])):
+            raise ValueError("candidate positions must exactly match frozen action goals")
+        if not np.array_equal(context.action_yaws, observation.goals[:, 2]):
+            raise ValueError("candidate action yaws must exactly match frozen action goals")
+        if np.any(context.support_indices >= len(scene.positions)):
+            raise ValueError("candidate support index is outside truth graph")
         counts = np.diff(scene.reference_offsets)
         # Gather only reference bits, without unpacking the full hidden terrain.
         indices = scene.reference_indices
@@ -101,4 +129,23 @@ def pack_privileged(observations, states, scene_registry, device):
             np.log1p(counts), fractions)).astype(np.float32))
         edges.append(scene.edges)
         lengths.append(scene.edge_lengths)
-    return _graph(features, edges, lengths, None, device)
+        query_positions.append(((context.positions - origin) / 10.).astype(np.float32))
+        query_groups.append(np.full(len(context.positions), group, np.int64))
+        repeated = np.repeat(np.arange(len(context.positions)), np.diff(context.support_offsets))
+        support_query.append(repeated + query_offset)
+        support_nodes.append(context.support_indices + node_offset)
+        delta = (scene.positions[context.support_indices] - context.positions[repeated]) / 10.
+        support_geometry.append(np.column_stack((delta, context.support_distances / 10.)).astype(np.float32))
+        action_queries.append(context.action_positions + query_offset)
+        gains.append(context.gains / 100.)
+        node_offset += len(scene.positions)
+        query_offset += len(context.positions)
+    graph = _graph(features, edges, lengths, None, device)
+    def cat(values, *, dtype=torch.float32, columns=None):
+        if values and sum(len(v) for v in values):
+            return _tensor(values, device, dtype)
+        shape = (0, columns) if columns else (0,)
+        return torch.empty(shape, dtype=dtype, device=device)
+    return PrivilegedBatch(graph, cat(query_positions, columns=2), cat(query_groups, dtype=torch.long),
+        cat(support_query, dtype=torch.long), cat(support_nodes, dtype=torch.long),
+        cat(support_geometry, columns=3), cat(action_queries, dtype=torch.long), cat(gains))

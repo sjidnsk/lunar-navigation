@@ -1,6 +1,7 @@
 """Deployment-safe task graph decision inputs; no ROS, torch or truth imports."""
 
 import math
+from dataclasses import replace
 from .config import GraphConfig
 from .graph import GraphBuilder
 from .history import DirectionHistory
@@ -35,12 +36,13 @@ class DecisionCore:
             self.history.tolerance_m = snapshot.goal_position_tolerance_m
         report = self.analyzer.update(snapshot)
         self.builder.workspace = self.analyzer.workspace
-        return (
-            self.builder.build(
-                snapshot, report, self.history, self.task, self.sensor, velocity
-            ),
-            report,
+        observation = self.builder.build(
+            snapshot, report, self.history, self.task, self.sensor, velocity
         )
+        if len(self.builder.unrepresented_interfaces):
+            report = replace(report, available=False, exhausted=False,
+                             reason_code="UNREPRESENTED_TASK_INTERFACES")
+        return observation, report
 
     def record_observation(self, pose, observed_cells):
         """Call after a real sensor update at its executed physical pose."""

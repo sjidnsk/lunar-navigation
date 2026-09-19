@@ -26,6 +26,19 @@ def segment_log_softmax(logits, groups, count):
     return shifted - total[groups].log()
 
 
+def bound_actor_scores(raw_logits, action_groups, count, bound):
+    """Smooth per-state score bound; the centering mean stays differentiable.
+
+    Zero preserves the legacy logits exactly. Empty states do not enter other
+    states' means; a singleton maps to zero with probability one.
+    """
+    if bound == 0:
+        return raw_logits
+    counts = segment_sum(torch.ones_like(raw_logits), action_groups, count)
+    means = segment_sum(raw_logits, action_groups, count) / counts.clamp_min(1)
+    return bound * torch.tanh((raw_logits - means[action_groups]) / bound)
+
+
 class SparseAttentionLayer(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -124,6 +137,7 @@ class PolicyOutput:
     logits: torch.Tensor
     probs: torch.Tensor
     log_probs: torch.Tensor
+    raw_logits: torch.Tensor
 
 
 class Actor(nn.Module):
@@ -136,16 +150,18 @@ class Actor(nn.Module):
 
     def forward_packed(self, batch):
         actions, _ = self.encoder(batch)
-        logits = self.head(actions).squeeze(-1)
+        raw_logits = self.head(actions).squeeze(-1)
+        logits = bound_actor_scores(raw_logits, batch.action_groups, batch.size,
+                                    self.config.actor_score_bound)
         log_probs = segment_log_softmax(logits, batch.action_groups, batch.size)
-        return PolicyOutput(logits, log_probs.exp(), log_probs)
+        return PolicyOutput(logits, log_probs.exp(), log_probs, raw_logits)
 
     def forward(self, observations):
         batch = pack_observations(observations, next(self.parameters()).device)
         out = self.forward_packed(batch)
         return [PolicyOutput(*parts) for parts in zip(
             out.logits.split(batch.action_counts), out.probs.split(batch.action_counts),
-            out.log_probs.split(batch.action_counts))]
+            out.log_probs.split(batch.action_counts), out.raw_logits.split(batch.action_counts))]
 
 
 class Critic(nn.Module):
@@ -154,13 +170,24 @@ class Critic(nn.Module):
         self.encoder = MeasuredEncoder(config)
         self.truth = GraphEncoder(4, config)
         self.truth_read = CurrentRead(config)
-        self.head = nn.Sequential(nn.Linear(config.width * 4, config.width), nn.GELU(),
+        self.support_geometry = nn.Sequential(nn.Linear(3, config.width), nn.GELU(),
+                                              nn.Linear(config.width, config.width))
+        self.query_geometry = nn.Sequential(nn.Linear(2, config.width), nn.GELU())
+        self.head = nn.Sequential(nn.Linear(config.width * 6 + 1, config.width), nn.GELU(),
                                   nn.Linear(config.width, 1))
 
     def forward_packed(self, batch, privileged):
         actions, current = self.encoder(batch)
-        truth = self.truth_read(current, self.truth(privileged), privileged.groups)
-        return self.head(torch.cat((actions, truth[batch.action_groups]), dim=-1)).squeeze(-1)
+        truth_nodes = self.truth(privileged.graph)
+        global_truth = self.truth_read(current, truth_nodes, privileged.graph.groups)
+        support_values = truth_nodes[privileged.support_nodes] + self.support_geometry(privileged.support_geometry)
+        weights = torch.exp(-5. * privileged.support_geometry[:, 2])
+        totals = segment_sum(weights[:, None], privileged.support_query, len(privileged.query_positions))
+        local_truth = segment_sum(weights[:, None] * support_values, privileged.support_query,
+                                  len(privileged.query_positions)) / totals.clamp_min(1e-12)
+        queries = torch.cat((local_truth, self.query_geometry(privileged.query_positions)), dim=-1)
+        return self.head(torch.cat((actions, global_truth[batch.action_groups],
+            queries[privileged.action_queries], privileged.gains[:, None]), dim=-1)).squeeze(-1)
 
     def forward(self, observations, states, scene_registry):
         device = next(self.parameters()).device

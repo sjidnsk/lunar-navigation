@@ -22,7 +22,7 @@ def test_frozen_evaluation_json_keeps_reference_areas_and_failure_measurements(t
     actor = Actor(config.model)
     weights = {key: value.clone() for key, value in actor.state_dict().items()}
     artifact = tmp_path / 'actor.pt'
-    torch.save(dict(schema='task_graph_v1', model_config=asdict(config.model),
+    torch.save(dict(schema='task_graph_v3', model_config=asdict(config.model),
                     version=17, state_dict=weights), artifact)
     actions = []
 

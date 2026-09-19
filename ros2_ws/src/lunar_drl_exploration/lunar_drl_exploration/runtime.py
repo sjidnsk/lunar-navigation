@@ -13,8 +13,8 @@ class ActorPolicy:
         from .model import Actor
         from .config import ModelConfig
         record=torch.load(path,map_location='cpu',weights_only=True)
-        if record.get('schema')!='task_graph_v1' or set(record)!={'schema','model_config','version','state_dict'}:
-            raise ValueError('expected task_graph_v1 actor_state Actor-only artifact')
+        if record.get('schema')!='task_graph_v3' or set(record)!={'schema','model_config','version','state_dict'}:
+            raise ValueError('expected task_graph_v3 actor_state Actor-only artifact')
         actor=Actor(ModelConfig(**record['model_config']))
         actor.load_state_dict(record['state_dict'],strict=True);actor.eval()
         return cls(actor)

@@ -17,11 +17,16 @@ class GraphConfig:
     position_unit_m: float = 10.0
     frontier_unit_cells: float = 100.0
     history_tolerance_m: float = 0.1
+    coverage_radius_m: float = 2.0
+    connection_limit_m: float = 8.0
+    stretch: float = 1.2
     platform: "PlatformConfig | None" = None
 
     def __post_init__(self):
+        if not (0 < self.coverage_radius_m < self.connection_limit_m and self.stretch >= 1.0):
+            raise ValueError("positive graph radius/connection length and stretch >= 1 required")
         if self.position_unit_m != 10.0 or self.frontier_unit_cells != 100.0:
-            raise ValueError("task_graph_v1 fixes position and frontier normalization")
+            raise ValueError("task_graph_v3 fixes position and frontier normalization")
         if not np.isfinite(self.history_tolerance_m) or self.history_tolerance_m <= 0:
             raise ValueError("positive history tolerance required")
 
@@ -100,10 +105,20 @@ class ModelConfig:
     width: int = 128
     heads: int = 8
     layers: int = 6
+    actor_score_bound: float = 0.0
 
     def __post_init__(self):
         if self.width <= 0 or self.heads <= 0 or self.width % self.heads or self.layers <= 0:
             raise ValueError("positive width divisible by heads and positive layers required")
+        if not np.isfinite(self.actor_score_bound) or self.actor_score_bound < 0:
+            raise ValueError("actor_score_bound must be finite and nonnegative")
+
+
+def canonical_model_config(record):
+    """Only legacy v3's missing score parameterization defaults to unbounded."""
+    result = dict(record)
+    result.setdefault('actor_score_bound', 0.0)
+    return result
 
 
 @dataclass(frozen=True)
@@ -111,17 +126,17 @@ class LearningConfig:
     batch_size: int = 64
     microbatch_size: int = 16
     learning_rate: float = 1e-5
-    gamma: float = 1.0
+    gamma: float = 0.995
     polyak: float = 0.005
     initial_alpha: float = 5e-5
     maximum_alpha: float = 1e-4
-    target_entropy_factor: float = 0.01
+    target_entropy_factor: float = 0.10
 
     def __post_init__(self):
         if self.batch_size != 64 or not 0 < self.microbatch_size <= self.batch_size:
             raise ValueError("effective batch is 64; microbatch must be in [1,64]")
-        if self.gamma != 1.0:
-            raise ValueError("task reward contract requires gamma=1")
+        if not 0 < self.gamma < 1:
+            raise ValueError("discounted task reward requires 0 < gamma < 1")
         if not (0 < self.initial_alpha <= self.maximum_alpha and
                 0 < self.polyak <= 1 and self.learning_rate > 0 and
                 self.target_entropy_factor >= 0):
@@ -136,6 +151,7 @@ class TrainingConfig:
     sensor: 'SensorSpec' = field(default_factory=lambda: SensorSpec())
     platform: PlatformConfig = field(default_factory=load_platform_config)
     seed: int = 20260915
+    paired_scene_sequence: bool = False
     environments: int = 8
     target_rtf: float = 30.0
     integration_step_s: float = .05
@@ -158,7 +174,7 @@ class TrainingConfig:
     total_output_max_bytes: int = 20 * 1024**3
     metrics_max_bytes: int = 8 * 1024**2
     save_interval_s: float = 1800.0
-    output_dir: str = 'training-output/drl-exploration-redesign'
+    output_dir: str = 'training-output/drl-metric-critic'
     system_reserve_bytes: int = 2 * 1024**3
     owned_pss_limit_bytes: int | None = None
 
@@ -213,8 +229,10 @@ def resume_semantics(config):
                 if key not in ('microbatch_size','learning_rate','polyak','initial_alpha')}
     platform = {key: value for key, value in record['platform'].items()
                 if key != 'capability_path'}
-    return dict(model=record['model'], learning=learning,
-        observation_schema='task_graph_v1', action_schema='joint_pose_20x8_v1',
+    result = dict(model=record['model'], learning=learning,
+        observation_schema='task_graph_v3', action_schema='local_metric_pose_v3',
+        privileged_schema='candidate_truth_v1',
+        graph_geometry=dict(coverage_radius_m=2.,connection_limit_m=8.,stretch=1.2),
         observation_model='finite_center_tip_prefix_v1', generator_version=5,
         observation_origin='actual_pose_optical_offset',
         effective_measurement='classified_center_native_3x3_no_hidden_neighbors_v1',
@@ -227,6 +245,10 @@ def resume_semantics(config):
         schedule=dict(warmup=config.warmup, ratio=config.update_ratio),
         curriculum_budgets=record['curriculum_budgets'],
         curriculum_extents_m=record['curriculum_extents_m'])
+    if config.paired_scene_sequence:
+        result['scene_sequence'] = dict(mode='paired_slot_episode_v1',
+            seed=config.seed, environments=config.environments)
+    return result
 
 
 def training_config_from_record(record):

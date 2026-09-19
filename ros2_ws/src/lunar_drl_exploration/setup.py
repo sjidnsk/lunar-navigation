@@ -26,6 +26,9 @@ setup(
         ("share/lunar_drl_exploration", ["package.xml"]),
     ],
     ext_modules=[
+        Extension("lunar_drl_graph_native", ["native/graph.cpp"],
+                  depends=["native/grid_buffer.hpp"], language="c++",
+                  extra_compile_args=["-std=c++20", "-O3", "-Wall", "-Wextra"]),
         Extension(
             "lunar_drl_terrain_native",
             ["native/terrain.cpp", "native/visibility.cpp"],

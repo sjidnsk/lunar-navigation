@@ -7,7 +7,7 @@ import weakref
 import numpy as np
 import pytest
 from lunar_drl_exploration.contracts import (
-    DecisionObservation, PrivilegedScene, PrivilegedState, Transition, RewardParts)
+    DecisionObservation, PrivilegedScene, PrivilegedState, PrivilegedActionContext, Transition, RewardParts)
 from lunar_drl_exploration.replay import ReplayBuffer, dumps_transport, loads_transport
 
 
@@ -27,8 +27,12 @@ def scene(key='s'):
 def transition(obs=None, nxt=None, key='s'):
     obs = observation() if obs is None else obs
     nxt = observation(1) if nxt is None else nxt
-    state = PrivilegedState(key, np.array([3], np.uint8))
-    return Transition(obs, 0, .1, nxt, state, state, RewardParts(10,0,0),
+    def state(value):
+        positions, inverse=np.unique(value.goals[:,:2],axis=0,return_inverse=True)
+        actions=PrivilegedActionContext(positions,inverse,value.goals[:,2],np.arange(len(positions)+1),
+            np.arange(len(positions))%2,np.ones(len(positions)),np.ones(len(value.goals)))
+        return PrivilegedState(key, np.array([3], np.uint8), actions)
+    return Transition(obs, 0, .1, nxt, state(obs), state(nxt), RewardParts(10,0,0),
                       False, False, 'episode', 0)
 
 
@@ -123,7 +127,7 @@ def test_static_scene_id_binds_actual_reference_and_evicts_independently():
     replay = ReplayBuffer(1000000)
     for truth in truths:
         t = transition(key=truth.scene_id)
-        p = PrivilegedState(truth.scene_id,truth.packed_reference)
+        p = PrivilegedState(truth.scene_id,truth.packed_reference,t.privileged.actions)
         replay.add(replace(t,privileged=p,next_privileged=p), {truth.scene_id:truth})
     assert set(replay.scenes) == {s.scene_id for s in truths}
     for t in replay.sample(64,np.random.default_rng(3)):

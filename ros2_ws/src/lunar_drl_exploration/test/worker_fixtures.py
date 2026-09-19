@@ -4,7 +4,7 @@ import uuid
 from types import SimpleNamespace
 import numpy as np
 from lunar_drl_exploration.contracts import (
-    DecisionObservation, PrivilegedScene, PrivilegedState, Transition, RewardParts)
+    DecisionObservation, PrivilegedScene, PrivilegedState, PrivilegedActionContext, Transition, RewardParts)
 
 
 def observation():
@@ -35,7 +35,10 @@ class ControlledEnv:
             self.obs = replace(self.obs, action_nodes=[], action_yaws=[], goals=np.empty((0, 3)))
         self.observation = self.obs
         self.reference = SimpleNamespace(coverage_ratio=lambda bits: 0.)
-        self.state = PrivilegedState(self.episode_id, [0])
+        positions, inverse = np.unique(self.obs.goals[:, :2], axis=0, return_inverse=True)
+        context = PrivilegedActionContext(positions, inverse, self.obs.goals[:,2], np.arange(len(positions)+1),
+            np.arange(len(positions)) % 2, np.ones(len(positions)), np.ones(len(self.obs.goals)))
+        self.state = PrivilegedState(self.episode_id, [0], context)
         scene = PrivilegedScene(self.episode_id, [[0, 0], [1, 0]], [[0, 1]], [1],
             [0, 1, 2], [0, 1], [3], (1, 2), {})
         self.static_scenes = {scene.scene_id: scene}

@@ -1,4 +1,9 @@
+> 2026-09-19 实施：当前策略为 `task_graph_v3`，动作图使用 2 m 路径覆盖、8 m 局部连接、1.2 spanner；移除固定 19 邻居和细门户动作。候选对应 Critic 使用训练侧冻结 `candidate_truth_v1`，学习器 `candidate_graph_sac_v2`。Actor 参数结构、gamma=0.995、熵系数0.10和奖励保持不变。新输出目录为 `training-output/drl-metric-critic[-small]`，旧完整检查点不兼容且保持原样。验证见仓库 `docs/validation/2026-09-19-drl-graph-critic-implementation.md`；以下分阶段历史记录不代替当前证据。
+
+
 # DRL exploration contracts and offline terrain
+
+当前统一开发、构建、实验与历史版本边界见[强化学习开发入口](../../../docs/DRL开发入口.md)。
 
 The deployed policy reads native policy-map exports. Offline terrain construction
 is explicitly separate: importing `contracts`, `config`, `geometry` or `sensor`

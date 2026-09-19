@@ -4,7 +4,8 @@ import inspect
 import numpy as np
 import pytest
 torch = pytest.importorskip("torch")
-from lunar_drl_exploration.contracts import DecisionObservation, PrivilegedScene, PrivilegedState
+from lunar_drl_exploration.contracts import (DecisionObservation, PrivilegedScene, PrivilegedState,
+    PrivilegedActionContext)
 from lunar_drl_exploration.config import ModelConfig
 from lunar_drl_exploration.model import Actor, Critic, PolygonEncoder
 from lunar_drl_exploration.batch import pack_privileged
@@ -32,8 +33,20 @@ def scene(n=9):
         np.packbits(np.ones(n*2, np.uint8), bitorder='little'), (2,n), {})
 
 
-def state(n=9, full=False):
-    return PrivilegedState('s', np.packbits(np.full(n*2, full, np.uint8), bitorder='little'))
+def action_context(obs, truth_nodes=9, gain=1.):
+    if not len(obs.goals):
+        return PrivilegedActionContext(np.empty((0,2)), np.empty(0,int), np.empty(0), np.array([0]),
+            np.empty(0,int), np.empty(0), np.empty(0))
+    positions, action_positions = np.unique(obs.goals[:, :2], axis=0, return_inverse=True)
+    supports = np.arange(len(positions), dtype=np.int64) % truth_nodes
+    return PrivilegedActionContext(positions, action_positions, obs.goals[:, 2], np.arange(len(positions)+1),
+        supports, np.linspace(.1, 1., len(positions)), np.full(len(obs.goals), gain))
+
+
+def state(n=9, full=False, obs=None, gain=1.):
+    obs = observation() if obs is None else obs
+    return PrivilegedState('s', np.packbits(np.full(n*2, full, np.uint8), bitorder='little'),
+                           action_context(obs, n, gain))
 
 
 def test_actor_packing_permutation_and_joint_argmax():
@@ -77,14 +90,15 @@ def test_critic_uses_current_coverage_and_measured_observation_actor_is_isolated
     assert list(inspect.signature(actor.forward).parameters) == ['observations']
     with torch.no_grad():
         original = actor([obs])[0].logits.clone()
-        q0 = critic([obs], [state()], {'s':truth})[0]
-        q1 = critic([obs], [state(full=True)], {'s':truth})[0]
-        q2 = critic([replace(obs, features=obs.features+0.5)], [state()], {'s':truth})[0]
+        q0 = critic([obs], [state(obs=obs)], {'s':truth})[0]
+        q1 = critic([obs], [state(full=True, obs=obs)], {'s':truth})[0]
+        changed = replace(obs, features=obs.features+0.5)
+        q2 = critic([changed], [state(obs=changed)], {'s':truth})[0]
         assert not torch.allclose(q0,q1)
         assert not torch.allclose(q0,q2)
         torch.testing.assert_close(actor([obs])[0].logits, original, atol=0,rtol=0)
-    batch = pack_privileged([obs], [state(full=True)], {'s':truth}, 'cpu')
-    np.testing.assert_allclose(batch.features[:, 3].numpy(), 1.)
+    batch = pack_privileged([obs], [state(full=True, obs=obs)], {'s':truth}, 'cpu')
+    np.testing.assert_allclose(batch.graph.features[:, 3].numpy(), 1.)
 
 
 def test_sparse_attention_never_allocates_node_square():
@@ -108,11 +122,11 @@ def test_critic_packs_different_scene_topologies_and_reference_owner_counts():
     truth1 = replace(scene(3), reference_offsets=np.array([0,0,2,6]),
         reference_indices=np.array([0,1,2,3,4,5]))
     truth2 = replace(scene(11),scene_id='other')
-    states = [PrivilegedState('s',np.array([0b00101101],np.uint8)),
-              replace(state(11,True),scene_id='other')]
+    states = [PrivilegedState('s',np.array([0b00101101],np.uint8),action_context(observations[0],3)),
+              replace(state(11,True,observations[1]),scene_id='other')]
     scenes={'s':truth1,'other':truth2}
     packed=pack_privileged(observations,states,scenes,'cpu')
-    torch.testing.assert_close(packed.features[:3,3],torch.tensor([0.,.5,.75]))
+    torch.testing.assert_close(packed.graph.features[:3,3],torch.tensor([0.,.5,.75]))
     with torch.no_grad():
         results=critic(observations,states,scenes)
         for o,s,q in zip(observations,states,results):
@@ -122,7 +136,53 @@ def test_critic_packs_different_scene_topologies_and_reference_owner_counts():
         shuffled=replace(truth1,positions=truth1.positions[order],edges=inverse[truth1.edges],
             reference_offsets=np.r_[0,np.cumsum([len(a) for a in owner_chunks])],
             reference_indices=np.concatenate(owner_chunks))
-        torch.testing.assert_close(critic([observations[0]],[states[0]],{'s':shuffled})[0],results[0],atol=2e-6,rtol=2e-5)
+        remapped = replace(states[0], actions=replace(states[0].actions,
+            support_indices=inverse[states[0].actions.support_indices]))
+        torch.testing.assert_close(critic([observations[0]],[remapped],{'s':shuffled})[0],results[0],atol=2e-6,rtol=2e-5)
+
+
+def test_critic_candidate_queries_are_permutation_local_and_gain_sensitive():
+    torch.manual_seed(71)
+    obs, truth = observation(), scene()
+    critic, actor = Critic(ModelConfig()).eval(), Actor(ModelConfig()).eval()
+    base = state(obs=obs)
+    order = np.arange(len(obs.goals))[::-1].copy()
+    shuffled_obs = replace(obs, action_nodes=obs.action_nodes[order], action_yaws=obs.action_yaws[order],
+                           goals=obs.goals[order])
+    shuffled = replace(base, actions=replace(base.actions,
+        action_positions=base.actions.action_positions[order], action_yaws=base.actions.action_yaws[order],
+        gains=base.actions.gains[order]))
+    with torch.no_grad():
+        q = critic([obs], [base], {'s':truth})[0]
+        torch.testing.assert_close(critic([shuffled_obs], [shuffled], {'s':truth})[0], q[order])
+        extra = replace(base, actions=PrivilegedActionContext(
+            np.vstack((base.actions.positions, [99., 99.])), base.actions.action_positions, base.actions.action_yaws,
+            np.r_[base.actions.support_offsets, base.actions.support_offsets[-1] + 1],
+            np.r_[base.actions.support_indices, 0], np.r_[base.actions.support_distances, 1.],
+            base.actions.gains))
+        torch.testing.assert_close(critic([obs], [extra], {'s':truth})[0], q)
+        richer = replace(base, actions=replace(base.actions, gains=base.actions.gains + 100.))
+        assert not torch.allclose(critic([obs], [richer], {'s':truth})[0], q)
+        torch.testing.assert_close(actor([obs])[0].logits, actor([obs])[0].logits, atol=0, rtol=0)
+
+
+def test_critic_local_support_and_gain_receive_gradients():
+    critic = Critic(ModelConfig()).train()
+    obs, truth = observation(), scene()
+    critic([obs], [state(obs=obs, gain=1.)], {'s':truth})[0].sum().backward()
+    assert critic.support_geometry[0].weight.grad.abs().sum() > 0
+    assert critic.head[0].weight.grad[:, -1].abs().sum() > 0
+
+
+def test_critic_rejects_stale_descriptor_when_same_position_yaws_are_swapped():
+    obs = observation()
+    stale = state(obs=obs)
+    order = np.arange(len(obs.goals))
+    order[:2] = order[1::-1]
+    swapped = replace(obs, action_nodes=obs.action_nodes[order],
+                      action_yaws=obs.action_yaws[order], goals=obs.goals[order])
+    with pytest.raises(ValueError, match="yaw"):
+        pack_privileged([swapped], [stale], {'s': scene()}, 'cpu')
 
 
 def test_training_recompute_reduces_saved_activations_without_changing_gradients():
@@ -154,19 +214,20 @@ def test_executed_optical_history_aligns_with_packed_vehicle_actions(mount_yaw):
     from lunar_drl_exploration.decision import DecisionCore
     from test_task_analysis import snapshot, task
 
-    pose = Pose(3.5, 3.5, 0.)
+    pose = Pose(3.5, 3.5, np.pi)
     core = DecisionCore(task(0, 0, 8, 8), SensorSpec(range_m=3, offset_yaw_rad=mount_yaw))
     # Only a real, nearby physical observation counts; a far pose and an empty
     # sensor update cannot mark other action directions at the current anchor.
     core.record_observation(Pose(3.51, 3.51, 2 * np.pi), [[1, 2]])
     core.record_observation(Pose(4.5, 3.5, np.pi), [[1, 2]])
     core.record_observation(Pose(3.5, 3.5, np.pi), [])
-    obs, _ = core.observe(snapshot(np.ones((8, 8), np.uint8), pose=pose))
+    m = np.zeros((8, 8), np.uint8); m[2:5, 2:5] = 1
+    obs, _ = core.observe(snapshot(m, pose=pose))
     current = obs.action_nodes == obs.current_index
     packed = pack_observations([obs], 'cpu')
     visited = packed.action_features[current, 5].numpy()
-    np.testing.assert_array_equal(visited, [1, 0, 0, 0, 0, 0, 0, 0])
-    np.testing.assert_array_equal(obs.features[obs.current_index, 11:], visited)
+    np.testing.assert_array_equal(visited, [1, 0, 0, 0, 0, 0, 0])
+    np.testing.assert_array_equal(obs.features[obs.current_index, 11:], [1, 0, 0, 0, 0, 0, 0, 0])
     assert obs.features.shape[1] == 19 and packed.action_features.shape[1] == 6
 
 
@@ -181,7 +242,8 @@ def test_optical_history_reprojects_when_mount_configuration_changes():
     # Optical-world pi/2 remains observed after the sensor mounting changes.
     core.sensor = replace(core.sensor, offset_yaw_rad=np.pi / 2)
     core.analyzer.sensor = core.sensor
-    obs, _ = core.observe(snapshot(np.ones((8, 8), np.uint8), pose=Pose(3.5, 3.5, 0)))
+    m = np.zeros((8, 8), np.uint8); m[2:5, 2:5] = 1
+    obs, _ = core.observe(snapshot(m, pose=Pose(3.5, 3.5, np.pi)))
     visited = pack_observations([obs], 'cpu').action_features[obs.action_nodes == obs.current_index, 5]
-    np.testing.assert_array_equal(visited.numpy(), [1, 0, 0, 0, 0, 0, 0, 0])
+    np.testing.assert_array_equal(visited.numpy(), [1, 0, 0, 0, 0, 0, 0])
     np.testing.assert_array_equal(core.history.bits([[3.5, 3.5]])[0], [0, 0, 1, 0, 0, 0, 0, 0])
