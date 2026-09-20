@@ -33,5 +33,5 @@ snapshot_max_bytes: 2147483648
 total_output_max_bytes: 21474836480
 metrics_max_bytes: 8388608
 save_interval_s: 1800.0
-output_dir: training-output/drl-metric-critic
+output_dir: training-output/drl-current-opportunities-v1
 system_reserve_bytes: 2147483648
