@@ -126,7 +126,7 @@ class LearningConfig:
     batch_size: int = 64
     microbatch_size: int = 16
     learning_rate: float = 1e-5
-    gamma: float = 0.995
+    gamma: float = 1.0
     polyak: float = 0.005
     initial_alpha: float = 5e-5
     maximum_alpha: float = 1e-4
@@ -135,8 +135,8 @@ class LearningConfig:
     def __post_init__(self):
         if self.batch_size != 64 or not 0 < self.microbatch_size <= self.batch_size:
             raise ValueError("effective batch is 64; microbatch must be in [1,64]")
-        if not 0 < self.gamma < 1:
-            raise ValueError("discounted task reward requires 0 < gamma < 1")
+        if not 0 < self.gamma <= 1:
+            raise ValueError("task reward requires 0 < gamma <= 1")
         if not (0 < self.initial_alpha <= self.maximum_alpha and
                 0 < self.polyak <= 1 and self.learning_rate > 0 and
                 self.target_entropy_factor >= 0):
@@ -148,6 +148,7 @@ class TrainingConfig:
     """Operational defaults and explicit experience semantics; no Torch/native import."""
     model: ModelConfig = field(default_factory=ModelConfig)
     learning: LearningConfig = field(default_factory=LearningConfig)
+    completion_bonus: float = 5.0
     sensor: 'SensorSpec' = field(default_factory=lambda: SensorSpec())
     platform: PlatformConfig = field(default_factory=load_platform_config)
     seed: int = 20260915
@@ -180,6 +181,8 @@ class TrainingConfig:
 
     def __post_init__(self):
         boundaries = self.curriculum_transition_boundaries
+        if not np.isfinite(self.completion_bonus) or self.completion_bonus < 0:
+            raise ValueError('completion bonus must be finite and nonnegative')
         if (not isinstance(boundaries, (tuple, list)) or len(boundaries) != 2 or
                 any(type(value) is not int or value < 0 for value in boundaries) or
                 boundaries[0] >= boundaries[1]):
@@ -237,7 +240,8 @@ def resume_semantics(config):
         observation_model='finite_center_tip_prefix_v1', generator_version=5,
         observation_origin='actual_pose_optical_offset',
         effective_measurement='classified_center_native_3x3_no_hidden_neighbors_v1',
-        reward='delta_area/100-.02*distance/10-.005*absolute_turn/pi-.001_v1',
+        reward='delta_area/100-.02*distance/10-.005*absolute_turn/pi-.001+completion_bonus*terminated_v2',
+        completion_bonus=config.completion_bonus,
         termination='current_reachable_task_opportunities_v1',
         graph_normalization=dict(position_m=10., frontier_cells=100.),
         sensor=record['sensor'], platform=platform,

@@ -88,6 +88,39 @@ def test_native_no_path_and_timeout_with_final_state_remain_transitions(monkeypa
     monkeypatch.setattr(env,'_snapshot',lambda:(_ for _ in ()).throw(InfrastructureError('lost map transport')))
     import pytest
     with pytest.raises(InfrastructureError,match='lost map'):env.step(0)
+    # Completion is awarded by the same environment step, once only; native
+    # goal failures above did not earn a bonus merely for ending an action.
+    from dataclasses import replace
+    env.config=replace(cfg,completion_bonus=2.)
+    full=replace(snapshot(np.pad(np.ones((6,6),np.uint8),3),
+                          b=np.ones((12,12),np.uint8),pose=pose),revision=2)
+    monkeypatch.setattr(env,'_snapshot',lambda:full)
+    monkeypatch.setattr(env,'_execute_goal',lambda goal:NavigationResult(0,'GOAL_REACHED',0))
+    result=env.step(0)
+    # 12x12 known minus the original 6x6: 108 m² gain + 2 bonus - .001.
+    assert result.terminated and result.reward == pytest.approx(3.079)
+    with pytest.raises(RuntimeError,match='requires reset'):env.step(0)
+
+
+@pytest.mark.parametrize('completed,budget_hit,bonus,want,terminated,truncated', [
+    (False, False, 5., .974, False, False),
+    (False, True, 5., .974, False, True),
+    (True, False, 5., 5.974, True, False),
+    (True, True, 5., 5.974, True, False),
+    (True, False, 2., 2.974, True, False),
+    (True, False, 0., .974, True, False),
+])
+def test_completion_bonus_only_on_exhaustion_with_whole_action_costs(
+        completed,budget_hit,bonus,want,terminated,truncated):
+    from lunar_drl_exploration.ros_env import make_transition
+    from test_model import observation,state
+    obs=observation();priv=state(obs=obs)
+    result=make_transition(obs,0,obs,priv,priv,initial=(0.,0.,0.),
+        final=(100.,10.,math.pi),completed=completed,budget_hit=budget_hit,
+        episode_id='completion',actor_version=0,completion_bonus=bonus)
+    assert result.reward == pytest.approx(want)
+    assert result.terminated == terminated and result.truncated == truncated
+    assert result.parts.new_area_m2 == 100.
 
 
 def test_deployment_history_pose_uses_actual_map_from_odom_transform():

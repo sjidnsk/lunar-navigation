@@ -42,7 +42,7 @@ integration/pure-planner-orin      公共地图、规划、控制和通用接口
 | 学习 | `candidate_graph_sac_v2`；候选对应的 `candidate_truth_v1` 训练侧 Critic；Actor 不读取真值。 |
 | Actor 实验 | 默认 C=0；有界 C=10 可通过配对驱动比较，尚未确定胜者。SAC 损失保持不变。 |
 | 导航与控制 | 正式规划器、保留原路径净空的简化器、轮式净空代价权重 2.0、公共轮式跟踪器、轻量运动学平台。 |
-| 运行 | 8 环境、30 倍目标倍率、0.2 m/s、10 m/90°；batch64/microbatch16、gamma=.995、目标熵因子 .10、alpha 上限 1e-4；每30分钟保存。 |
+| 运行 | 8 环境、30 倍目标倍率、0.2 m/s、10 m/90°；batch64/microbatch16、gamma=1.0、目标熵因子 .10、alpha 上限 1e-4；每30分钟保存。 |
 
 整合后按用户要求采用净空优先基础选点B版，并保持观测补点规则。C=5敏感性探针仍不是正式算法。
 当前决策图仍允许必要近邻节点。实现、对比与单线训练协议见[净空优先基线](validation/2026-09-19-drl-clearance-baseline.md)。
@@ -80,7 +80,7 @@ scripts/drl/compare_actor.sh --help
 
 正式训练、恢复、导出、评估和推理的参数见[操作指令](操作指令.md#drl-稀疏图探索独立-redesign-分支)。启动脚本清除继承的旧 overlay，再加载同一份 Jazzy 安装；不要手动注入旧工作树的库。
 
-当前正式长训使用统一配置，无有限转移上限；模型、优化器、回放和课程从头开始，输出到项目内 `training-output/drl-current-opportunities-v1/`：
+当前正式长训使用统一配置，无有限转移上限；模型、优化器、回放和课程从头开始，输出到项目内 `training-output/drl-undiscounted-completion-v1/`：
 
 ```bash
 scripts/drl/train.sh --config config/drl_exploration.yaml
@@ -88,7 +88,7 @@ scripts/drl/train.sh --config config/drl_exploration.yaml
 scripts/drl/train.sh --config config/drl_exploration.yaml --resume
 ```
 
-仍采用原始分数形式 C=0 的 Actor，并正常更新网络权重。奖励、gamma=.995、目标熵因子 .10 和 alpha 上限 1e-4 保持当前基线。旧 `baseline.sh` 是历史有限训练/分阶段评估驱动，不作为本轮正式长训入口。
+仍采用原始分数形式 C=0 的 Actor，并正常更新网络权重。按本轮确认采用 gamma=1.0，并对正常探索耗尽追加一次 completion_bonus=5.0；其余面积/路程/转角/步代价及目标熵因子 .10、alpha 上限 1e-4 保持原值。旧 `baseline.sh` 是历史有限训练/分阶段评估驱动，不作为本轮正式长训入口。
 
 旧 `training-output/actor-bounded-20260919/` 保留碰撞修正前的记录，目前为 interrupted，配对实验未完成，不能据此确定原分数或有界分数胜出。切换导航算法后不要继续把该目录的早期组与新运行组当成同一条件的对照。
 
@@ -106,3 +106,5 @@ scripts/drl/train.sh --config config/drl_exploration.yaml --resume
 完整恢复语义为 `current_reachable_task_opportunities_v1`；旧结束语义的完整检查点和回放不直接续用。旧模型与所有历史输出保留，新检查点可按上面的 `--resume` 命令恢复。当前只验证10 m/90°，窄视野/八方向匹配的既有限制及长期策略效果仍须单独验证。
 
 本轮合入、重新构建、313项测试和正式开训证据见[2026-09-20整合与开训记录](validation/2026-09-20-drl-training-integration.md)。
+
+当前奖励与折扣切换见[γ=1与完成奖励](validation/2026-09-20-drl-undiscounted-completion.md)。之前的 current-opportunities-v1 输出为旧奖励记录，不能用新配置直接 --resume；本轮新输出目录保持同一保存/恢复入口。

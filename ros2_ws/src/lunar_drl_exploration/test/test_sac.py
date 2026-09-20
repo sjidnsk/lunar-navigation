@@ -46,8 +46,9 @@ def test_enumerated_math_and_temperature_direction():
         assert logalpha.grad*sign > 0 and h.grad is None
 
 
-def test_terminal_skips_empty_actions_truncated_bootstraps_and_target_detaches():
-    learner=SACLearner(ModelConfig(),LearningConfig(),device='cpu')
+@pytest.mark.parametrize('gamma', [.995, 1.0])
+def test_terminal_skips_empty_actions_truncated_bootstraps_and_target_detaches(gamma):
+    learner=SACLearner(ModelConfig(),LearningConfig(gamma=gamma),device='cpu')
     samples=transitions()[:3]
     samples[1]=replace(samples[1],truncated=True)
     actual=learner.td_targets(samples,{'s':scene()})

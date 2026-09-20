@@ -4,12 +4,13 @@ learning:
   batch_size: 64
   microbatch_size: 16
   learning_rate: 0.00001
-  gamma: 0.995
+  gamma: 1.0
   polyak: 0.005
   initial_alpha: 0.00005
   maximum_alpha: 0.0001
   target_entropy_factor: 0.10
 sensor: {range_m: 10.0, fov_deg: 90.0}
+completion_bonus: 5.0
 seed: 20260915
 environments: 8
 target_rtf: 30.0
@@ -33,5 +34,5 @@ snapshot_max_bytes: 2147483648
 total_output_max_bytes: 21474836480
 metrics_max_bytes: 8388608
 save_interval_s: 1800.0
-output_dir: training-output/drl-current-opportunities-v1
+output_dir: training-output/drl-undiscounted-completion-v1
 system_reserve_bytes: 2147483648

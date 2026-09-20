@@ -36,7 +36,7 @@ def test_baseline_trains_one_continuing_policy_and_skips_completed_evaluations(t
     state=b.read_json(tmp_path/'run'/'baseline-state.json')
     assert state['status']=='complete' and state['records']['10']['transitions']==10
     config=b.read_json(tmp_path/'run'/'config.json')
-    assert config['model']['actor_score_bound']==0 and config['learning']['gamma']==.995
+    assert config['model']['actor_score_bound']==0 and config['learning']['gamma']==1.
     assert config['learning']['target_entropy_factor']==.1
     before=len(calls)
     assert b.run_baseline(args(tmp_path,True))==0 and len(calls)==before

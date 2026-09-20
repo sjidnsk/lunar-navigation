@@ -42,12 +42,14 @@ class ExecutionMetadata:
 
 
 def make_transition(observation,action,next_observation,privileged,next_privileged,*,
-                    initial,final,completed,budget_hit,episode_id,actor_version):
+                    initial,final,completed,budget_hit,episode_id,actor_version,completion_bonus=0.):
     area,distance,turn=(float(b-a) for a,b in zip(initial,final))
     if area < -1e-8 or distance < -1e-8 or turn < -1e-8:
         raise InfrastructureError('nonmonotonic whole-action accounting')
     parts=RewardParts(area,distance,turn)
     reward=area/100.-.02*distance/10.-.005*turn/math.pi-.001
+    if completed:
+        reward += completion_bonus
     return Transition(observation,action,reward,next_observation,privileged,next_privileged,
         parts,bool(completed),bool(budget_hit and not completed),episode_id,int(actor_version))
 
@@ -300,7 +302,7 @@ class RosExplorationEnv:
             final=(self._known_area,self.plant.distance_m,self.plant.turn_rad)
             transition=make_transition(observation,action_index,next_observation,privileged,next_privileged,
                 initial=before,final=final,completed=report.completed,budget_hit=self.steps>=self.episode_budget,
-                episode_id=self.episode_id,actor_version=version)
+                episode_id=self.episode_id,actor_version=version,completion_bonus=self.config.completion_bonus)
             p=self.plant.pose
             self.last_execution=ExecutionMetadata(goal,result.outcome,result.reason_code,result.last_segment_revision,
                 self.terrain.world_to_cell(*goal[:2]),self.terrain.world_to_cell(p.x,p.y),(p.x,p.y,p.yaw),

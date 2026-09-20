@@ -32,10 +32,10 @@ def test_pending_scan_uses_visibility_and_native_yaw_tolerance(yaw):
 
 
 def test_discount_and_entropy_defaults_and_range():
-    assert LearningConfig().gamma==.995
+    assert LearningConfig().gamma==1.
     assert LearningConfig().target_entropy_factor==.10
     assert LearningConfig(gamma=.999).gamma==.999
-    for gamma in (0.,1.,float('nan')):
+    for gamma in (0.,1.01,float('inf'),float('nan')):
         with pytest.raises(ValueError): LearningConfig(gamma=gamma)
 
 
