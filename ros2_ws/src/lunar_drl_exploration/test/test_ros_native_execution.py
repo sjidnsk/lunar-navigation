@@ -14,9 +14,11 @@ def test_native_cold_start_spin_adjacent_arrival_and_frozen_transition(start_xy)
     from lunar_drl_exploration.scene import TerrainGrid
     from lunar_drl_exploration.ros_env import RosExplorationEnv
     config=TrainingConfig(target_rtf=10.)
-    heights=np.zeros((60,60),np.float32);heights[:,26:]=2.
+    # Keep unexplored reachable terrain beyond the initialization scan so this
+    # navigation/budget test does not finish successfully before its first step.
+    heights=np.zeros((120,60),np.float32);heights[:,26:]=2.
     terrain=TerrainGrid.from_heights(heights,.2,(-4.,-4.),config.platform)
-    task=TaskSpec('native_integration','map',np.array([[-5,-5],[8,-5],[8,8],[-5,8]]))
+    task=TaskSpec('native_integration','map',np.array([[-5,-5],[8,-5],[8,20],[-5,20]]))
     env=RosExplorationEnv(config,0,domain_base=200,wall_timeout_s=30.)
     try:
         observation,privileged=env.reset_scene(terrain,Pose(start_xy,start_xy,0.),task)
@@ -33,6 +35,7 @@ def test_native_cold_start_spin_adjacent_arrival_and_frozen_transition(start_xy)
             assert math.hypot(env.plant.pose.x-goal[0],env.plant.pose.y-goal[1])<=.05
         env.observation,env.report=env.core.observe(env._snapshot(),env.adapter.velocity)
         env.privileged=env._privileged();env.actor_version=19;env.episode_budget=1
+        assert not env.terminated
         indices=np.flatnonzero(np.linalg.norm(env.observation.goals[:,:2]-[env.plant.pose.x,env.plant.pose.y],axis=1)>.1)
         assert len(indices)>0
         index=int(indices[np.argmin(np.linalg.norm(env.observation.goals[indices,:2]-[env.plant.pose.x,env.plant.pose.y],axis=1))])

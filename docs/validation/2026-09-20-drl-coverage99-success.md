@@ -18,4 +18,8 @@
 
 新正式输出为training-output/drl-coverage99-v1，8环境、30倍目标倍率、batch64/micro16、每1800秒保存。
 
-集成构建、安装测试、导航回放及启动结果随后记录。Humble/Orin/真实课题三/实车均NOT_RUN；本次验证不证明策略收敛或循环已解决。
+集成构建：6包通过；安装后的37个Python源文件逐字节一致。安装全量测试初次332通过、2失败：旧导航测试的小场景初始化已达到99%，新规则正确拒绝继续step。扩大该测试的可达纵向场景后，两个实际Jazzy导航/控制/预算截断用例均通过（15.22秒），没有修改生产成功条件。
+
+固定月表记录目标回放（seed2026091901，40 m）在第58步达到99.0994885%，152.44 m，completed/terminated为真，exhausted为假，仍有70个观测接口；所有58步GOAL_REACHED，无错误。此回放绕开Actor，不是策略性能评估；奖励发放由env.step回归测试验证。证据位于仓库外 ~/.cache/lunar-drl-coverage-completion/coverage99-{integrated-build,integrated-tests,native-tests,moon-replay}.log及moon-replay.json。
+
+正式训练启动结果随后记录。Humble/Orin/真实课题三/实车均NOT_RUN；本次验证不证明策略收敛或循环已解决。
