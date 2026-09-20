@@ -51,11 +51,10 @@ cat /home/yanfa/P4/debug/p3_joint/command-relay-status.json
 单独启动接口（必须先确认旧接口已经停止，ROS_DOMAIN_ID 使用现场旧车辆域；本次为10）：
 
 ```bash
-source /opt/ros/humble/setup.bash
-source /home/yanfa/P4/vehicle_interface/install/setup.bash
-export ROS_DOMAIN_ID=10 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp ROS_LOCALHOST_ONLY=0
-/home/yanfa/P4/vehicle_interface/install/lunar_car_ctrl/lib/lunar_car_ctrl/lunar_car_node --ros-args -p tcp_host:=192.168.10.23 -p tcp_port:=6668 -p big_endian:=false -p max_linear_speed:=0.2
+bash /home/yanfa/P4/scripts/start_p4_vehicle_interface.sh
 ```
+
+脚本默认连接 `192.168.10.23:6668`、使用 ROS 域10、线速度上限0.2 m/s，并以 `park` 模式后台启动。已有 `lunar_car_node` 时脚本拒绝重复启动且不会结束原进程。可用 `UNREAL_IP`、`UNREAL_PORT`、`P4_VEHICLE_ROS_DOMAIN_ID` 或 `MAX_LINEAR_SPEED` 环境变量临时覆盖默认值。
 
 原 P3 采集入口可能在没有接口进程时启动原版本，因此整机重启后应先启动此扩展版本，再启动 P3/P4。不要同时运行两个车辆接口。
 

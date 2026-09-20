@@ -1,0 +1,157 @@
+Orin 重启后，P3 定位建图与 P4 导航/探索启动指令
+
+适用环境：
+- Orin：192.168.100.216
+- Unreal 控制与反馈：192.168.10.23:6668
+- P4 维护的旧车辆接口副本：ROS 域 10
+- P3/P4 运行域：从 P3 的 run_state.json 自动读取，通常为 57
+
+启动前：
+1. 先启动 Unreal，并确认网线已经连接。
+2. 登录 Orin。
+
+```bash
+ssh yanfa@192.168.100.216
+```
+
+一、终端 A：启动 P4 车辆接口、P3 采集和控制窗口
+
+必须先启动 P4 车辆接口副本，再启动 P3 数据源。这样可以避免 P3 在接口缺失时启动 Env_X 原车辆接口。
+
+```bash
+bash /home/yanfa/P4/scripts/start_p4_vehicle_interface.sh
+
+cd /home/yanfa/P3/lidar_visual_fusion
+./start_simulation_sources.sh
+```
+
+保持终端 A 运行。在另一个终端检查车辆接口：
+
+```bash
+pgrep -af lunar_car_node
+```
+
+只能有一个 lunar_car_node，并且程序路径应位于：
+
+```text
+/home/yanfa/P4/vehicle_interface/
+```
+
+不能同时运行 `/home/yanfa/Env_X/InterFace/` 中的原接口。
+
+二、终端 B：启动 P3 定位建图和 RViz
+
+```bash
+cd /home/yanfa/P3/lidar_visual_fusion
+./start_live.sh --profile config/simulation_lidar_camera_fov.yaml
+```
+
+保持终端 B 运行。等待地图、点云和位姿出现后，可在另一个终端检查：
+
+```bash
+cd /home/yanfa/P3/lidar_visual_fusion
+./status.sh
+```
+
+状态中应显示 pipeline、monitor、visuals、rviz 和 live_relay 正在运行，并显示本次 P3 ROS 域。
+
+三、终端 C：启动 P4 导航
+
+以下命令从 P3 当前会话自动读取 ROS 域，不把 P3 域固定写死。旧车辆接口域保持为 10。
+
+```bash
+P3_DOMAIN=$(
+  /usr/bin/python3 -c \
+  'import json; print(json.load(open("/home/yanfa/P3/lidar_visual_fusion/run_state.json"))["domain"])'
+)
+
+export ROS_DOMAIN_ID="$P3_DOMAIN"
+export P4_RELAY_DOMAIN="$P3_DOMAIN"
+export P4_LEGACY_DOMAIN=10
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export ROS_LOCALHOST_ONLY=0
+
+echo "P3/P4域=$ROS_DOMAIN_ID，车辆接口域=$P4_LEGACY_DOMAIN"
+
+bash /home/yanfa/P4/scripts/navigation.sh start
+```
+
+等待终端提示 `Navigation ready`，然后在 RViz 或 P3 组合窗口中选择目标。
+
+检查导航与控制状态：
+
+```bash
+bash /home/yanfa/P4/scripts/navigation.sh status
+cat /home/yanfa/P4/debug/p3_joint/command-relay-status.json
+```
+
+车辆执行路径时，转发状态应为：
+
+```text
+state: FORWARDING
+reason: READY
+```
+
+四、启动 P4 探索（与导航二选一）
+
+如果本次需要探索，不执行 `navigation.sh start`，在终端 C 使用相同的域环境执行：
+
+```bash
+bash /home/yanfa/P4/scripts/exploration.sh start --size 80
+```
+
+检查探索状态：
+
+```bash
+bash /home/yanfa/P4/scripts/exploration.sh status
+cat /home/yanfa/P4/debug/p3_joint/command-relay-status.json
+```
+
+不要同时启动导航和探索任务。
+
+五、正常停止顺序
+
+导航模式：
+
+```bash
+bash /home/yanfa/P4/scripts/navigation.sh stop
+```
+
+探索模式：
+
+```bash
+bash /home/yanfa/P4/scripts/exploration.sh stop
+```
+
+然后停止 P3 定位建图：
+
+```bash
+cd /home/yanfa/P3/lidar_visual_fusion
+./stop.sh
+```
+
+最后需要停止车辆接口时：
+
+```bash
+pid="$(cat /home/yanfa/P4/run/lunar_car_ctrl.pid)"
+kill -INT "$pid"
+```
+
+六、选择目标后车辆不动时
+
+```bash
+cat /home/yanfa/P4/debug/p3_joint/command-relay-status.json
+tail -n 50 /home/yanfa/P4/run/lunar_car_ctrl.log
+```
+
+正常控制链为：
+
+```text
+Unreal
+  → P4 车辆接口副本（域 10）
+  → P3 采集
+  → P3 定位建图（当前会话域）
+  → P4 导航或探索（与 P3 同域）
+  → persistent_command_relay（跨域转发到域 10）
+  → 车辆运动
+```

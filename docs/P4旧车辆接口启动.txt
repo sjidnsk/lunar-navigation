@@ -13,28 +13,17 @@ ss -tnp | grep ':6668'
 
 如果已有 lunar_car_node 或其他程序连接 6668，不要重复启动。
 
-二、启动接口
+二、一键启动接口
 
 ```bash
-unset PYTHONHOME
-export PYTHONNOUSERSITE=1
-export PATH="/usr/bin:/bin:$PATH"
-source /opt/ros/humble/setup.bash
-source /home/yanfa/P4/vehicle_interface/install/setup.bash
-export ROS_DOMAIN_ID=10
-export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-export ROS_LOCALHOST_ONLY=0
+bash /home/yanfa/P4/scripts/start_p4_vehicle_interface.sh
+```
 
-mkdir -p /home/yanfa/P4/run
-nohup /home/yanfa/P4/vehicle_interface/install/lunar_car_ctrl/lib/lunar_car_ctrl/lunar_car_node \
-  --ros-args \
-  -p tcp_host:=192.168.10.23 \
-  -p tcp_port:=6668 \
-  -p big_endian:=false \
-  -p max_linear_speed:=0.2 \
-  -p control_mode:=park \
-  > /home/yanfa/P4/run/lunar_car_ctrl.log 2>&1 &
-echo $! | tee /home/yanfa/P4/run/lunar_car_ctrl.pid
+脚本会检查重复接口、清理 Conda 环境影响，并以 park 模式后台启动。
+临时更换 Unreal 地址时可以执行：
+
+```bash
+UNREAL_IP=192.168.10.55 bash /home/yanfa/P4/scripts/start_p4_vehicle_interface.sh
 ```
 
 三、检查连接和反馈
@@ -56,5 +45,5 @@ pid="$(cat /home/yanfa/P4/run/lunar_car_ctrl.pid)"
 kill -INT "$pid"
 ```
 
-说明：接口以 park 模式启动，不会自行驱动车辆。不要同时运行 Env_X 原接口、P4 TCP 桥或第二个 lunar_car_node。
+说明：接口以 park 模式启动，不会自行驱动车辆。脚本发现已有 lunar_car_node 时只报错，不会自动停止它。不要同时运行 Env_X 原接口、P4 TCP 桥或第二个 lunar_car_node。
 若 Unreal IP 改变，只替换 tcp_host；端口仍为 6668。
