@@ -45,3 +45,11 @@ scripts/drl/train.sh --config config/drl_exploration.yaml --resume
 - 长期收敛、循环是否改善、达到耗尽时的真实覆盖表现尚待训练和冻结评估；不能由数值测试推出。Humble/Orin/实车：NOT_RUN。
 
 测试和停止检查的临时记录位于 `/home/kai/.cache/lunar-drl-coverage-completion/reward-*.log` 与 `reward-old-pids.json`，不提交模型或大体积运行产物。
+
+## 合入与运行核对
+
+实现提交 `fda3a31e` 已快进合入 `dev/drl-exploration`。合入后6包Jazzy构建通过（1.66 s）；启用原生ROS闭环后完整测试320 passed（75.05 s）。安装Python源文件与统一开发树一致。
+
+只读加载实际旧检查点，确认报错 `incompatible full resume semantics: completion_bonus, learning, reward`；未尝试修改或覆盖旧记录。
+
+新训练已启动，终端标题 `DRL 探索训练 · gamma=1 · 完成奖励5`，PID 511423。`run.json` 实测代码版本 `fda3a31e`、gamma=1.0、completion_bonus=5.0、resume=false、device=cuda，奖励身份为新v2；初始检查点已保存。约16秒快照：8环境、104条有效转移、更新0（1024条预热尚未结束），无失败或停止事件。这是启动证据，不是收敛或完成率保证。
