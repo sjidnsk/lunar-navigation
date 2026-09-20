@@ -104,3 +104,5 @@ scripts/drl/train.sh --config config/drl_exploration.yaml --resume
 同日按用户确认的职责边界，试验分支在 `cad9565` 重构为[当前观测机会耗尽](validation/2026-09-20-current-task-opportunities.md)：取消未来站位/通道推演和在线覆盖下界，80%/99% 仅由真值评估。观测补点由决策图在可执行已知位置中选择。该报告记录合入前证据，随后用户授权整理合入开发线并开训。
 
 完整恢复语义为 `current_reachable_task_opportunities_v1`；旧结束语义的完整检查点和回放不直接续用。旧模型与所有历史输出保留，新检查点可按上面的 `--resume` 命令恢复。当前只验证10 m/90°，窄视野/八方向匹配的既有限制及长期策略效果仍须单独验证。
+
+本轮合入、重新构建、313项测试和正式开训证据见[2026-09-20整合与开训记录](validation/2026-09-20-drl-training-integration.md)。
