@@ -96,3 +96,5 @@ scripts/drl/baseline.sh --resume
 
 2026-09-20 的[覆盖完成判据试验](validation/2026-09-20-coverage-completion.md)位于
 `test/drl-coverage-completion`，尚未合入或采用。它实现测量侧覆盖下界，但固定月表/洞穴的剩余需求估计仍偏保守；正式开发和训练入口继续使用本文件上方的开发线。
+
+同日按用户确认的职责边界，试验分支在 `cad9565` 重构为[当前观测机会耗尽](validation/2026-09-20-current-task-opportunities.md)：取消未来站位/通道推演和在线覆盖下界，80%/99% 仅由真值评估。观测补点由决策图在可执行已知位置中选择。正式开发线未切换；本轮为测试、固定快照及历史目标重放，不更新模型、不重启训练。
