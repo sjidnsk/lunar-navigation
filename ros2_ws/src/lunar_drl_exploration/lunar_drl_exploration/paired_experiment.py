@@ -81,7 +81,7 @@ def evaluate_stage(config, actor, phase, domain_base):
     for family in ('moon', 'cave'):
         for extent in ((40.,) if phase == 'screen' else (40., 80.)):
             for seed in (EVALUATION_SEEDS[:1] if phase == 'screen' else EVALUATION_SEEDS):
-                metric = EpisodeMetrics(family, extent, seed)
+                metric = EpisodeMetrics(family, extent, seed, config.success_coverage)
                 geometry = None
                 env = None
                 try:
@@ -89,11 +89,11 @@ def evaluate_stage(config, actor, phase, domain_base):
                     obs, state = env.reset(seed, family, extent, episode_budget=512)
                     geometry = GeometryMetrics((env.plant.pose.x, env.plant.pose.y), config.goal_position_tolerance_m)
                     metric.observe(env.reference.coverage_ratio(state.observed),
-                        env.progress()['distance_m'], 0., 'INITIAL', env.report.completed, False,
+                        env.progress()['distance_m'], 0., 'INITIAL', env.terminated, False,
                         exhausted=env.report.exhausted,
                         covered_area_m2=env.reference.covered_area(state.observed),
                         coverable_area_m2=env.reference.area_m2)
-                    while not metric.completed and not metric.truncated and not metric.collisions:
+                    while not metric.terminated and not metric.truncated and not metric.collisions:
                         transition = env.step(policy(obs))
                         geometry.observe((env.plant.pose.x, env.plant.pose.y), transition.parts.new_area_m2)
                         metric.observe(env.reference.coverage_ratio(transition.next_privileged.observed),

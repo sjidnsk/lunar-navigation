@@ -36,7 +36,7 @@ integration/pure-planner-orin      公共地图、规划、控制和通用接口
 | 层次 | 当前实现与边界 |
 | --- | --- |
 | 地图与任务分析 | 原生增量地图、二维射线遮挡、任务内覆盖；只维护当前已知可达站位支持的任务观测机会。任务外连接和直接观测保留，不推演未来未知通道。真值可覆盖面积只用于训练/评估。 |
-| 完成 | 已有任务观测且当前机会耗尽；80%/99%为真值评估指标。未开始任务观测不误判完成；输入不可用及预算截断不是成功。 |
+| 完成 | 训练/仿真真实可探索覆盖率≥99%即成功；未达标耗尽为非成功终止。部署保持当前机会耗尽；输入不可用及预算截断不是成功。 |
 | 决策图 | `task_graph_v3`：净空优先基础选点、2 m 合法路径覆盖、8 m 局部连接、1.2 路程伸长稀疏化；保留必要补点、回退和任务外绕行。 |
 | 动作 | `local_metric_pose_v3`：相邻候选位置与八方向观测朝向；探索层选目标，导航层生成路径。 |
 | 学习 | `candidate_graph_sac_v2`；候选对应的 `candidate_truth_v1` 训练侧 Critic；Actor 不读取真值。 |
@@ -80,7 +80,7 @@ scripts/drl/compare_actor.sh --help
 
 正式训练、恢复、导出、评估和推理的参数见[操作指令](操作指令.md#drl-稀疏图探索独立-redesign-分支)。启动脚本清除继承的旧 overlay，再加载同一份 Jazzy 安装；不要手动注入旧工作树的库。
 
-当前正式长训使用统一配置，无有限转移上限；模型、优化器、回放和课程从头开始，输出到项目内 `training-output/drl-undiscounted-completion-v1/`：
+当前正式长训使用统一配置，无有限转移上限；模型、优化器、回放和课程从头开始，输出到项目内 `training-output/drl-coverage99-v1/`：
 
 ```bash
 scripts/drl/train.sh --config config/drl_exploration.yaml
@@ -88,7 +88,7 @@ scripts/drl/train.sh --config config/drl_exploration.yaml
 scripts/drl/train.sh --config config/drl_exploration.yaml --resume
 ```
 
-仍采用原始分数形式 C=0 的 Actor，并正常更新网络权重。按本轮确认采用 gamma=1.0，并对正常探索耗尽追加一次 completion_bonus=5.0；其余面积/路程/转角/步代价及目标熵因子 .10、alpha 上限 1e-4 保持原值。旧 `baseline.sh` 是历史有限训练/分阶段评估驱动，不作为本轮正式长训入口。
+仍采用原始分数形式 C=0 的 Actor，并正常更新网络权重。按本轮确认采用 gamma=1.0，并对真实可探索覆盖率达到99%的最后一条转移追加一次 completion_bonus=5.0；其余面积/路程/转角/步代价及目标熵因子 .10、alpha 上限 1e-4 保持原值。旧 `baseline.sh` 是历史有限训练/分阶段评估驱动，不作为本轮正式长训入口。
 
 旧 `training-output/actor-bounded-20260919/` 保留碰撞修正前的记录，目前为 interrupted，配对实验未完成，不能据此确定原分数或有界分数胜出。切换导航算法后不要继续把该目录的早期组与新运行组当成同一条件的对照。
 
@@ -103,8 +103,10 @@ scripts/drl/train.sh --config config/drl_exploration.yaml --resume
 
 同日按用户确认的职责边界，试验分支在 `cad9565` 重构为[当前观测机会耗尽](validation/2026-09-20-current-task-opportunities.md)：取消未来站位/通道推演和在线覆盖下界，80%/99% 仅由真值评估。观测补点由决策图在可执行已知位置中选择。该报告记录合入前证据，随后用户授权整理合入开发线并开训。
 
-完整恢复语义为 `current_reachable_task_opportunities_v1`；旧结束语义的完整检查点和回放不直接续用。旧模型与所有历史输出保留，新检查点可按上面的 `--resume` 命令恢复。当前只验证10 m/90°，窄视野/八方向匹配的既有限制及长期策略效果仍须单独验证。
+当前训练完整恢复语义为 `truth_coverage_or_current_opportunity_exhaustion_v1`；旧结束语义的完整检查点和回放不直接续用。旧模型与所有历史输出保留，新检查点可按上面的 `--resume` 命令恢复。当前只验证10 m/90°，窄视野/八方向匹配的既有限制及长期策略效果仍须单独验证。
 
 本轮合入、重新构建、313项测试和正式开训证据见[2026-09-20整合与开训记录](validation/2026-09-20-drl-training-integration.md)。
 
-当前奖励与折扣切换见[γ=1与完成奖励](validation/2026-09-20-drl-undiscounted-completion.md)。之前的 current-opportunities-v1 输出为旧奖励记录，不能用新配置直接 --resume；本轮新输出目录保持同一保存/恢复入口。
+此前奖励与折扣切换见[γ=1与完成奖励](validation/2026-09-20-drl-undiscounted-completion.md)。之前的 current-opportunities-v1 输出为旧奖励记录，不能用新配置直接 --resume；本轮新输出目录保持同一保存/恢复入口。
+
+当前99%成功条件、奖励及验证见[覆盖达标成功](validation/2026-09-20-drl-coverage99-success.md)。旧耗尽奖励版本的完整检查点不直接续用，保留原产物；新目录从头训练。

@@ -53,8 +53,9 @@ class GeometryMetrics:
 
 
 class EpisodeMetrics:
-    def __init__(self, family, extent, seed):
+    def __init__(self, family, extent, seed, success_coverage=.99):
         self.family, self.extent, self.seed = family, extent, seed
+        self.success_coverage = success_coverage
         self.coverage = self.distance = 0.
         self.covered_area_m2 = self.coverable_area_m2 = None
         self.path80 = self.path99 = None
@@ -78,7 +79,7 @@ class EpisodeMetrics:
             self.reasons[reason] = self.reasons.get(reason, 0) + 1
         # A space-completion terminal can coincide with a physical failure.
         # Preserve its coverage and RL terminal flag without calling it success.
-        self.completed=self.terminated and self.exhausted and not self.collisions
+        self.completed=self.terminated and coverage>=self.success_coverage and not self.collisions
 
     def record(self):
         return dict(family=self.family, extent_m=self.extent, seed=self.seed,
@@ -125,18 +126,18 @@ def evaluate(config, actor_path, *, seeds, families, extents, budget, output=Non
         for family in families:
             for extent in extents:
                 for seed in seeds:
-                    metric = EpisodeMetrics(family, extent, seed)
+                    metric = EpisodeMetrics(family, extent, seed, config.success_coverage)
                     geometry = None
                     try:
                         obs, state = env.reset(seed, family, extent, episode_budget=budget)
                         geometry = GeometryMetrics(obs.positions[obs.current_index], config.goal_position_tolerance_m)
                         progress = env.progress()
                         metric.observe(env.reference.coverage_ratio(state.observed),
-                            progress['distance_m'], 0., 'INITIAL', env.report.completed, False,
+                            progress['distance_m'], 0., 'INITIAL', env.terminated, False,
                             exhausted=env.report.exhausted,
                             covered_area_m2=env.reference.covered_area(state.observed),
                             coverable_area_m2=env.reference.area_m2)
-                        while not metric.completed and not metric.truncated and not metric.collisions:
+                        while not metric.terminated and not metric.truncated and not metric.collisions:
                             transition = env.step(policy(obs))
                             next_obs = transition.next_observation
                             geometry.observe(next_obs.positions[next_obs.current_index], transition.parts.new_area_m2)
@@ -158,7 +159,7 @@ def evaluate(config, actor_path, *, seeds, families, extents, budget, output=Non
                     print(json.dumps(rows[-1], ensure_ascii=False, allow_nan=False), flush=True)
     finally: env.close()
     result = dict(actor=str(Path(actor_path).resolve()), policy='frozen_joint_argmax',
-        sensor=asdict(config.sensor),
+        sensor=asdict(config.sensor),success_coverage=config.success_coverage,
         budget=budget, groups=summarize(rows), cases=rows)
     if output is not None:
         payload = (json.dumps(result, ensure_ascii=False, allow_nan=False, indent=2)+'\n').encode()

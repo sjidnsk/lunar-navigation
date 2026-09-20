@@ -46,6 +46,8 @@ class ControlledEnv:
             reference_area_m2=2., initial_known_area_m2=0., family=family,
             extent_m=extent, budget=episode_budget, seed=seed)
         self.report = SimpleNamespace(completed=extent == 1,exhausted=extent == 1)
+        self.completed=False
+        self.terminated=extent == 1
         return self.obs, self.state
 
     def step(self, action_index, *, actor_version=None):

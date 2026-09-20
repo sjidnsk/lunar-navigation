@@ -224,6 +224,8 @@ def test_full_atomic_resume_restores_optimizer_rng_credit_replay_and_compatible_
         manager.load(replace(config,sensor=replace(config.sensor,range_m=15)))
     with pytest.raises(ValueError,match='completion_bonus'):
         manager.load(replace(config,completion_bonus=2.))
+    with pytest.raises(ValueError,match='success_coverage'):
+        manager.load(replace(config,success_coverage=.95))
     with pytest.raises(ValueError,match='learning'):
         manager.load(replace(config,learning=replace(config.learning,gamma=.995)))
     bad=torch.load(tmp_path/'resume.pt',weights_only=False)

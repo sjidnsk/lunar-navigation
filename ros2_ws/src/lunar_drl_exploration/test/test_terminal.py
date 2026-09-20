@@ -1,4 +1,5 @@
 import io
+import pytest
 from lunar_drl_exploration.terminal import TrainingTerminal, format_status, clip
 
 
@@ -55,3 +56,11 @@ def test_collision_takes_precedence_over_coverage_termination():
     r['environments'][0].update(terminated=True,exhausted=False,reason_code='COLLISION')
     text='\n'.join(format_status(r,environments=1,warmup=1024))
     assert '碰撞终止' in text and '覆盖达标' not in text
+
+
+@pytest.mark.parametrize('success,exhausted,label',[(True,False,'覆盖达标'),
+    (True,True,'覆盖达标'),(False,True,'耗尽未达标')])
+def test_terminal_distinguishes_success_and_exhaustion(success,exhausted,label):
+    r=record();r['environments'][0].update(completed=success,exhausted=exhausted,terminated=True)
+    text='\n'.join(format_status(r,environments=1,warmup=1024))
+    assert label in text

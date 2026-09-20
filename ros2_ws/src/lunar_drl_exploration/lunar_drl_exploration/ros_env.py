@@ -42,7 +42,7 @@ class ExecutionMetadata:
 
 
 def make_transition(observation,action,next_observation,privileged,next_privileged,*,
-                    initial,final,completed,budget_hit,episode_id,actor_version,completion_bonus=0.):
+                    initial,final,completed,budget_hit,episode_id,actor_version,completion_bonus=0.,exhausted=False):
     area,distance,turn=(float(b-a) for a,b in zip(initial,final))
     if area < -1e-8 or distance < -1e-8 or turn < -1e-8:
         raise InfrastructureError('nonmonotonic whole-action accounting')
@@ -50,8 +50,9 @@ def make_transition(observation,action,next_observation,privileged,next_privileg
     reward=area/100.-.02*distance/10.-.005*turn/math.pi-.001
     if completed:
         reward += completion_bonus
+    terminated=bool(completed or exhausted)
     return Transition(observation,action,reward,next_observation,privileged,next_privileged,
-        parts,bool(completed),bool(budget_hit and not completed),episode_id,int(actor_version))
+        parts,terminated,bool(budget_hit and not terminated),episode_id,int(actor_version))
 
 
 class RosExplorationEnv:
@@ -282,9 +283,21 @@ class RosExplorationEnv:
         return self.privileged_builder.build(self.observation if observation is None else observation,
                                              self.reference.pack(mask))
 
+    @property
+    def completed(self):
+        """Training/evaluation success; never enters observed Actor inputs."""
+        state=getattr(self,'privileged',None)
+        return bool(state is not None and not self.plant.collision and
+            self.reference.coverage_ratio(state.observed)>=self.config.success_coverage)
+
+    @property
+    def terminated(self):
+        report=getattr(self,'report',None)
+        return self.completed or bool(report is not None and report.completed)
+
     def step(self,action_index,*,actor_version=None):
         if self._closed or self._step_active:raise RuntimeError('environment is closed or already stepping')
-        if self.report.completed or self.steps>=self.episode_budget:raise RuntimeError('episode requires reset')
+        if self.terminated or self.steps>=self.episode_budget:raise RuntimeError('episode requires reset')
         if self.plant.collision:raise GeometryFailure('collision episode requires reset')
         if not 0<=int(action_index)<len(self.observation.goals):raise ValueError('action outside frozen observation')
         action_index=int(action_index);goal=tuple(self.observation.goals[action_index])
@@ -299,9 +312,12 @@ class RosExplorationEnv:
             next_observation,report=self.core.observe(snap,self.adapter.velocity)
             if not report.available:raise InfrastructureError('unconstructable final state: '+report.reason_code)
             next_privileged=self._privileged(next_observation);self.steps+=1
+            success=(not self.plant.collision and
+                self.reference.coverage_ratio(next_privileged.observed)>=self.config.success_coverage)
             final=(self._known_area,self.plant.distance_m,self.plant.turn_rad)
             transition=make_transition(observation,action_index,next_observation,privileged,next_privileged,
-                initial=before,final=final,completed=report.completed,budget_hit=self.steps>=self.episode_budget,
+                initial=before,final=final,completed=success,exhausted=report.completed,
+                budget_hit=self.steps>=self.episode_budget,
                 episode_id=self.episode_id,actor_version=version,completion_bonus=self.config.completion_bonus)
             p=self.plant.pose
             self.last_execution=ExecutionMetadata(goal,result.outcome,result.reason_code,result.last_segment_revision,
@@ -321,7 +337,8 @@ class RosExplorationEnv:
             'turn_rad':self.plant.turn_rad,'simulation_s':self.plant.simulation_s,
             'wall_s':time.monotonic()-self._start_wall,'sensor_frames':self._sensor_count,
             'max_command_speed_mps':self._max_command_speed,'owned_pids':self.owned_pids,
-            'completed':None if report is None else report.completed,
+            'completed':None if report is None else self.completed,
+            'terminated':None if report is None else self.terminated,
             'exhausted':None if report is None else report.exhausted}
 
     def cancel(self):

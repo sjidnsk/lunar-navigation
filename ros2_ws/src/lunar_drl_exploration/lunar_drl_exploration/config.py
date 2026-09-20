@@ -149,6 +149,7 @@ class TrainingConfig:
     model: ModelConfig = field(default_factory=ModelConfig)
     learning: LearningConfig = field(default_factory=LearningConfig)
     completion_bonus: float = 5.0
+    success_coverage: float = 0.99
     sensor: 'SensorSpec' = field(default_factory=lambda: SensorSpec())
     platform: PlatformConfig = field(default_factory=load_platform_config)
     seed: int = 20260915
@@ -183,6 +184,8 @@ class TrainingConfig:
         boundaries = self.curriculum_transition_boundaries
         if not np.isfinite(self.completion_bonus) or self.completion_bonus < 0:
             raise ValueError('completion bonus must be finite and nonnegative')
+        if not 0 < self.success_coverage <= 1:
+            raise ValueError('success coverage must be in (0, 1]')
         if (not isinstance(boundaries, (tuple, list)) or len(boundaries) != 2 or
                 any(type(value) is not int or value < 0 for value in boundaries) or
                 boundaries[0] >= boundaries[1]):
@@ -240,9 +243,10 @@ def resume_semantics(config):
         observation_model='finite_center_tip_prefix_v1', generator_version=5,
         observation_origin='actual_pose_optical_offset',
         effective_measurement='classified_center_native_3x3_no_hidden_neighbors_v1',
-        reward='delta_area/100-.02*distance/10-.005*absolute_turn/pi-.001+completion_bonus*terminated_v2',
+        reward='delta_area/100-.02*distance/10-.005*absolute_turn/pi-.001+completion_bonus*coverage_success_v3',
         completion_bonus=config.completion_bonus,
-        termination='current_reachable_task_opportunities_v1',
+        success_coverage=config.success_coverage,
+        termination='truth_coverage_or_current_opportunity_exhaustion_v1',
         graph_normalization=dict(position_m=10., frontier_cells=100.),
         sensor=record['sensor'], platform=platform,
         integration_step_s=config.integration_step_s, observation_hz=config.observation_hz,

@@ -92,13 +92,15 @@ def test_native_no_path_and_timeout_with_final_state_remain_transitions(monkeypa
     # goal failures above did not earn a bonus merely for ending an action.
     from dataclasses import replace
     env.config=replace(cfg,completion_bonus=2.)
+    mostly_known=np.ones((12,12),np.uint8);mostly_known[5,9]=0
     full=replace(snapshot(np.pad(np.ones((6,6),np.uint8),3),
-                          b=np.ones((12,12),np.uint8),pose=pose),revision=2)
+                          b=mostly_known,pose=pose),revision=2)
     monkeypatch.setattr(env,'_snapshot',lambda:full)
     monkeypatch.setattr(env,'_execute_goal',lambda goal:NavigationResult(0,'GOAL_REACHED',0))
     result=env.step(0)
-    # 12x12 known minus the original 6x6: 108 m² gain + 2 bonus - .001.
-    assert result.terminated and result.reward == pytest.approx(3.079)
+    # 143 known minus the original 6x6: 107 m² gain + 2 bonus - .001.
+    assert result.terminated and result.reward == pytest.approx(3.069)
+    assert env.completed and not env.report.exhausted
     with pytest.raises(RuntimeError,match='requires reset'):env.step(0)
 
 
@@ -110,7 +112,7 @@ def test_native_no_path_and_timeout_with_final_state_remain_transitions(monkeypa
     (True, False, 2., 2.974, True, False),
     (True, False, 0., .974, True, False),
 ])
-def test_completion_bonus_only_on_exhaustion_with_whole_action_costs(
+def test_completion_bonus_only_on_success_with_whole_action_costs(
         completed,budget_hit,bonus,want,terminated,truncated):
     from lunar_drl_exploration.ros_env import make_transition
     from test_model import observation,state
@@ -121,6 +123,55 @@ def test_completion_bonus_only_on_exhaustion_with_whole_action_costs(
     assert result.reward == pytest.approx(want)
     assert result.terminated == terminated and result.truncated == truncated
     assert result.parts.new_area_m2 == 100.
+
+
+@pytest.mark.parametrize('count,exhausted,collision,success,terminal', [
+    (98,False,False,False,False), (99,False,False,True,True),
+    (100,False,False,True,True), (98,True,False,False,True),
+    (99,True,False,True,True), (99,False,True,False,False),
+])
+def test_training_success_uses_reference_coverage_not_frontier_exhaustion(
+        count,exhausted,collision,success,terminal):
+    from types import SimpleNamespace
+    from lunar_drl_exploration.ros_env import RosExplorationEnv
+    from lunar_drl_exploration.reference import CoverageReference
+    from lunar_drl_exploration.config import TrainingConfig
+    bits=np.packbits(np.arange(104)<count,bitorder='little')
+    reference=np.packbits(np.arange(104)<100,bitorder='little')
+    env=RosExplorationEnv(TrainingConfig(),0)
+    env.reference=CoverageReference((1,104),reference,1.,100.,'reference',reference)
+    env.privileged=SimpleNamespace(observed=bits)
+    env.plant=SimpleNamespace(collision=collision)
+    env.report=SimpleNamespace(completed=exhausted,exhausted=exhausted)
+    assert env.completed is success
+    assert env.terminated is terminal
+
+
+def test_exhaustion_below_target_terminates_without_success_bonus():
+    from lunar_drl_exploration.ros_env import make_transition
+    from test_model import observation,state
+    obs=observation();priv=state(obs=obs)
+    result=make_transition(obs,0,obs,priv,priv,initial=(0.,0.,0.),final=(0.,10.,0.),
+        completed=False,exhausted=True,budget_hit=True,episode_id='below-target',
+        actor_version=0,completion_bonus=5.)
+    assert result.terminated and not result.truncated
+    assert result.reward==pytest.approx(-.021)
+
+
+def test_exact_99_percent_at_point_two_meter_resolution_is_success():
+    from types import SimpleNamespace
+    from lunar_drl_exploration.config import TrainingConfig
+    from lunar_drl_exploration.reference import CoverageReference
+    from lunar_drl_exploration.ros_env import RosExplorationEnv
+    ref=np.packbits(np.ones(1700,np.uint8),bitorder='little')
+    observed=np.packbits(np.arange(1700)<1683,bitorder='little')
+    env=RosExplorationEnv(TrainingConfig(),0)
+    env.reference=CoverageReference((1,1700),ref,.2**2,1700*.2**2,'exact99',ref)
+    env.privileged=SimpleNamespace(observed=observed)
+    env.plant=SimpleNamespace(collision=False)
+    env.report=SimpleNamespace(completed=False,exhausted=False)
+    assert env.reference.coverage_ratio(observed)==.99
+    assert env.completed and env.terminated
 
 
 def test_deployment_history_pose_uses_actual_map_from_odom_transform():

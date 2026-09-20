@@ -26,7 +26,7 @@ def assess(env):
     coverage=env.reference.coverage_ratio(env.privileged.observed)
     return dict(coverage=coverage,reached_80=coverage>=.8,reached_99=coverage>=.99,
         reference_remaining_m2=float(remaining.sum()*res**2),
-        completed=report.completed,exhausted=report.exhausted,available=report.available,
+        completed=env.completed,terminated=env.terminated,exhausted=report.exhausted,available=report.available,
         frontiers=len(report.frontier_cells),distance_m=env.plant.distance_m)
 
 
@@ -46,7 +46,7 @@ def run(args):
             env.reset(args.seed,family,args.extent,episode_budget=512)
             record['initial']=assess(env)
             for i,old in enumerate(sequences[family]['steps']):
-                if env.report.completed:break
+                if env.terminated:break
                 env.adapter.planning_evidence.clear();env.adapter.references.clear()
                 result=env._execute_goal(tuple(old['goal']))
                 snap=env._snapshot()

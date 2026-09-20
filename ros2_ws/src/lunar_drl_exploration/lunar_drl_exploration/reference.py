@@ -1,6 +1,6 @@
 """Fixed offline coverable set: reachable native M stances, all attainable yaws."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import json
 import math
@@ -21,6 +21,7 @@ class CoverageReference:
     reference_id: str
     reachable_bits: np.ndarray
     bitorder: str = "little"
+    cell_count: int = field(init=False)
 
     def __post_init__(self):
         object.__setattr__(
@@ -29,6 +30,8 @@ class CoverageReference:
         object.__setattr__(
             self, "reachable_bits", freeze_array(self.reachable_bits, dtype=np.uint8)
         )
+
+        object.__setattr__(self, "cell_count", int(np.unpackbits(self.packed_mask).sum()))
 
     @classmethod
     def build(cls, terrain, start, task, sensor):
@@ -95,14 +98,18 @@ class CoverageReference:
     def mask(self):
         return self.unpack(self.packed_mask)
 
-    def covered_area(self, observed_bits):
+    def covered_cells(self, observed_bits):
         bits = np.asarray(observed_bits)
         if bits.dtype != np.uint8 or bits.shape != self.packed_mask.shape:
             raise ValueError("packed observed mask shape/dtype mismatch")
-        return int(np.unpackbits(bits & self.packed_mask).sum()) * self.cell_area_m2
+        return int(np.unpackbits(bits & self.packed_mask).sum())
+
+    def covered_area(self, observed_bits):
+        return self.covered_cells(observed_bits) * self.cell_area_m2
 
     def coverage_ratio(self, observed_bits):
-        return self.covered_area(observed_bits) / self.area_m2 if self.area_m2 else 0.0
+        # Cancel equal cell areas before division, preserving exact threshold cases.
+        return self.covered_cells(observed_bits) / self.cell_count if self.cell_count else 0.0
 
     def linear_index(self, x, y):
         if not 0 <= x < self.shape[1] or not 0 <= y < self.shape[0]:

@@ -14,6 +14,16 @@ from lunar_drl_exploration.model import Actor
 from worker_fixtures import observation
 
 
+@pytest.mark.parametrize('coverage,exhausted,success', [(.99,False,True),(.98,True,False),(.99,True,True)])
+def test_evaluation_distinguishes_success_from_exhaustion(coverage,exhausted,success):
+    from lunar_drl_exploration.evaluation import EpisodeMetrics
+    metric=EpisodeMetrics('moon',40,1)
+    metric.observe(coverage,10.,1.,'GOAL_REACHED',True,False,exhausted=exhausted)
+    row=metric.record()
+    assert row['terminated'] and row['completed'] is success
+    assert row['exhausted'] is exhausted
+
+
 def test_frozen_evaluation_json_keeps_reference_areas_and_failure_measurements(tmp_path, monkeypatch):
     from lunar_drl_exploration import ros_env
     sensor = SensorSpec(range_m=7., fov_deg=75., offset_x_m=.2,
@@ -41,6 +51,7 @@ def test_frozen_evaluation_json_keeps_reference_areas_and_failure_measurements(t
             bits = {0: 129, 1: 131, 2: 129, 3: 128, 5: 129}[seed]
             self.state = PrivilegedState('scene', np.array([bits], np.uint8))
             self.report = SimpleNamespace(completed=seed == 3,exhausted=seed == 3)
+            self.terminated=seed == 3
             return observation(), self.state
         def progress(self): return dict(distance_m=float(self.steps))
         def step(self, action):
@@ -71,7 +82,7 @@ def test_frozen_evaluation_json_keeps_reference_areas_and_failure_measurements(t
     assert [row['coverable_area_m2'] for row in rows] == [2., 4., 4., 0., None, 2.]
     assert rows[2]['decisions'] == 1 and rows[2]['distance_m'] == 1.
     assert rows[5]['decisions'] == 0 and rows[5]['distance_m'] == 0.
-    assert rows[3]['exhausted'] and not rows[3]['reached_99']
+    assert rows[3]['exhausted'] and rows[3]['terminated'] and not rows[3]['completed'] and not rows[3]['reached_99']
     assert [row['error'] is not None for row in rows] == [False, False, True, False, True, True]
     assert [seed for seed, _ in actions] == [0, 1, 2, 2, 5]
     assert rows[0]['max_zero_gain_run'] == 1

@@ -11,6 +11,7 @@ learning:
   target_entropy_factor: 0.10
 sensor: {range_m: 10.0, fov_deg: 90.0}
 completion_bonus: 5.0
+success_coverage: 0.99
 seed: 20260915
 environments: 8
 target_rtf: 30.0
@@ -34,5 +35,5 @@ snapshot_max_bytes: 2147483648
 total_output_max_bytes: 21474836480
 metrics_max_bytes: 8388608
 save_interval_s: 1800.0
-output_dir: training-output/drl-undiscounted-completion-small-v1
+output_dir: training-output/drl-coverage99-small-v1
 system_reserve_bytes: 2147483648
