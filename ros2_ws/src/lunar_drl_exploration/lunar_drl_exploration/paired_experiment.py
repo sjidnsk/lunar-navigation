@@ -90,8 +90,7 @@ def evaluate_stage(config, actor, phase, domain_base):
                     geometry = GeometryMetrics((env.plant.pose.x, env.plant.pose.y), config.goal_position_tolerance_m)
                     metric.observe(env.reference.coverage_ratio(state.observed),
                         env.progress()['distance_m'], 0., 'INITIAL', env.report.completed, False,
-                        exhausted=env.report.exhausted,coverage_lower_bound=env.report.coverage_lower_bound,
-                        remaining_area_upper_m2=env.report.remaining_area_upper_m2,
+                        exhausted=env.report.exhausted,
                         covered_area_m2=env.reference.covered_area(state.observed),
                         coverable_area_m2=env.reference.area_m2)
                     while not metric.completed and not metric.truncated and not metric.collisions:
@@ -100,8 +99,7 @@ def evaluate_stage(config, actor, phase, domain_base):
                         metric.observe(env.reference.coverage_ratio(transition.next_privileged.observed),
                             env.progress()['distance_m'], transition.parts.new_area_m2,
                             env.last_execution.reason_code, transition.terminated, transition.truncated,
-                            exhausted=env.report.exhausted,coverage_lower_bound=env.report.coverage_lower_bound,
-                            remaining_area_upper_m2=env.report.remaining_area_upper_m2,
+                            exhausted=env.report.exhausted,
                             covered_area_m2=env.reference.covered_area(transition.next_privileged.observed),
                             coverable_area_m2=env.reference.area_m2)
                         obs = transition.next_observation
@@ -116,7 +114,7 @@ def evaluate_stage(config, actor, phase, domain_base):
                 row.update(geometry.record() if geometry else dict(geometric_metrics_unavailable=True))
                 rows.append(row)
                 print(json.dumps(row, ensure_ascii=False, allow_nan=False), flush=True)
-    return dict(policy='frozen_joint_argmax', budget=512,coverage_target=config.coverage_target,
+    return dict(policy='frozen_joint_argmax', budget=512,
         cases=rows, groups=summarize(rows),
         infrastructure_failures=sum(row['error'] is not None for row in rows))
 

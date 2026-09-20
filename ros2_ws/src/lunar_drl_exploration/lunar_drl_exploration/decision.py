@@ -9,10 +9,10 @@ from .task_analysis import TaskAnalyzer
 
 
 class DecisionCore:
-    def __init__(self, task, sensor, config=None, *, coverage_target=1.0):
+    def __init__(self, task, sensor, config=None):
         self.config = config or GraphConfig()
         self.task, self.sensor = task, sensor
-        self.analyzer = TaskAnalyzer(task, sensor,coverage_target=coverage_target)
+        self.analyzer = TaskAnalyzer(task, sensor)
         self.builder = GraphBuilder(self.config)
         self.history = DirectionHistory(self.config.history_tolerance_m)
         self._epoch = None

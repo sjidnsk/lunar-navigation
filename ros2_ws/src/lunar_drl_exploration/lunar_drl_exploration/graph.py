@@ -5,7 +5,7 @@ from scipy.spatial import cKDTree
 from .config import GraphConfig, load_platform_config
 from .contracts import DecisionObservation
 from .history import HEADINGS
-from .sensor import directional_visibility
+from .sensor import direct_witnesses, directional_visibility
 from .task_analysis import measured_workspace
 from .metric_graph import MetricGrid, greedy_spanner
 
@@ -76,7 +76,6 @@ class GraphBuilder:
         active_base = base[np.linalg.norm(self._base_points-actual,axis=1)>tolerance+1e-9]
         # Stable world position order, independent of map-array shifts.
         fronts = report.frontier_cells-shift
-        witnesses = np.unique(np.asarray(report.witnesses-shift,np.int64).reshape(-1,2),axis=0)
         selected = [tuple(p) for p in active_base]
         selected_set = set(selected)
         tree = cKDTree(fronts) if len(fronts) else None
@@ -98,6 +97,17 @@ class GraphBuilder:
         uncovered.difference_update(visible(actual_cell))
         for source in active_base:
             uncovered.difference_update(visible(source))
+        # Observation supplements belong to executable graph geometry. The
+        # analyzer's first witness can be contracted by arrival tolerance even
+        # when another measured stance can represent the same interface.
+        witnesses = np.empty((0, 2), np.int64)
+        if uncovered:
+            yy, xx = np.ogrid[:w.reachable.shape[0], :w.reachable.shape[1]]
+            distance2 = ((origin[0]+(xx+.5)*resolution-actual[0])**2
+                         + (origin[1]+(yy+.5)*resolution-actual[1])**2)
+            executable = w.reachable & (distance2 > (tolerance+1e-9)**2)
+            found = direct_witnesses(w.intrinsic, executable, fronts[sorted(uncovered)], radius)
+            witnesses = np.unique(found[found[:, 0] >= 0], axis=0)
         options=[]
         for source in witnesses:
             x,y=source

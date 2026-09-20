@@ -90,8 +90,7 @@ class RosExplorationEnv:
         self.privileged_builder=PrivilegedBuilder(terrain,static,task,self.config.sensor,
             GraphConfig(platform=self.config.platform))
         self.static_scenes={static.scene_id:static}
-        self.core=DecisionCore(task,self.config.sensor,GraphConfig(platform=self.config.platform),
-                               coverage_target=self.config.coverage_target)
+        self.core=DecisionCore(task,self.config.sensor,GraphConfig(platform=self.config.platform))
         self.core.history.tolerance_m=self.config.goal_position_tolerance_m
         self.buffer=MeasurementBuffer(terrain.origin,terrain.resolution_m)
         self._cancel.clear();self._closed=False;self.steps=0;self.last_execution=None
@@ -321,9 +320,7 @@ class RosExplorationEnv:
             'wall_s':time.monotonic()-self._start_wall,'sensor_frames':self._sensor_count,
             'max_command_speed_mps':self._max_command_speed,'owned_pids':self.owned_pids,
             'completed':None if report is None else report.completed,
-            'exhausted':None if report is None else report.exhausted,
-            'remaining_area_upper_m2':None if report is None else report.remaining_area_upper_m2,
-            'coverage_lower_bound':None if report is None else report.coverage_lower_bound}
+            'exhausted':None if report is None else report.exhausted}
 
     def cancel(self):
         """Thread-safe request; active step owns ROS cancel-and-stop pumping."""

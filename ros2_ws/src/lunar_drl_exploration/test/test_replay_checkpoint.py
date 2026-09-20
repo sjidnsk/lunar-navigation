@@ -222,7 +222,13 @@ def test_full_atomic_resume_restores_optimizer_rng_credit_replay_and_compatible_
     assert not result.replay.sample(1,np.random.default_rng())[0].observation.features.flags.writeable
     with pytest.raises(ValueError,match='sensor'):
         manager.load(replace(config,sensor=replace(config.sensor,range_m=15)))
-    bad=torch.load(tmp_path/'resume.pt',weights_only=False); bad['semantics']['reward']='wrong'
+    bad=torch.load(tmp_path/'resume.pt',weights_only=False)
+    old_termination=bad['semantics']['termination']
+    bad['semantics']['termination']='measured_remaining_upper_bound_v1'
+    torch.save(bad,tmp_path/'resume.pt')
+    with pytest.raises(ValueError,match='termination'): manager.load(config)
+    bad['semantics']['termination']=old_termination
+    bad['semantics']['reward']='wrong'
     torch.save(bad,tmp_path/'resume.pt')
     with pytest.raises(ValueError,match='reward'): manager.load(config)
     bad['schema']='old_gru'; torch.save(bad,tmp_path/'resume.pt')

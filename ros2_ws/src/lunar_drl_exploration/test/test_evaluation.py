@@ -40,8 +40,7 @@ def test_frozen_evaluation_json_keeps_reference_areas_and_failure_measurements(t
             # The high bit is observed outside the reference in every case.
             bits = {0: 129, 1: 131, 2: 129, 3: 128, 5: 129}[seed]
             self.state = PrivilegedState('scene', np.array([bits], np.uint8))
-            self.report = SimpleNamespace(completed=seed == 3,exhausted=seed == 3,
-                coverage_lower_bound=None,remaining_area_upper_m2=None)
+            self.report = SimpleNamespace(completed=seed == 3,exhausted=seed == 3)
             return observation(), self.state
         def progress(self): return dict(distance_m=float(self.steps))
         def step(self, action):

@@ -76,7 +76,7 @@ def test_sealed_unknown_chamber_is_exhausted_without_relabeling_island():
     b[4:11, 4:11] = 2
     m[6:9, 6:9] = 0
     b[6:9, 6:9] = 0
-    r = TaskAnalyzer(task(6, 6, 9, 9), SensorSpec(range_m=4)).update(snapshot(m, b))
+    r = TaskAnalyzer(task(0, 0, 15, 15), SensorSpec(range_m=4)).update(snapshot(m, b))
     assert r.available and r.exhausted
 
 
@@ -90,7 +90,8 @@ def test_visible_unstandable_gap_but_long_impassable_corridor_exhausts():
     near = TaskAnalyzer(task(5, 4, 6, 5), SensorSpec(range_m=4)).update(s)
     far = TaskAnalyzer(task(20, 4, 21, 5), SensorSpec(range_m=4)).update(s)
     assert not near.exhausted and np.any(np.all(near.frontier_cells == [4, 4], axis=1))
-    assert far.exhausted
+    assert not far.completed and len(far.frontier_cells) == 0
+    assert far.reason_code == "TASK_NOT_OBSERVED"
 
 
 def test_no_native_start_support_is_unavailable_not_exhausted():
@@ -104,7 +105,7 @@ def test_no_native_start_support_is_unavailable_not_exhausted():
     assert not r.available and not r.exhausted and r.reason_code == "INPUT_UNAVAILABLE"
 
 
-def test_outside_only_transit_retains_witness_but_closed_irrelevant_spur_does_not():
+def test_future_unknown_outside_transit_creates_no_current_task_witness():
     m = np.full((17, 23), 2, np.uint8)
     b = m.copy()
     m[7:10, 2:10] = 1
@@ -118,9 +119,8 @@ def test_outside_only_transit_retains_witness_but_closed_irrelevant_spur_does_no
     b[10:15, 3:5] = 0
     r = TaskAnalyzer(task(17, 3, 20, 5), SensorSpec(range_m=2)).update(snapshot(m, b))
     assert not r.exhausted
-    assert np.any(r.frontier_cells[:, 1] == 6)
-    assert not np.any(r.frontier_cells[:, 1] == 10)
-    assert np.all(r.witnesses[:, 0] < 17)
+    assert len(r.frontier_cells) == 0
+    assert r.reason_code == "TASK_NOT_OBSERVED"
 
 
 def test_missing_height_only_classification_remains_pending_even_on_free_navigation():
@@ -147,54 +147,36 @@ def test_cross_component_visibility_through_free_B_blocked_M_aperture():
     b[5:8, 12:16] = 0
     s = snapshot(m, b, pose=Pose(4.5, 6.5, 0))
     r = TaskAnalyzer(task(12, 6, 13, 7), SensorSpec(range_m=5)).update(s)
-    assert not r.exhausted and [5, 6] in r.frontier_cells.tolist()
+    assert not r.completed and len(r.frontier_cells) == 0
+    assert r.reason_code == "TASK_NOT_OBSERVED"
 
 
-def test_acceleration_matches_exhaustive_tiny_observation_witness_enumeration():
-    from scipy.ndimage import label, binary_dilation
-    from lunar_drl_exploration.task_analysis import CROSS
+def test_current_opportunities_match_exhaustive_sensor_observations():
     from lunar_drl_exploration.sensor import visible_cells
-
-    for seed in range(25):
+    for seed in range(80):
         rng = np.random.default_rng(seed)
         m = np.full((8, 9), 2, np.uint8)
         b = m.copy()
         m[1:7, 1:8] = rng.choice([0, 1, 2], (6, 7), p=[0.3, 0.45, 0.25])
         b[1:7, 1:8] = np.where(m[1:7, 1:8] == 1, 1, rng.choice([0, 2], (6, 7)))
-        m[3, 3] = 1
-        b[3, 3] = 1
-        s = snapshot(m, b, pose=Pose(3.5, 3.5, 0))
+        m[3, 3] = b[3, 3] = 1
+        measured = snapshot(m, b, pose=Pose(3.5, 3.5, 0))
         sensor = SensorSpec(range_m=2)
-        analyzer = TaskAnalyzer(task(4, 2, 7, 6), sensor)
-        report = analyzer.update(s)
+        analyzer = TaskAnalyzer(task(2, 2, 7, 6), sensor)
+        report = analyzer.update(measured)
         w = analyzer.workspace
-        potential = (w.navigation != 2) & ~w.reachable
-        labels, count = label(potential, CROSS)
-        exterior = np.unique(np.r_[labels[0], labels[-1], labels[:, 0], labels[:, -1]])
-        exterior = exterior[exterior != 0]
-        for component in exterior:
-            labels[labels == component] = exterior[0]
         demand = w.task_mask & ~w.known
-        relevant = set()
         direct = False
-        for y, x in np.argwhere(potential | w.reachable):
-            rows, cols = visible_cells(
-                w.intrinsic,
-                w.origin,
-                1.0,
-                Pose(w.origin[0] + x + 0.5, w.origin[1] + y + 0.5, 0),
-                SensorSpec(range_m=2, fov_deg=360),
-            )
-            if np.any(demand[rows, cols]):
-                if w.reachable[y, x]:
-                    direct = True
-                else:
-                    relevant.add(int(labels[y, x]))
-        entry = binary_dilation(w.reachable, structure=CROSS) & potential
-        expected = direct or bool(relevant.intersection(set(labels[entry])))
-        assert report.exhausted == (not expected), seed
-        if len(report.frontier_cells):
-            _assert_real_center_witnesses(s, report, sensor)
+        # Independent exhaustive sensor execution, no witness/area-bound helper.
+        for y, x in np.argwhere(w.reachable):
+            for yaw in np.arange(8)*np.pi/4:
+                rows, cols = visible_cells(w.intrinsic, w.origin, 1.0,
+                    Pose(w.origin[0]+x+.5, w.origin[1]+y+.5, yaw), sensor)
+                direct |= bool(np.any(demand[rows, cols]))
+        assert bool(len(report.frontier_cells)) == direct, seed
+        assert report.exhausted == (not direct), seed
+        if direct:
+            _assert_real_center_witnesses(measured, report, sensor)
 
 
 def test_direct_visible_deep_demand_reports_first_unknown_interface_center():
@@ -300,7 +282,7 @@ def test_subcell_sensor_range_does_not_create_unobservable_adjacent_frontier():
     m = np.zeros((5, 5), np.uint8)
     m[2, 2] = 1
     report = TaskAnalyzer(task(0, 0, 5, 5), SensorSpec(range_m=0.5)).update(snapshot(m))
-    assert not report.available and not report.exhausted
+    assert report.available and report.exhausted
     assert not len(report.frontier_cells)
 
 
@@ -366,27 +348,20 @@ def _outside_task_known_band(*, no_entry=False, opaque=False):
     return snapshot(m,b,pose=Pose(5.5,8.5,0))
 
 
-def test_outside_task_transit_witness_crosses_known_nonreachable_footprint_band():
-    s=_outside_task_known_band(); sensor=SensorSpec(range_m=5)
-    report=TaskAnalyzer(task(29,7,32,10),sensor).update(s)
-    assert report.available and not report.exhausted
-    assert [9,8] in report.frontier_cells.tolist()
-    assert np.all(report.frontier_cells[:,0]<29)
-    assert np.all(report.witnesses[:,0]<=5)
-    _assert_real_center_witnesses(s,report,sensor)
-    # The observation witness must survive graph construction as an actual goal.
+def test_distant_task_does_not_assign_gain_to_unknown_outside_corridor():
+    s = _outside_task_known_band()
+    sensor = SensorSpec(range_m=5)
     from lunar_drl_exploration.decision import DecisionCore
-    observation,again=DecisionCore(task(29,7,32,10),sensor).observe(s)
-    assert again.available and len(observation.goals)>0
-    assert any(observation.features[:,3:11].max(axis=1)>0)
+    observation, report = DecisionCore(task(29,7,32,10), sensor).observe(s)
+    assert report.available and not report.completed
+    assert report.reason_code == "TASK_NOT_OBSERVED"
+    assert len(report.frontier_cells) == 0 and len(observation.goals) > 0
+    assert not np.any(observation.features[:,3:11])
 
 
-def test_optical_movement_frontier_requires_entry_and_unblocked_sight():
-    for mode in ('no_entry','opaque'):
-        s=_outside_task_known_band(**{mode:True})
-        report=TaskAnalyzer(task(29,7,32,10),SensorSpec(range_m=5)).update(s)
-        assert report.available and report.exhausted,mode
-        assert len(report.frontier_cells)==0,mode
-    s=_outside_task_known_band()
-    report=TaskAnalyzer(task(2,6,5,10),SensorSpec(range_m=5)).update(s)
-    assert report.available and report.exhausted and not len(report.frontier_cells)
+def test_already_observed_task_has_no_external_investigation_obligation():
+    for mode in ({}, {"no_entry": True}, {"opaque": True}):
+        s = _outside_task_known_band(**mode)
+        report = TaskAnalyzer(task(2,6,5,10), SensorSpec(range_m=5)).update(s)
+        assert report.available and report.exhausted and report.completed
+        assert len(report.frontier_cells) == 0

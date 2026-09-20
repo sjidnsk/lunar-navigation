@@ -13,8 +13,6 @@ def parser():
             cmd.add_argument('--config', type=Path)
             cmd.add_argument('--sensor-range', type=float)
             cmd.add_argument('--sensor-fov', type=float)
-            cmd.add_argument('--coverage-target',type=float,
-                help='measured coverage lower bound required to finish; 1 means strict exhaustion')
         if name == 'train':
             cmd.add_argument('--resume', action='store_true', help='restore output-dir/resume.pt; start new environment episodes')
             cmd.add_argument('--output-dir')
@@ -61,8 +59,6 @@ def load_config(args):
         config = replace(config, sensor=replace(config.sensor, range_m=args.sensor_range))
     if args.sensor_fov is not None:
         config = replace(config, sensor=replace(config.sensor, fov_deg=args.sensor_fov))
-    if getattr(args,'coverage_target',None) is not None:
-        config=replace(config,coverage_target=args.coverage_target)
     if args.command == 'train':
         overrides = any(getattr(args, key) is not None for key in ('probe_warmup', 'probe_extent', 'probe_budget'))
         if overrides and not args.probe: raise ValueError('probe overrides require --probe')

@@ -108,7 +108,7 @@ def worker_main(pipe, config_record, env_id, *, domain_base=210,
                 if result['kind'] == 'RESET_DONE':
                     send(dict(kind='SCENE', payload=dumps_transport(result['scenes']), metadata=result['metadata']))
                     if result['completed']:
-                        send(dict(kind='EPISODE_END', reason='EXHAUSTED' if result['exhausted'] else 'COVERAGE_REACHED', zero_decisions=True))
+                        send(dict(kind='EPISODE_END', reason='EXHAUSTED', zero_decisions=True))
                         if not stopping: send(dict(kind='NEED_RESET'))
                     elif not stopping:
                         send(dict(kind='READY', payload=dumps_transport(result['observation'])))

@@ -1,11 +1,10 @@
 """Replay recorded goals through the native navigator and public controller.
 
 No Actor/learner/replay updates. Inputs are the earlier diagnostic JSON goal
-sequences, not routes obtained from the new completion bound. One isolated
+sequences, not routes obtained from the current opportunity logic. One isolated
 Jazzy environment runs at a time and every result remains in the output JSON.
 """
 import argparse
-from dataclasses import replace
 import json
 from pathlib import Path
 import time
@@ -24,14 +23,9 @@ def assess(env):
     x1,y1=min(w.known.shape[1],x+env.terrain.shape[1]),min(w.known.shape[0],y+env.terrain.shape[0])
     mapped[y0:y1,x0:x1]=env.reference.mask()[y0-y:y1-y,x0-x:x1-x]
     remaining=mapped&~w.known
-    missing=remaining&~env.core.analyzer.remaining_mask
     coverage=env.reference.coverage_ratio(env.privileged.observed)
-    lower=report.coverage_lower_bound
-    return dict(coverage=coverage,coverage_lower_bound=lower,
-        remaining_area_upper_m2=report.remaining_area_upper_m2,
+    return dict(coverage=coverage,reached_80=coverage>=.8,reached_99=coverage>=.99,
         reference_remaining_m2=float(remaining.sum()*res**2),
-        missed_true_remaining_cells=int(missing.sum()),
-        bound_valid=not bool(missing.any()) and (lower is None or lower<=coverage+1e-12),
         completed=report.completed,exhausted=report.exhausted,available=report.available,
         frontiers=len(report.frontier_cells),distance_m=env.plant.distance_m)
 
@@ -39,14 +33,13 @@ def assess(env):
 def run(args):
     config=load_config(SimpleNamespace(config=args.config,sensor_range=None,sensor_fov=None,
                                       command='evaluate'))
-    config=replace(config,coverage_target=args.target)
     captures=json.loads((args.recorded_dir/'capture-results.json').read_text(encoding='utf-8'))
     sequences={row['family']:row for row in captures}
     sequences['moon']=json.loads((args.recorded_dir/'route-results.json').read_text(encoding='utf-8'))
     results=[]
     for family in args.families:
         env=RosExplorationEnv(config,0,domain_base=args.domain)
-        record=dict(family=family,seed=args.seed,extent_m=args.extent,coverage_target=args.target,
+        record=dict(family=family,seed=args.seed,extent_m=args.extent,
                     mode='recorded_goal_replay',steps=[],error=None)
         start=time.monotonic()
         try:
@@ -66,7 +59,7 @@ def run(args):
                 record['steps'].append(row)
                 print(json.dumps(dict(family=family,**{k:v for k,v in row.items()
                     if k not in ('planning_evidence','active_references')})),flush=True)
-                if result.reason_code!='GOAL_REACHED' or not row['available'] or not row['bound_valid']:break
+                if result.reason_code!='GOAL_REACHED' or not row['available']:break
             record['final']=assess(env)
         except Exception:
             record['error']=traceback.format_exc();print(record['error'],flush=True)
@@ -85,7 +78,6 @@ if __name__=='__main__':
     p.add_argument('--families',nargs='+',choices=['moon','cave'],default=['moon','cave'])
     p.add_argument('--seed',type=int,default=2026091901)
     p.add_argument('--extent',type=float,default=40.)
-    p.add_argument('--target',type=float,default=.99)
     p.add_argument('--domain',type=int,default=225)
     rows=run(p.parse_args())
-    raise SystemExit(int(any(r['error'] or any(not s['bound_valid'] for s in r['steps']) for r in rows)))
+    raise SystemExit(int(any(r['error'] or any(s['reason']!='GOAL_REACHED' or not s['available'] for s in r['steps']) for r in rows)))
