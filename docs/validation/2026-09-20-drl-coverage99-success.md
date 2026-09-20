@@ -22,4 +22,4 @@
 
 固定月表记录目标回放（seed2026091901，40 m）在第58步达到99.0994885%，152.44 m，completed/terminated为真，exhausted为假，仍有70个观测接口；所有58步GOAL_REACHED，无错误。此回放绕开Actor，不是策略性能评估；奖励发放由env.step回归测试验证。证据位于仓库外 ~/.cache/lunar-drl-coverage-completion/coverage99-{integrated-build,integrated-tests,native-tests,moon-replay}.log及moon-replay.json。
 
-正式训练启动结果随后记录。Humble/Orin/真实课题三/实车均NOT_RUN；本次验证不证明策略收敛或循环已解决。
+正式训练已在独立终端启动，run.json代码版本e7020edc、resume=false、CUDA、8环境，gamma=1、success_coverage=0.99、completion_bonus=5、保存间隔1800秒与新终止/奖励身份均已核对。首批185条转移覆盖全部8环境，处于1024条预热采集阶段；初始化检查点已写入。旧输出保留。Humble/Orin/真实课题三/实车均NOT_RUN；本次验证不证明策略收敛或循环已解决。
